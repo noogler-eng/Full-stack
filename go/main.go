@@ -243,6 +243,11 @@ func main() {
 	// we can pass any number of arguments to a function using varadic function, we can use
 	// it to pass any number of arguments to a function.
 	fmt.Println(varadicFunc(1, 2, 3, 4, 5))
+
+	myCounterVariable := counter()
+	fmt.Println(myCounterVariable())
+	fmt.Println(myCounterVariable())
+	fmt.Println(myCounterVariable())
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -270,7 +275,7 @@ func returnFunc() func(a int) int {
 }
 
 // here nums in comming in form of slice, we can pass any number of arguments to
-// this function. we can use interface{} for any type accepting, but it is not a 
+// this function. we can use interface{} for any type accepting, but it is not a
 // good practice to use interface{} for any type accepting.
 func varadicFunc(nums ...int) int {
 	var sum int = 0
@@ -278,4 +283,12 @@ func varadicFunc(nums ...int) int {
 		sum += num
 	}
 	return sum
+}
+
+func counter() func() int {
+	count := 0
+	return func() int {
+		count++
+		return count
+	}
 }
