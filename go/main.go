@@ -124,13 +124,13 @@ func main() {
 	// interface {} means any type, it can hold any value of any type.
 	// It is similar to Object in Java or Any in Kotlin.
 	whoAmI := func(i interface{}) {
-		switch i := i.(type) {
+		switch t := i.(type) {
 		case int:
 			fmt.Println("I am an int")
 		case string:
 			fmt.Println("I am a string")
 		default:
-			fmt.Printf("I don't know what I am, but I am of type %T\n", i)
+			fmt.Printf("I don't know what I am, but I am of type %T\n", t)
 		}
 	}
 	whoAmI("sharad")
