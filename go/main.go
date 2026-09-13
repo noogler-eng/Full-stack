@@ -201,4 +201,51 @@ func main() {
 	// maps.Equal() function is used to compare two maps for equality. It returns true
 	// if both maps have the same keys and values, and false otherwise.
 	fmt.Println(maps.Equal(m, m))
+
+	nums = []int{1, 2, 3, 4, 5}
+	var sum int = 0
+	// _ is index, we can use it if we don't want to use the index.
+	// also acts same as key, value. where key is index
+	for _, value := range nums {
+		sum += value
+		fmt.Println(value)
+	}
+	fmt.Println("sum of nums is", sum)
+
+	for _, c := range "sharad" {
+		fmt.Println(string(c), "unicode code point is", c)
+	}
+
+	_, _, sum = add(1, 2)
+	fmt.Println("sum: ", sum)
+
+	var lang = getLanguages()
+	fmt.Println("languages: ", lang)
+
+	for _, l := range lang {
+		fmt.Println(l)
+	}
+
+	// passing a function as an argument to another function, we can use it to pass a function
+	// as an argument to another function.
+	// anonymous function is a function without a name, we can use it to create a function
+	// without a name and pass it as an argument to another function.
+	fn := func(a int) int {
+		return a * 2
+	}
+	processIt(fn)
+}
+
+// function can return multiple values, we can use it to return multiple values
+// from a function.
+func add(a int, b int) (int, int, int) {
+	return a, b, a + b
+}
+
+func getLanguages() []string {
+	return []string{"Go", "Python", "Java", "C++"}
+}
+
+func processIt(fn func(a int) int) {
+	fmt.Println(fn(5))
 }
