@@ -11,6 +11,15 @@ import (
 // a value to it outside the main function.
 const DEPLOYMENT_ENV = "production"
 
+// structs
+type Order struct {
+	id         int
+	price      float64
+	name       string
+	status     string
+	creaetedAt time.Time
+}
+
 func main() {
 	fmt.Println("Hello, World!")
 
@@ -257,6 +266,14 @@ func main() {
 	changeNumByPointer(&myNum)
 	fmt.Println("num outside changeNumByPointer function: ", myNum, &myNum)
 
+	order := Order{
+		id:         1,
+		price:      100.0,
+		name:       "Order 1",
+		status:     "pending",
+		creaetedAt: time.Now(),
+	}
+	fmt.Println(order, order.id, order.price, order.name, order.status, order.creaetedAt)
 }
 
 // function can return multiple values, we can use it to return multiple values
