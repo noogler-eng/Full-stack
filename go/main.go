@@ -45,10 +45,21 @@ func main() {
 	fmt.Println(PORT, HOST)
 
 	// lopping through for only in go, go not have while keyword
+	// same keywords like continue and break are also available in go.
 	for i := 0; i < 5; i++ {
 		fmt.Println(i)
 	}
 
+	// range is used to iterate over elements in a variety of data 
+	// structures, including arrays, slices, maps, and strings.
+	for i := range 3 {
+		fmt.Println(i)
+	}
 
+	for i := range "sharad" {
+		fmt.Println(i)
+	}
+
+	
 
 }
