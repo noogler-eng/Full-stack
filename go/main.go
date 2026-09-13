@@ -112,7 +112,7 @@ func main() {
 		fmt.Println("default")
 	}
 
-	// time package is used to work with time and date in go. Weekday() 
+	// time package is used to work with time and date in go. Weekday()
 	// method returns the day of the week for a given time.Time value.
 	switch time.Now().Weekday() {
 	case time.Saturday, time.Sunday:
@@ -120,5 +120,19 @@ func main() {
 	default:
 		fmt.Println("It's a weekday.")
 	}
+
+	// interface {} means any type, it can hold any value of any type.
+	// It is similar to Object in Java or Any in Kotlin.
+	whoAmI := func(i interface{}) {
+		switch i := i.(type) {
+		case int:
+			fmt.Println("I am an int")
+		case string:
+			fmt.Println("I am a string")
+		default:
+			fmt.Printf("I don't know what I am, but I am of type %T\n", i)
+		}
+	}
+	whoAmI("sharad")
 
 }
