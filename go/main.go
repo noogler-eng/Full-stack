@@ -50,7 +50,7 @@ func main() {
 		fmt.Println(i)
 	}
 
-	// range is used to iterate over elements in a variety of data 
+	// range is used to iterate over elements in a variety of data
 	// structures, including arrays, slices, maps, and strings.
 	for i := range 3 {
 		fmt.Println(i)
@@ -60,6 +60,12 @@ func main() {
 		fmt.Println(i)
 	}
 
-	
+	// if else statement in go, go does not have ternary operator.
+	age = 18
+	if age >= 18 {
+		fmt.Println("we can vote")
+	} else {
+		fmt.Println("we cannot vote")
+	}
 
 }
