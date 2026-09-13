@@ -234,6 +234,11 @@ func main() {
 		return a * 2
 	}
 	processIt(fn)
+	// no new function will be called on calling variable multiplyBy2, it will use the same
+	// function defined in returnFunc() function.
+	multiplyBy2 := returnFunc()
+	fmt.Println(multiplyBy2(5))
+	fmt.Println(multiplyBy2(2))
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -248,4 +253,14 @@ func getLanguages() []string {
 
 func processIt(fn func(a int) int) {
 	fmt.Println(fn(5))
+}
+
+func returnFunc() func(a int) int {
+	// we can implement here cachec as it is works as a global for this function,
+	// but it is not a good practice to use global variables.
+	fn := func(a int) int {
+		return a * 2
+	}
+
+	return fn
 }
