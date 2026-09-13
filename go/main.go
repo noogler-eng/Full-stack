@@ -248,6 +248,15 @@ func main() {
 	fmt.Println(myCounterVariable())
 	fmt.Println(myCounterVariable())
 	fmt.Println(myCounterVariable())
+
+	// Pointers
+	var myNum int = 10
+	changeNum(myNum)
+	fmt.Println("num outside changeNum function: ", myNum)
+
+	changeNumByPointer(&myNum)
+	fmt.Println("num outside changeNumByPointer function: ", myNum, &myNum)
+
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -291,4 +300,16 @@ func counter() func() int {
 		count++
 		return count
 	}
+}
+
+// variable num is passed by value, so any changes made to num inside the function will
+// not affect the original variable outside the function.
+func changeNum(num int) {
+	num = 5
+	fmt.Println("num inside changeNum function: ", num)
+}
+
+func changeNumByPointer(num *int) {
+	*num = 1
+	fmt.Println("num inside changeNumByPointer function: ", *num, num, &num)
 }
