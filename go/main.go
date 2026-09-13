@@ -239,6 +239,10 @@ func main() {
 	multiplyBy2 := returnFunc()
 	fmt.Println(multiplyBy2(5))
 	fmt.Println(multiplyBy2(2))
+
+	// we can pass any number of arguments to a function using varadic function, we can use
+	// it to pass any number of arguments to a function.
+	fmt.Println(varadicFunc(1, 2, 3, 4, 5))
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -263,4 +267,15 @@ func returnFunc() func(a int) int {
 	}
 
 	return fn
+}
+
+// here nums in comming in form of slice, we can pass any number of arguments to
+// this function. we can use interface{} for any type accepting, but it is not a 
+// good practice to use interface{} for any type accepting.
+func varadicFunc(nums ...int) int {
+	var sum int = 0
+	for _, num := range nums {
+		sum += num
+	}
+	return sum
 }
