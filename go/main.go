@@ -274,6 +274,8 @@ func main() {
 		creaetedAt: time.Now(),
 	}
 	fmt.Println(order, order.id, order.price, order.name, order.status, order.creaetedAt)
+	order.changeStatus("completed")
+	fmt.Println(order, order.id, order.price, order.name, order.status, order.creaetedAt)
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -329,4 +331,12 @@ func changeNum(num int) {
 func changeNumByPointer(num *int) {
 	*num = 1
 	fmt.Println("num inside changeNumByPointer function: ", *num, num, &num)
+}
+
+// receiver function, it is a function that is associated with a type, we can use it
+// to define methods for a type. receiver function can be defined for any type, including
+// built-in types. we are using pointer receiver here, so that we can modify the original
+// value of the struct.
+func (o *Order) changeStatus(status string) {
+	o.status = status
 }
