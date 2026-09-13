@@ -276,6 +276,9 @@ func main() {
 	fmt.Println(order, order.id, order.price, order.name, order.status, order.creaetedAt)
 	order.changeStatus("completed")
 	fmt.Println(order, order.id, order.price, order.name, order.status, order.creaetedAt)
+
+	neworder := newOrder(2, 200.0, "Order 2")
+	fmt.Println(neworder, neworder.id, neworder.price, neworder.name, neworder.status, neworder.creaetedAt)
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -339,4 +342,17 @@ func changeNumByPointer(num *int) {
 // value of the struct.
 func (o *Order) changeStatus(status string) {
 	o.status = status
+}
+
+// making an order using a constructor function, it is a function that returns a pointer to
+// a struct, we can use it to create a new instance of a struct. we are retuning the pointer
+// to the struct, so that we can modify the original value of the struct.
+func newOrder(id int, price float64, name string) *Order {
+	return &Order{
+		id:         id,
+		price:      price,
+		name:       name,
+		status:     "pending",
+		creaetedAt: time.Now(),
+	}
 }
