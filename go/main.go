@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -135,11 +136,47 @@ func main() {
 	}
 	whoAmI("sharad")
 
-	// array, if we dont initlize the element in array, by default it will 
+	// array, if we dont initlize the element in array, by default it will
 	// be initialized to zero value of the type.
+	// - Fixed size, cannot be resized, and all elements are of the same type.
+	// - Memory optmzation
+	// - Constant time access to elements, O(1) time complexity.
 	var arr [5]int
 	arr[0] = 1
 	arr[0] = 10
 	fmt.Println(arr, len(arr))
 
+	arr2 := [3]int{1, 2, 10}
+	fmt.Println(arr2, len(arr2))
+
+	arr3 := [2][2]int{{1, 2}, {3, 4}}
+	fmt.Println(arr3, len(arr3))
+
+	// slices - dynamic arrays, can be resized, and all elements are of the same type.
+	// - Dynamic size, can be resized, and all elements are of the same type.
+	// - Memory optimization, but not as good as arrays.
+	// - Constant time access to elements, O(1) time complexity.
+	// - useful inbuilt methods like append, copy, and len.
+	slice := []int{1, 2, 3}
+	fmt.Println(slice, len(slice), cap(slice))
+	slice = append(slice, 4)
+	fmt.Println(slice, len(slice), cap(slice))
+
+	// it will not create a nil slice, but it will create a slice with length 5 and
+	// capacity 10 assign value like 0.
+	var nums = make([]int, 5, 10)
+	fmt.Println(nums, len(nums), cap(nums))
+
+	var nums2 = make([]int, len(nums), cap(nums))
+	copy(nums2, nums)
+	fmt.Println(nums, len(nums), cap(nums))
+	fmt.Println(nums2, len(nums2), cap(nums2))
+
+	fmt.Println(slice[0:2])
+	// matching index wise element starting from 0 index, if any element is not matching 
+	// it will return false.
+	fmt.Println(slices.Equal(nums, nums2))
+	fmt.Println(slices.Equal(nums, slice))
+
+	
 }
