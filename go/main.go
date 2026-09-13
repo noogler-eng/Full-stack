@@ -61,11 +61,30 @@ func main() {
 	}
 
 	// if else statement in go, go does not have ternary operator.
-	age = 18
-	if age >= 18 {
+	// we can use if else, if else if, and switch statements in go.
+	// assign in same line as if statement, but the variable will be
+	// scoped to the if statement.
+	if age = 18; age >= 18 {
 		fmt.Println("we can vote")
 	} else {
 		fmt.Println("we cannot vote")
+	}
+
+	// && and || are logical operators in go, && is used for logical
+	// AND and || is used for logical OR.
+	role := "admin"
+	isAdmin := true
+
+	if role == "admin" && isAdmin {
+		fmt.Println("we can access admin panel")
+	} else {
+		fmt.Println("we cannot access admin panel")
+	}
+
+	if role == "admin" || isAdmin {
+		fmt.Println("we can access admin panel")
+	} else {
+		fmt.Println("we cannot access admin panel")
 	}
 
 }
