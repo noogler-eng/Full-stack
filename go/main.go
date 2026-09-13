@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // we can declare outside the main function, but we cannot assign
 // a value to it outside the main function.
@@ -85,6 +88,37 @@ func main() {
 		fmt.Println("we can access admin panel")
 	} else {
 		fmt.Println("we cannot access admin panel")
+	}
+
+	// switch dont need to have break statement, it will automatically
+	// break after.
+	i := 3
+	switch i {
+	case 1:
+		fmt.Println("one")
+	case 2:
+		fmt.Println("two")
+	case 3:
+		fmt.Println("three")
+	default:
+		fmt.Println("default")
+	}
+
+	// multiple cases can be combined in a single case statement.
+	switch i {
+	case 1, 2, 3:
+		fmt.Println("one, two or three")
+	default:
+		fmt.Println("default")
+	}
+
+	// time package is used to work with time and date in go. Weekday() 
+	// method returns the day of the week for a given time.Time value.
+	switch time.Now().Weekday() {
+	case time.Saturday, time.Sunday:
+		fmt.Println("It's the weekend!")
+	default:
+		fmt.Println("It's a weekday.")
 	}
 
 }
