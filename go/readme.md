@@ -6,6 +6,6 @@
 5. Static typing and compilation
 
 ## Commands
-go build <filename>
-./main
-go run <filepath>
+- go build <file_name>
+- ./main
+- go run <file_path>
