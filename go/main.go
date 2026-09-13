@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 )
@@ -173,10 +174,31 @@ func main() {
 	fmt.Println(nums2, len(nums2), cap(nums2))
 
 	fmt.Println(slice[0:2])
-	// matching index wise element starting from 0 index, if any element is not matching 
+	// matching index wise element starting from 0 index, if any element is not matching
 	// it will return false.
 	fmt.Println(slices.Equal(nums, nums2))
 	fmt.Println(slices.Equal(nums, slice))
 
-	
+	// maps
+	m := make(map[string]string)
+	m["name"] = "sharad"
+	m["age"] = "30"
+	m["isMarried"] = "false"
+	fmt.Println(m, len(m))
+
+	for key, value := range m {
+		fmt.Println(key, value)
+	}
+
+	// non-existent key will gives us empty value of the type, and second return value
+	// will be false.
+	// remember: go can return multiple values
+	_, ok := m["non-existent-key"]
+	if !ok {
+		fmt.Println("key does not exist")
+	}
+
+	// maps.Equal() function is used to compare two maps for equality. It returns true
+	// if both maps have the same keys and values, and false otherwise.
+	fmt.Println(maps.Equal(m, m))
 }
