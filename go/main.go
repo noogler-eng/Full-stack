@@ -135,4 +135,11 @@ func main() {
 	}
 	whoAmI("sharad")
 
+	// array, if we dont initlize the element in array, by default it will 
+	// be initialized to zero value of the type.
+	var arr [5]int
+	arr[0] = 1
+	arr[0] = 10
+	fmt.Println(arr, len(arr))
+
 }
