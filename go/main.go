@@ -20,6 +20,21 @@ type Order struct {
 	creaetedAt time.Time
 }
 
+type Customer struct {
+	id        int
+	name      string
+	phone     string
+	address   Address
+	createdAt time.Time
+}
+
+type Address struct {
+	street  string
+	city    string
+	state   string
+	zipCode string
+}
+
 func main() {
 	fmt.Println("Hello, World!")
 
@@ -279,6 +294,15 @@ func main() {
 
 	neworder := newOrder(2, 200.0, "Order 2")
 	fmt.Println(neworder, neworder.id, neworder.price, neworder.name, neworder.status, neworder.creaetedAt)
+
+	customer := Customer{
+		id:        1,
+		name:      "Sharad",
+		phone:     "1234567890",
+		address:   Address{street: "123 Main St", city: "Anytown", state: "CA", zipCode: "12345"},
+		createdAt: time.Now(),
+	}
+	fmt.Println(customer, customer.id, customer.name, customer.phone, customer.address, customer.createdAt)
 }
 
 // function can return multiple values, we can use it to return multiple values
