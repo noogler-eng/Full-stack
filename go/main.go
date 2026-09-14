@@ -303,6 +303,8 @@ func main() {
 		createdAt: time.Now(),
 	}
 	fmt.Println(customer, customer.id, customer.name, customer.phone, customer.address, customer.createdAt)
+	fmt.Println(customer.address.zipCode)
+	
 }
 
 // function can return multiple values, we can use it to return multiple values
