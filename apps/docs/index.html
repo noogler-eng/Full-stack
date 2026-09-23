@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mobile App Development — Native vs React Native vs Flutter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-dot"></span> Mobile Dev Guide</a>
+    <nav class="crumbs">
+      <a href="index.html" class="active">Overview</a>
+      <a href="native.html">Android &amp; iOS (Native)</a>
+      <a href="react-native.html">React Native</a>
+      <a href="flutter.html">Flutter</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Frontend → Mobile · Reference Guide</div>
+    <h1>Native (Android + iOS), React Native &amp; Flutter</h1>
+    <p class="lede">
+      A grounded, no-fluff walkthrough for a frontend engineer moving into mobile: how each stack is
+      built internally, how a screen actually gets pixels on the device, lifecycle, project/package
+      structure, the standard dependencies you'll see in real codebases, and when to reach for which.
+    </p>
+  </div>
+
+  <h2><span class="num">01</span>How to read this guide</h2>
+  <p>
+    Four interconnected pages. Each platform page follows the same shape — <strong>what it is →
+    language &amp; tooling → architecture → internal rendering pipeline → lifecycle → project
+    structure (app vs UI packages vs API/network packages) → standard dependencies → pros/cons</strong>
+    — so you can jump between them and compare apples to apples. The last page lines all three up
+    side by side.
+  </p>
+
+  <div class="card-grid">
+    <a class="card" href="native.html">
+      <span class="tag native">Native</span>
+      <h3>Android &amp; iOS (Native)</h3>
+      <p>Kotlin/Jetpack Compose + Swift/SwiftUI. Two separate codebases, each compiled straight to
+      platform machine code with full OS access.</p>
+    </a>
+    <a class="card" href="react-native.html">
+      <span class="tag rn">React Native</span>
+      <h3>React Native</h3>
+      <p>JavaScript/TypeScript + React. One codebase, a JS engine, and a bridge (or the new JSI/Fabric
+      architecture) into real native UI components.</p>
+    </a>
+    <a class="card" href="flutter.html">
+      <span class="tag flutter">Flutter</span>
+      <h3>Flutter</h3>
+      <p>Dart, compiled ahead-of-time. One codebase that draws every pixel itself via its own engine
+      and rendering layer — it doesn't use native UI widgets at all.</p>
+    </a>
+    <a class="card" href="comparison.html">
+      <span class="tag compare">Compare</span>
+      <h3>Side-by-side Comparison</h3>
+      <p>Performance, team size, hiring, code-sharing, startup time, app size, and a decision table
+      for "which one should I actually pick."</p>
+    </a>
+  </div>
+
+  <h2><span class="num">02</span>The one-paragraph mental model</h2>
+
+  <div class="split">
+    <div class="col pros">
+      <h4>Native (Android/iOS)</h4>
+      <ul>
+        <li>Your code <em>is</em> the OS's own UI framework — no translation layer.</li>
+        <li>Maximum performance &amp; platform capability, minimum shared code.</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>React Native</h4>
+      <ul>
+        <li>Your JS describes a UI tree; RN turns that tree into <em>real</em> native views.</li>
+        <li>You share logic across platforms, but the visible widgets are still native.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout blue">
+    <strong>Flutter, in one line</strong>
+    Flutter doesn't ask the OS to draw a button — it draws the button itself, pixel by pixel, using
+    its own graphics engine (Skia/Impeller), and only touches native OS APIs for things like camera,
+    GPS, or notifications.
+  </div>
+
+  <h2><span class="num">03</span>Quick-glance comparison</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Dimension</th><th>Native</th><th>React Native</th><th>Flutter</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Language</td><td><code>Kotlin</code> / <code>Swift</code></td><td><code>JavaScript</code> / <code>TypeScript</code></td><td><code>Dart</code></td></tr>
+        <tr><td>UI rendering</td><td>Platform's own UI toolkit</td><td>Real native components (via bridge/Fabric)</td><td>Self-drawn (Skia/Impeller canvas)</td></tr>
+        <tr><td>Code sharing</td><td>~0% (two codebases)</td><td>70–95%</td><td>90–99%</td></tr>
+        <tr><td>Performance ceiling</td><td>Highest</td><td>High (native views + JS logic)</td><td>Very high (compiled, own renderer)</td></tr>
+        <tr><td>Hot reload</td><td>Limited</td><td>Yes (Fast Refresh)</td><td>Yes (Stateful Hot Reload)</td></tr>
+        <tr><td>Backed by</td><td>Google / Apple</td><td>Meta + community</td><td>Google</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="dim">Open any card above — every page cross-links to the others, and the comparison page ties it all together.</p>
+
+  <div class="pagenav">
+    <span></span>
+    <a class="next" href="native.html"><span class="lbl">Start with</span>Android &amp; iOS Native →</a>
+  </div>
+</main>
+
+</body>
+</html>

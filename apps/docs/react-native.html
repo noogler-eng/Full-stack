@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>React Native — Mobile Dev Guide</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-dot"></span> Mobile Dev Guide</a>
+    <nav class="crumbs">
+      <a href="index.html">Overview</a>
+      <a href="native.html">Android &amp; iOS (Native)</a>
+      <a href="react-native.html" class="active">React Native</a>
+      <a href="flutter.html">Flutter</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Platform 2 of 3 · Cross-platform</div>
+    <h1>React Native</h1>
+    <p class="lede">
+      Write your UI and logic once in JavaScript/TypeScript using React's component model. Under the
+      hood, React Native doesn't draw its own pixels — it asks Android and iOS to create and update
+      their own <em>real</em> native views. You're not shipping a mini-browser; you're shipping React
+      running against native widgets.
+    </p>
+  </div>
+
+  <div class="toc">
+    <div class="title">On this page</div>
+    <a href="#lang">Language &amp; Tooling</a>
+    <a href="#arch">Architecture</a>
+    <a href="#render">Rendering Pipeline</a>
+    <a href="#lifecycle">Lifecycle</a>
+    <a href="#structure">Project Structure</a>
+    <a href="#deps">Standard Dependencies</a>
+    <a href="#proscons">Pros &amp; Cons</a>
+  </div>
+
+  <h2 id="lang"><span class="num">01</span>Language &amp; Tooling</h2>
+
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td>Language</td><td><code>JavaScript</code> / <code>TypeScript</code></td></tr>
+        <tr><td>UI model</td><td>React components (JSX) — same mental model as React on the web</td></tr>
+        <tr><td>JS engine</td><td><code>Hermes</code> (default, RN's own JS engine, AOT bytecode) — historically JavaScriptCore</td></tr>
+        <tr><td>Bundler</td><td><code>Metro</code> — bundles &amp; transforms JS, powers Fast Refresh</td></tr>
+        <tr><td>CLI / framework</td><td><code>React Native CLI</code>, or <code>Expo</code> (managed workflow on top of RN)</td></tr>
+        <tr><td>Native glue</td><td>Still contains real <code>android/</code> (Gradle/Kotlin) and <code>ios/</code> (Xcode/Swift) projects</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    A crucial point people miss: an RN app is <em>not</em> "JS in a WebView." There's no browser and
+    no DOM. JavaScript only ever produces a description of the UI tree; native code does the actual
+    drawing using the same <code>UIView</code>/Android <code>View</code> classes a fully-native app would use.
+  </p>
+
+  <h2 id="arch"><span class="num">02</span>Architecture — Old Bridge vs New Architecture</h2>
+
+  <p>React Native has gone through a major architectural rewrite. Both are worth knowing since both exist in production apps today.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
+      <text x="210" y="20" text-anchor="middle" fill="var(--purple)" font-weight="700" font-size="13">LEGACY: THE BRIDGE</text>
+      <rect x="30" y="40" width="180" height="46" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+      <text x="120" y="68" text-anchor="middle" fill="var(--text)">JS Thread (React)</text>
+
+      <rect x="30" y="150" width="180" height="46" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="120" y="178" text-anchor="middle" fill="var(--text-dim)">Native UI Thread</text>
+
+      <g>
+        <rect x="90" y="96" width="60" height="44" rx="6" fill="var(--yellow-soft)" stroke="var(--yellow)"/>
+        <text x="120" y="114" text-anchor="middle" fill="var(--text)" font-size="10.5">Bridge</text>
+        <text x="120" y="128" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">(async JSON)</text>
+      </g>
+      <path d="M120 86 L120 96" stroke="var(--text-faint)" marker-end="url(#a1)"/>
+      <path d="M120 140 L120 150" stroke="var(--text-faint)" marker-end="url(#a1)"/>
+      <text x="230" y="120" fill="var(--text-faint)" font-size="10.5">serialized, batched,</text>
+      <text x="230" y="134" fill="var(--text-faint)" font-size="10.5">asynchronous — a real bottleneck</text>
+
+      <text x="650" y="20" text-anchor="middle" fill="var(--green)" font-weight="700" font-size="13">NEW ARCHITECTURE (JSI)</text>
+      <rect x="470" y="40" width="180" height="46" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="560" y="68" text-anchor="middle" fill="var(--text)">JS Thread (React)</text>
+
+      <rect x="740" y="40" width="90" height="46" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="785" y="60" text-anchor="middle" fill="var(--text-dim)" font-size="10.5">TurboModules</text>
+      <text x="785" y="74" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">(lazy native APIs)</text>
+
+      <rect x="470" y="150" width="180" height="46" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="560" y="172" text-anchor="middle" fill="var(--text-dim)" font-size="11">Shadow Tree (C++)</text>
+      <text x="560" y="186" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">layout via Yoga</text>
+
+      <rect x="700" y="150" width="140" height="46" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="770" y="172" text-anchor="middle" fill="var(--text)" font-size="11">Fabric Renderer</text>
+      <text x="770" y="186" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">→ real native views</text>
+
+      <path d="M560 86 L560 150" stroke="var(--text-faint)" marker-end="url(#a1)"/>
+      <path d="M650 173 L700 173" stroke="var(--text-faint)" marker-end="url(#a1)"/>
+      <path d="M650 63 L740 63" stroke="var(--text-faint)" marker-end="url(#a1)"/>
+      <text x="560" y="120" text-anchor="middle" fill="var(--text-faint)" font-size="10">JSI: direct C++ calls,</text>
+      <text x="560" y="134" text-anchor="middle" fill="var(--text-faint)" font-size="10">synchronous, no JSON</text>
+
+      <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker></defs>
+    </svg>
+    <figcaption>Old: JS and native only talk through an async, JSON-serializing Bridge. New: JSI lets JS hold direct references to C++ objects — synchronous, no serialization tax.</figcaption>
+  </figure>
+
+  <ul>
+    <li><strong>JSI (JavaScript Interface)</strong> — a C++ layer letting JS call native functions directly (and vice versa) without crossing the Bridge.</li>
+    <li><strong>Fabric</strong> — the new renderer; builds the UI tree in C++ (shared, not JS-only) and commits it to native views synchronously.</li>
+    <li><strong>TurboModules</strong> — native modules (camera, storage, etc.) are now loaded lazily, on first use, instead of all at app start.</li>
+    <li><strong>Codegen</strong> — generates type-safe native bindings from your TypeScript/Flow types at build time.</li>
+  </ul>
+
+  <h2 id="render"><span class="num">03</span>Rendering Pipeline</h2>
+  <ol>
+    <li>Your React components run on the <strong>JS thread</strong>, producing React elements (a virtual tree), same as React on web.</li>
+    <li>React Native's reconciler diffs this into a platform-agnostic <strong>Shadow Tree</strong>.</li>
+    <li><strong>Yoga</strong> (a cross-platform Flexbox layout engine written in C++) computes the actual x/y/width/height for every node.</li>
+    <li>The renderer (Fabric, or the old UIManager) commits the tree to <strong>real native views</strong> — <code>UIView</code> on iOS, <code>android.view.View</code> on Android.</li>
+    <li>From that point on, the OS's own rendering pipeline takes over exactly as described on the Native page.</li>
+  </ol>
+
+  <div class="callout">
+    <strong>Why this matters for performance</strong>
+    Because step 4 produces <em>real</em> platform views, scrolling, text rendering, and touch handling
+    feel native — RN isn't repainting a canvas like a game engine. The cost is in getting data between
+    JS and native efficiently, which is exactly what JSI/Fabric was built to fix.
+  </div>
+
+  <h2 id="lifecycle"><span class="num">04</span>Lifecycle</h2>
+  <p>Two lifecycles stack on top of each other: React's component lifecycle, and the underlying native app lifecycle (still there, just wrapped).</p>
+
+  <div class="split">
+    <div class="col pros">
+      <h4>React component lifecycle (hooks)</h4>
+      <ul>
+        <li><code>useState</code> / <code>useReducer</code> — local state init on first render</li>
+        <li><code>useEffect(fn, [])</code> — runs after mount (≈ <code>componentDidMount</code>)</li>
+        <li><code>useEffect(fn, [deps])</code> — runs on update when deps change</li>
+        <li><code>useEffect</code> cleanup function — runs on unmount</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Native app lifecycle (still underneath)</h4>
+      <ul>
+        <li><code>AppState</code> API exposes <code>active / background / inactive</code></li>
+        <li>Android's Activity lifecycle still runs — RN just wraps it in one root Activity</li>
+        <li>iOS's UIApplication lifecycle still runs — RN wraps it in one root view controller</li>
+        <li>Native modules can hook these directly when JS-level events aren't enough</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="structure"><span class="num">05</span>Project Structure</h2>
+  <p>An RN project is a JS/TS app <em>plus</em> two real native projects sitting alongside it.</p>
+
+  <div class="tree">my-app/
+  ├─ <span class="hl">android/</span>              <span class="comment"># real native Android project (Gradle/Kotlin)</span>
+  ├─ <span class="hl">ios/</span>                  <span class="comment"># real native iOS project (Xcode/Swift)</span>
+  ├─ src/
+  │  ├─ <span class="hl">ui/</span>                <span class="comment"># shared component/design-system package</span>
+  │  │  ├─ Button.tsx
+  │  │  └─ theme.ts
+  │  ├─ <span class="hl">api/</span>               <span class="comment"># network layer — separate from UI, screen-agnostic</span>
+  │  │  ├─ client.ts       <span class="comment"># axios/fetch instance, interceptors</span>
+  │  │  └─ endpoints/
+  │  ├─ screens/           <span class="comment"># feature screens — import from ui/ and api/ only</span>
+  │  ├─ navigation/         <span class="comment"># React Navigation stack/tab definitions</span>
+  │  ├─ store/              <span class="comment"># Redux Toolkit / Zustand global state</span>
+  │  └─ App.tsx
+  ├─ index.js              <span class="comment"># registers root component — RN's true entry point</span>
+  ├─ metro.config.js
+  ├─ babel.config.js
+  ├─ tsconfig.json
+  └─ package.json</div>
+
+  <div class="callout green">
+    <strong>Monorepo pattern at scale</strong>
+    Larger RN codebases turn <code>ui/</code> and <code>api/</code> into real separate workspace
+    packages (Yarn/PNPM workspaces or Nx/Turborepo), e.g. <code>packages/ui</code>,
+    <code>packages/api-client</code>, <code>apps/mobile</code> — so the design system and API layer
+    can be versioned and even reused by a React web app in the same monorepo.
+  </div>
+
+  <h2 id="deps"><span class="num">06</span>Standard Dependencies &amp; Their Roles</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>react-navigation</code></td><td>Screen/stack/tab navigation (most common choice)</td></tr>
+        <tr><td><code>@reduxjs/toolkit</code> / <code>zustand</code></td><td>Global app state management</td></tr>
+        <tr><td><code>axios</code> / <code>fetch</code></td><td>HTTP requests to your API</td></tr>
+        <tr><td><code>@tanstack/react-query</code></td><td>Server-state caching, refetching, pagination</td></tr>
+        <tr><td><code>@react-native-async-storage/async-storage</code></td><td>Simple key-value local persistence</td></tr>
+        <tr><td><code>react-native-reanimated</code></td><td>High-performance, native-thread animations</td></tr>
+        <tr><td><code>react-native-gesture-handler</code></td><td>Native-driven touch/gesture recognition</td></tr>
+        <tr><td><code>react-native-svg</code>, <code>react-native-fast-image</code></td><td>Vector graphics, optimized image loading</td></tr>
+        <tr><td><code>react-native-mmkv</code></td><td>Fast native key-value storage (alternative to AsyncStorage)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="proscons"><span class="num">07</span>Pros &amp; Cons</h2>
+  <div class="split">
+    <div class="col pros">
+      <h4>✓ Pros</h4>
+      <ul>
+        <li>One JS/TS codebase → both platforms, huge code reuse (70–95%)</li>
+        <li>Familiar to any React/web frontend engineer — same mental model</li>
+        <li>Real native UI components, not a rendered canvas — feels native</li>
+        <li>Fast Refresh + huge open-source ecosystem (npm)</li>
+        <li>Can still drop into native Kotlin/Swift modules when needed</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>✗ Cons</h4>
+      <ul>
+        <li>Still a JS runtime layer → some overhead vs pure native</li>
+        <li>Heavy native-module dependency trees can cause version/build pain</li>
+        <li>Platform-specific polish sometimes needs native code anyway</li>
+        <li>Large third-party dependency surface = more maintenance risk</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pagenav">
+    <a href="native.html"><span class="lbl">Back to</span>← Native</a>
+    <a class="next" href="flutter.html"><span class="lbl">Next</span>Flutter →</a>
+  </div>
+</main>
+
+</body>
+</html>

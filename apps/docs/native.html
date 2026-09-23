@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Native Android &amp; iOS — Mobile Dev Guide</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-dot"></span> Mobile Dev Guide</a>
+    <nav class="crumbs">
+      <a href="index.html">Overview</a>
+      <a href="native.html" class="active">Android &amp; iOS (Native)</a>
+      <a href="react-native.html">React Native</a>
+      <a href="flutter.html">Flutter</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Platform 1 of 3 · Native</div>
+    <h1>Android &amp; iOS — Native Development</h1>
+    <p class="lede">
+      "Native" means you write directly against the OS vendor's own SDK. There is no translation
+      layer, no bridge, no separate engine — your code compiles to what the platform itself runs.
+      Android and iOS are two completely separate stacks; a native app ships two codebases, one per OS.
+    </p>
+  </div>
+
+  <div class="toc">
+    <div class="title">On this page</div>
+    <a href="#lang">Language &amp; Tooling</a>
+    <a href="#arch">Architecture</a>
+    <a href="#render">Rendering Pipeline</a>
+    <a href="#lifecycle">Lifecycle</a>
+    <a href="#structure">Project Structure</a>
+    <a href="#deps">Standard Dependencies</a>
+    <a href="#proscons">Pros &amp; Cons</a>
+  </div>
+
+  <h2 id="lang"><span class="num">01</span>Language &amp; Tooling</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>Android</th><th>iOS</th></tr></thead>
+      <tbody>
+        <tr><td>Language</td><td><code>Kotlin</code> (was Java)</td><td><code>Swift</code> (was Objective-C)</td></tr>
+        <tr><td>IDE</td><td>Android Studio (IntelliJ-based)</td><td>Xcode</td></tr>
+        <tr><td>UI toolkit</td><td>Jetpack Compose (declarative) or XML Views (legacy)</td><td>SwiftUI (declarative) or UIKit (legacy)</td></tr>
+        <tr><td>Build system</td><td>Gradle (+ Kotlin DSL)</td><td>Xcodebuild / Swift Package Manager</td></tr>
+        <tr><td>Package manager</td><td>Gradle dependencies (Maven Central)</td><td>Swift Package Manager, CocoaPods</td></tr>
+        <tr><td>Runtime</td><td>ART (Android Runtime) — bytecode, AOT+JIT</td><td>Compiled Swift binary — native ARM machine code</td></tr>
+        <tr><td>Emulator/Simulator</td><td>Android Emulator (full OS image)</td><td>iOS Simulator (host-compiled, not a real device image)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Both platforms have moved from an imperative, view-mutation UI model (XML layouts + <code>findViewById</code>
+    on Android, UIKit's <code>UIView</code> subclassing on iOS) to a <strong>declarative</strong> one
+    (Compose, SwiftUI) — you describe <em>what</em> the UI should look like for a given state, and the
+    framework figures out the diffing itself. This mirrors the shift React made in the web world.
+  </p>
+
+  <h2 id="arch"><span class="num">02</span>Architecture</h2>
+  <p>Both stacks are layered: your app code sits on top of a UI framework, which sits on top of the OS's application framework, which sits on the kernel.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12.5">
+      <!-- Android stack -->
+      <text x="190" y="26" text-anchor="middle" fill="var(--green)" font-weight="700" font-size="14">ANDROID</text>
+      <g>
+        <rect x="60" y="38" width="260" height="40" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+        <text x="190" y="63" text-anchor="middle" fill="var(--text)">Your App (Kotlin / Compose)</text>
+
+        <rect x="60" y="90" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="190" y="115" text-anchor="middle" fill="var(--text-dim)">Jetpack / AndroidX Libraries</text>
+
+        <rect x="60" y="142" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="190" y="167" text-anchor="middle" fill="var(--text-dim)">Android Framework (Activity, View)</text>
+
+        <rect x="60" y="194" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="190" y="219" text-anchor="middle" fill="var(--text-dim)">ART Runtime (bytecode → machine code)</text>
+
+        <rect x="60" y="246" width="260" height="40" rx="8" fill="var(--bg-elevated)" stroke="var(--border)"/>
+        <text x="190" y="271" text-anchor="middle" fill="var(--text-faint)">Linux Kernel</text>
+      </g>
+
+      <!-- arrows -->
+      <g stroke="var(--text-faint)" stroke-width="1.5">
+        <line x1="190" y1="78" x2="190" y2="90"/>
+        <line x1="190" y1="130" x2="190" y2="142"/>
+        <line x1="190" y1="182" x2="190" y2="194"/>
+        <line x1="190" y1="234" x2="190" y2="246"/>
+      </g>
+
+      <!-- iOS stack -->
+      <text x="670" y="26" text-anchor="middle" fill="var(--blue)" font-weight="700" font-size="14">iOS</text>
+      <g>
+        <rect x="540" y="38" width="260" height="40" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+        <text x="670" y="63" text-anchor="middle" fill="var(--text)">Your App (Swift / SwiftUI)</text>
+
+        <rect x="540" y="90" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="670" y="115" text-anchor="middle" fill="var(--text-dim)">Cocoa Touch (UIKit, SwiftUI)</text>
+
+        <rect x="540" y="142" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="670" y="167" text-anchor="middle" fill="var(--text-dim)">Media / Core Services layer</text>
+
+        <rect x="540" y="194" width="260" height="40" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+        <text x="670" y="219" text-anchor="middle" fill="var(--text-dim)">Core OS (Swift runtime, libSystem)</text>
+
+        <rect x="540" y="246" width="260" height="40" rx="8" fill="var(--bg-elevated)" stroke="var(--border)"/>
+        <text x="670" y="271" text-anchor="middle" fill="var(--text-faint)">XNU / Darwin Kernel</text>
+      </g>
+      <g stroke="var(--text-faint)" stroke-width="1.5">
+        <line x1="670" y1="78" x2="670" y2="90"/>
+        <line x1="670" y1="130" x2="670" y2="142"/>
+        <line x1="670" y1="182" x2="670" y2="194"/>
+        <line x1="670" y1="234" x2="670" y2="246"/>
+      </g>
+    </svg>
+    <figcaption>Each layer only talks to the one directly below it — no bridge, no interpreter in between.</figcaption>
+  </figure>
+
+  <div class="callout">
+    <strong>Key idea</strong>
+    There is no "middle layer" translating your code. A Kotlin function call compiles down through the
+    same runtime Android itself is built on. This is <em>why</em> native has the performance ceiling —
+    every other approach adds at least one more layer between your code and the screen.
+  </div>
+
+  <h2 id="render"><span class="num">03</span>Internal Rendering Pipeline</h2>
+  <p>How a declared UI actually becomes pixels on screen, roughly:</p>
+
+  <div class="split">
+    <div class="col pros">
+      <h4>Android (Compose)</h4>
+      <ul>
+        <li><strong>Composition</strong> — your <code>@Composable</code> functions run and build a tree describing UI.</li>
+        <li><strong>Layout</strong> — each node measures &amp; places its children (single pass, parent-then-child).</li>
+        <li><strong>Draw</strong> — nodes emit draw instructions onto a <code>Canvas</code>, backed by Skia.</li>
+        <li><strong>SurfaceFlinger</strong> composites all app/system layers and hands the frame to the GPU.</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>iOS (SwiftUI / UIKit)</h4>
+      <ul>
+        <li><strong>Layout pass</strong> — SwiftUI's view tree resolves sizes/positions (or Auto Layout for UIKit).</li>
+        <li><strong>Core Animation</strong> — views become layers (<code>CALayer</code>) that own the actual pixels/texture.</li>
+        <li><strong>Rendering</strong> — Core Graphics/Metal rasterizes layers on the GPU.</li>
+        <li><strong>Compositor</strong> merges layers into the final framebuffer sent to the display.</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>
+    Both target <strong>60 / 120 fps</strong> by doing this whole pipeline in under ~8–16ms per frame,
+    and both ultimately hand off actual pixel rasterization to the GPU rather than the CPU.
+  </p>
+
+  <h2 id="lifecycle"><span class="num">04</span>Lifecycle</h2>
+  <p>Every screen has a life the OS controls, not you — it creates, pauses, and destroys your screens based on user navigation, memory pressure, and backgrounding.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
+      <text x="215" y="20" text-anchor="middle" fill="var(--green)" font-weight="700" font-size="13">ANDROID ACTIVITY</text>
+      <g fill="none" stroke="var(--green)" stroke-width="1.5">
+        <rect x="20" y="40" width="110" height="38" rx="19" fill="var(--green-soft)"/>
+        <rect x="160" y="40" width="110" height="38" rx="19" fill="var(--green-soft)"/>
+        <rect x="300" y="40" width="110" height="38" rx="19" fill="var(--green-soft)"/>
+      </g>
+      <text x="75" y="64" text-anchor="middle" fill="var(--text)">onCreate</text>
+      <text x="215" y="64" text-anchor="middle" fill="var(--text)">onStart</text>
+      <text x="355" y="64" text-anchor="middle" fill="var(--text)">onResume</text>
+      <path d="M130 59 L160 59" stroke="var(--text-faint)" marker-end="url(#arH)"/>
+      <path d="M270 59 L300 59" stroke="var(--text-faint)" marker-end="url(#arH)"/>
+
+      <g fill="none" stroke="var(--green)" stroke-width="1.5">
+        <rect x="300" y="110" width="110" height="38" rx="19" fill="var(--bg-card)"/>
+        <rect x="160" y="110" width="110" height="38" rx="19" fill="var(--bg-card)"/>
+        <rect x="20" y="110" width="110" height="38" rx="19" fill="var(--bg-card)"/>
+      </g>
+      <text x="355" y="134" text-anchor="middle" fill="var(--text-dim)">onPause</text>
+      <text x="215" y="134" text-anchor="middle" fill="var(--text-dim)">onStop</text>
+      <text x="75" y="134" text-anchor="middle" fill="var(--text-dim)">onDestroy</text>
+      <path d="M355 78 L355 110" stroke="var(--text-faint)" marker-end="url(#arH)"/>
+      <path d="M270 129 L300 129" stroke="var(--text-faint)" marker-end="url(#arHrev)" transform="scale(-1,1) translate(-580,0)"/>
+      <path d="M300 129 L270 129" stroke="var(--text-faint)" marker-end="url(#arH)"/>
+      <path d="M160 129 L130 129" stroke="var(--text-faint)" marker-end="url(#arH)"/>
+
+      <text x="215" y="180" text-anchor="middle" fill="var(--text-faint)" font-size="11">onPause/onStop are reversible (user can return via onRestart→onStart) · onDestroy is final</text>
+
+      <defs>
+        <marker id="arH" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>Android: onCreate → onStart → onResume (visible &amp; interactive) → onPause → onStop → onDestroy</figcaption>
+  </figure>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 130" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
+      <text x="215" y="20" text-anchor="middle" fill="var(--blue)" font-weight="700" font-size="13">iOS UIVIEWCONTROLLER</text>
+      <g fill="var(--blue-soft)" stroke="var(--blue)" stroke-width="1.5">
+        <rect x="10" y="40" width="150" height="38" rx="19"/>
+        <rect x="185" y="40" width="150" height="38" rx="19"/>
+        <rect x="360" y="40" width="150" height="38" rx="19"/>
+      </g>
+      <text x="85" y="64" text-anchor="middle" fill="var(--text)" font-size="11.5">viewDidLoad</text>
+      <text x="260" y="64" text-anchor="middle" fill="var(--text)" font-size="11.5">viewWillAppear</text>
+      <text x="435" y="64" text-anchor="middle" fill="var(--text)" font-size="11.5">viewDidAppear</text>
+      <path d="M160 59 L185 59" stroke="var(--text-faint)" marker-end="url(#arH2)"/>
+      <path d="M335 59 L360 59" stroke="var(--text-faint)" marker-end="url(#arH2)"/>
+
+      <g fill="var(--bg-card)" stroke="var(--border)" stroke-width="1.5">
+        <rect x="535" y="40" width="150" height="38" rx="19"/>
+        <rect x="710" y="40" width="140" height="38" rx="19"/>
+      </g>
+      <text x="610" y="64" text-anchor="middle" fill="var(--text-dim)" font-size="11.5">viewWillDisappear</text>
+      <text x="780" y="64" text-anchor="middle" fill="var(--text-dim)" font-size="11.5">viewDidDisappear</text>
+      <path d="M510 59 L535 59" stroke="var(--text-faint)" marker-end="url(#arH2)"/>
+      <path d="M685 59 L710 59" stroke="var(--text-faint)" marker-end="url(#arH2)"/>
+
+      <defs>
+        <marker id="arH2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>iOS: viewDidLoad (once) → viewWillAppear → viewDidAppear → … → viewWillDisappear → viewDidDisappear</figcaption>
+  </figure>
+
+  <p>
+    On top of per-screen lifecycles, both platforms also have an <strong>app-level</strong> lifecycle —
+    Android's <code>Application</code> class and process states (foreground/background/cached), iOS's
+    <code>UIApplicationDelegate</code> with states <code>Not Running → Inactive → Active → Background → Suspended</code>.
+    The OS can kill a backgrounded app at any time to reclaim memory — this is why saving/restoring state matters on both platforms.
+  </p>
+
+  <h2 id="structure"><span class="num">05</span>Project Structure</h2>
+  <p>Real native codebases are <strong>modularized</strong>: the app module wires things together, but UI and networking/data live in their own separate library modules/packages — not dumped in one giant app folder.</p>
+
+  <h3>Android — Gradle multi-module layout</h3>
+  <div class="tree">app/                      <span class="comment"># the installable module — DI graph, nav host, entry Activity</span>
+  └─ src/main/
+     ├─ java/com/app/     <span class="comment"># MainActivity, Application class</span>
+     └─ AndroidManifest.xml
+
+<span class="hl">:core:ui</span>/                <span class="comment"># design system — Compose theme, shared components</span>
+<span class="hl">:core:network</span>/           <span class="comment"># Retrofit/OkHttp clients, API interfaces, DTOs</span>
+<span class="hl">:core:database</span>/          <span class="comment"># Room DB, DAOs</span>
+<span class="hl">:core:common</span>/            <span class="comment"># utils, extensions shared everywhere</span>
+
+<span class="hl">:feature:profile</span>/        <span class="comment"># self-contained screen + its own ViewModel</span>
+<span class="hl">:feature:checkout</span>/       <span class="comment"># depends on :core:network + :core:ui only</span>
+
+settings.gradle.kts       <span class="comment"># declares every module above</span>
+build.gradle.kts          <span class="comment"># root-level plugin/version config</span></div>
+
+  <h3>iOS — Xcode project + local Swift Packages</h3>
+  <div class="tree">MyApp.xcodeproj/          <span class="comment"># project file, build settings, schemes</span>
+MyApp/
+  ├─ AppDelegate.swift / MyApp.swift   <span class="comment"># @main entry point</span>
+  ├─ Assets.xcassets                   <span class="comment"># images, colors, icons</span>
+  └─ Info.plist                        <span class="comment"># app config, permissions</span>
+
+Packages/
+  <span class="hl">DesignSystem/</span>          <span class="comment"># SwiftUI components, colors, typography — a local SPM package</span>
+  <span class="hl">NetworkKit/</span>            <span class="comment"># URLSession/Alamofire clients, Codable models</span>
+  <span class="hl">PersistenceKit/</span>        <span class="comment"># CoreData/SwiftData layer</span>
+  <span class="hl">FeatureProfile/</span>        <span class="comment"># one screen/flow, depends on DesignSystem + NetworkKit</span>
+
+Podfile / Package.swift   <span class="comment"># dependency manifests</span></div>
+
+  <div class="callout green">
+    <strong>Why split it this way</strong>
+    UI components and API/data clients go in their own packages so a feature module only ever depends
+    on <em>interfaces</em> (a design-system component, a network client), never on another feature
+    directly. It keeps build times down (Gradle/Xcode only rebuild what changed) and stops teams from
+    tangling screens together.
+  </div>
+
+  <h2 id="deps"><span class="num">06</span>Standard Dependencies &amp; Their Roles</h2>
+
+  <h3>Android</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>Jetpack Compose</code></td><td>Declarative UI toolkit — replaces XML layouts</td></tr>
+        <tr><td><code>Retrofit</code> + <code>OkHttp</code></td><td>Type-safe HTTP client for REST APIs</td></tr>
+        <tr><td><code>Room</code></td><td>SQLite ORM for local persistence/caching</td></tr>
+        <tr><td><code>Hilt</code> / <code>Dagger</code></td><td>Dependency injection — wires ViewModels, repos, clients</td></tr>
+        <tr><td><code>Kotlin Coroutines</code> + <code>Flow</code></td><td>Async work &amp; reactive data streams</td></tr>
+        <tr><td><code>Coil</code> / <code>Glide</code></td><td>Image loading &amp; caching</td></tr>
+        <tr><td><code>Navigation Compose</code></td><td>In-app screen navigation graph</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>iOS</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>SwiftUI</code></td><td>Declarative UI toolkit — replaces UIKit view controllers</td></tr>
+        <tr><td><code>URLSession</code> / <code>Alamofire</code></td><td>HTTP networking</td></tr>
+        <tr><td><code>SwiftData</code> / <code>Core Data</code></td><td>Local persistence layer</td></tr>
+        <tr><td><code>Combine</code> / <code>async-await</code></td><td>Reactive streams &amp; structured concurrency</td></tr>
+        <tr><td><code>SDWebImage</code> / <code>Kingfisher</code></td><td>Image loading &amp; caching</td></tr>
+        <tr><td><code>SwiftUI NavigationStack</code></td><td>In-app screen navigation</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="proscons"><span class="num">07</span>Pros &amp; Cons</h2>
+  <div class="split">
+    <div class="col pros">
+      <h4>✓ Pros</h4>
+      <ul>
+        <li>Best possible performance &amp; responsiveness — no intermediate layer</li>
+        <li>Full, day-one access to every new OS API (widgets, ARKit, Live Activities, etc.)</li>
+        <li>Best-in-class platform look, feel, and accessibility behavior</li>
+        <li>Smaller, more predictable app binaries per platform</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>✗ Cons</h4>
+      <ul>
+        <li>Two full codebases, two teams (or one team context-switching languages)</li>
+        <li>Every feature is built twice — slower time-to-market</li>
+        <li>Harder to keep both platforms visually/behaviorally in sync</li>
+        <li>Higher hiring cost — need Kotlin <em>and</em> Swift expertise</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pagenav">
+    <a href="index.html"><span class="lbl">Back to</span>← Overview</a>
+    <a class="next" href="react-native.html"><span class="lbl">Next</span>React Native →</a>
+  </div>
+</main>
+
+</body>
+</html>

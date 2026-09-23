@@ -304,6 +304,8 @@ func main() {
 	}
 	fmt.Println(customer, customer.id, customer.name, customer.phone, customer.address, customer.createdAt)
 	fmt.Println(customer.address.zipCode)
+
+	// interfaces
 	
 }
 
