@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flutter — Mobile Dev Guide</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-dot"></span> Mobile Dev Guide</a>
+    <nav class="crumbs">
+      <a href="index.html">Overview</a>
+      <a href="native.html">Android &amp; iOS (Native)</a>
+      <a href="react-native.html">React Native</a>
+      <a href="flutter.html" class="active">Flutter</a>
+      <a href="comparison.html">Comparison</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Platform 3 of 3 · Cross-platform</div>
+    <h1>Flutter</h1>
+    <p class="lede">
+      Flutter takes the opposite approach from React Native: instead of driving native OS widgets, it
+      brings its <strong>own rendering engine</strong> to every platform and draws every single pixel
+      itself — text, buttons, shadows, scrolling physics, all of it. The OS only provides a blank
+      canvas (a native window) and low-level services (camera, GPS, file system).
+    </p>
+  </div>
+
+  <div class="toc">
+    <div class="title">On this page</div>
+    <a href="#lang">Language &amp; Tooling</a>
+    <a href="#arch">Architecture</a>
+    <a href="#render">Rendering Pipeline</a>
+    <a href="#lifecycle">Lifecycle</a>
+    <a href="#structure">Project Structure</a>
+    <a href="#deps">Standard Dependencies</a>
+    <a href="#proscons">Pros &amp; Cons</a>
+  </div>
+
+  <h2 id="lang"><span class="num">01</span>Language &amp; Tooling</h2>
+
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td>Language</td><td><code>Dart</code> — object-oriented, garbage-collected, compiled AOT to native ARM/x64 code</td></tr>
+        <tr><td>UI model</td><td>"Everything is a widget" — declarative widget tree, similar shape to React/Compose</td></tr>
+        <tr><td>Engine</td><td>Flutter Engine (C/C++) — includes <code>Skia</code> or the newer <code>Impeller</code> renderer</td></tr>
+        <tr><td>Tooling</td><td>Flutter SDK, DevTools, Dart Analyzer</td></tr>
+        <tr><td>Build</td><td><code>flutter build</code> compiles Dart AOT + bundles the engine per platform</td></tr>
+        <tr><td>Package manager</td><td><code>pub.dev</code> via <code>pubspec.yaml</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Dart runs in two modes: <strong>JIT</strong> (Just-In-Time) during development for hot reload, and
+    <strong>AOT</strong> (Ahead-Of-Time, compiled straight to native machine code) for release builds —
+    which is a big reason Flutter release builds are fast and don't ship an interpreter.
+  </p>
+
+  <h2 id="arch"><span class="num">02</span>Architecture</h2>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 290" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12.5">
+      <rect x="230" y="20" width="400" height="52" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="430" y="42" text-anchor="middle" fill="var(--text)">Your App (Dart Widgets)</text>
+      <text x="430" y="58" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">Material / Cupertino widget libraries</text>
+
+      <rect x="230" y="90" width="400" height="52" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="430" y="112" text-anchor="middle" fill="var(--text-dim)">Flutter Framework (Dart)</text>
+      <text x="430" y="128" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">Widgets → Elements → RenderObjects</text>
+
+      <rect x="230" y="160" width="400" height="52" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="430" y="182" text-anchor="middle" fill="var(--text-dim)">Flutter Engine (C/C++)</text>
+      <text x="430" y="198" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">Skia / Impeller renderer, Dart runtime, text layout</text>
+
+      <rect x="30" y="230" width="180" height="46" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="120" y="258" text-anchor="middle" fill="var(--text)" font-size="11">Android embedder</text>
+      <rect x="340" y="230" width="180" height="46" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+      <text x="430" y="258" text-anchor="middle" fill="var(--text)" font-size="11">iOS embedder</text>
+      <rect x="650" y="230" width="180" height="46" rx="8" fill="var(--yellow-soft)" stroke="var(--yellow)"/>
+      <text x="740" y="258" text-anchor="middle" fill="var(--text)" font-size="11">Web / Desktop embedder</text>
+
+      <path d="M430 72 L430 90" stroke="var(--text-faint)" marker-end="url(#f1)"/>
+      <path d="M430 142 L430 160" stroke="var(--text-faint)" marker-end="url(#f1)"/>
+      <path d="M300 212 L150 230" stroke="var(--text-faint)" marker-end="url(#f1)"/>
+      <path d="M430 212 L430 230" stroke="var(--text-faint)" marker-end="url(#f1)"/>
+      <path d="M560 212 L710 230" stroke="var(--text-faint)" marker-end="url(#f1)"/>
+
+      <defs><marker id="f1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker></defs>
+    </svg>
+    <figcaption>The same Framework + Engine runs everywhere; only the thin "embedder" at the bottom is platform-specific (it just hands the engine a native window/surface to draw into).</figcaption>
+  </figure>
+
+  <div class="callout blue">
+    <strong>The core architectural bet</strong>
+    Because Flutter never touches <code>UIView</code> or Android <code>View</code>, there's no
+    translation layer <em>and</em> no per-platform UI inconsistency — the same pixels render
+    identically on every device. The trade-off: Flutter has to reimplement everything a native toolkit
+    gives you for free (text rendering, accessibility bridging, platform look-and-feel), which it does
+    via the Material and Cupertino widget sets.
+  </div>
+
+  <h2 id="render"><span class="num">03</span>Internal Rendering Pipeline</h2>
+  <p>Flutter's tree isn't one tree — it's three, each optimized for a different job:</p>
+  <ol>
+    <li><strong>Widget tree</strong> — immutable, lightweight config objects. Rebuilt constantly and cheaply (this is what <code>build()</code> returns).</li>
+    <li><strong>Element tree</strong> — mutable, persists across rebuilds. Reconciles new widgets against old ones (like React's fiber tree) and decides what actually changed.</li>
+    <li><strong>RenderObject tree</strong> — does the real work: layout (size/position) and painting. Only rebuilt when something in it truly changes.</li>
+  </ol>
+  <p>
+    The RenderObject tree paints onto a <strong>Skia</strong> (or, on newer versions, <strong>Impeller</strong>)
+    canvas, which rasterizes directly to the GPU — completely bypassing the platform's native UI
+    toolkit. Impeller was built to replace Skia's runtime shader compilation (a source of jank on iOS)
+    with pre-compiled shaders.
+  </p>
+
+  <h2 id="lifecycle"><span class="num">04</span>Lifecycle</h2>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
+      <text x="430" y="20" text-anchor="middle" fill="var(--blue)" font-weight="700" font-size="13">STATEFULWIDGET LIFECYCLE</text>
+
+      <rect x="20" y="40" width="140" height="42" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="90" y="66" text-anchor="middle" fill="var(--text)" font-size="11">createState()</text>
+
+      <rect x="200" y="40" width="140" height="42" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="270" y="66" text-anchor="middle" fill="var(--text)" font-size="11">initState()</text>
+
+      <rect x="380" y="40" width="140" height="42" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="450" y="66" text-anchor="middle" fill="var(--text)" font-size="11">build()</text>
+
+      <rect x="560" y="40" width="150" height="42" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="635" y="60" text-anchor="middle" fill="var(--text-dim)" font-size="10.5">didUpdateWidget()</text>
+      <text x="635" y="74" text-anchor="middle" fill="var(--text-faint)" font-size="9">on parent rebuild</text>
+
+      <rect x="740" y="40" width="100" height="42" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="790" y="66" text-anchor="middle" fill="var(--text-dim)" font-size="10.5">dispose()</text>
+
+      <path d="M160 61 L200 61" stroke="var(--text-faint)" marker-end="url(#f2)"/>
+      <path d="M340 61 L380 61" stroke="var(--text-faint)" marker-end="url(#f2)"/>
+      <path d="M520 61 L560 61" stroke="var(--text-faint)" marker-end="url(#f2)"/>
+      <path d="M635 82 L635 100 L450 100 L450 82" stroke="var(--text-faint)" fill="none" marker-end="url(#f2)"/>
+      <text x="545" y="115" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">setState() / didUpdateWidget re-runs build()</text>
+      <path d="M710 61 L740 61" stroke="var(--text-faint)" marker-end="url(#f2)"/>
+
+      <text x="430" y="150" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">App-level: AppLifecycleState — resumed → inactive → paused → detached</text>
+
+      <defs><marker id="f2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker></defs>
+    </svg>
+    <figcaption>build() can re-run many times per second; initState/dispose run exactly once per widget instance.</figcaption>
+  </figure>
+
+  <p>
+    At the app level, <code>WidgetsBindingObserver</code> exposes <code>AppLifecycleState</code>:
+    <code>resumed</code> (foreground, visible), <code>inactive</code> (transitioning, e.g. a call coming
+    in), <code>paused</code> (backgrounded), <code>detached</code> (engine running, no view attached).
+    This maps roughly onto both Android's Activity states and iOS's UIApplication states underneath.
+  </p>
+
+  <h2 id="structure"><span class="num">05</span>Project Structure</h2>
+  <p>The <code>android/</code> and <code>ios/</code> folders exist but are mostly just thin native shells (the embedder) — almost all real code lives in <code>lib/</code>.</p>
+
+  <div class="tree">my_app/
+  ├─ <span class="hl">android/</span>              <span class="comment"># thin native shell — just hosts the Flutter engine</span>
+  ├─ <span class="hl">ios/</span>                  <span class="comment"># thin native shell — same idea, hosts a FlutterViewController</span>
+  ├─ lib/
+  │  ├─ <span class="hl">ui/</span> (or widgets/)   <span class="comment"># shared design-system widgets — buttons, cards, theme.dart</span>
+  │  ├─ <span class="hl">api/</span> (or services/) <span class="comment"># Dio/http clients, repositories, DTO models</span>
+  │  ├─ features/            <span class="comment"># one folder per feature/screen</span>
+  │  │  └─ profile/
+  │  │     ├─ profile_screen.dart
+  │  │     └─ profile_controller.dart   <span class="comment"># Bloc/Riverpod/Provider state</span>
+  │  ├─ router/               <span class="comment"># go_router route definitions</span>
+  │  └─ main.dart              <span class="comment"># runApp() — true entry point</span>
+  ├─ pubspec.yaml              <span class="comment"># dependencies + assets manifest</span>
+  ├─ pubspec.lock
+  └─ analysis_options.yaml     <span class="comment"># lint rules (Dart's ESLint equivalent)</span></div>
+
+  <div class="callout green">
+    <strong>Monorepo pattern at scale</strong>
+    Larger Flutter codebases use <strong>Dart packages</strong> (not just folders) for reuse —
+    <code>packages/ui_kit</code>, <code>packages/api_client</code>, <code>packages/core</code> — each
+    with its own <code>pubspec.yaml</code>, wired together via a Melos-managed monorepo. Same idea as
+    RN's workspace packages, just Dart-native tooling instead of npm workspaces.
+  </div>
+
+  <h2 id="deps"><span class="num">06</span>Standard Dependencies &amp; Their Roles</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>provider</code> / <code>riverpod</code> / <code>flutter_bloc</code></td><td>State management (Riverpod and Bloc are the modern favorites)</td></tr>
+        <tr><td><code>dio</code> / <code>http</code></td><td>HTTP networking client</td></tr>
+        <tr><td><code>go_router</code></td><td>Declarative routing/navigation</td></tr>
+        <tr><td><code>freezed</code> + <code>json_serializable</code></td><td>Immutable models &amp; JSON (de)serialization via code-gen</td></tr>
+        <tr><td><code>get_it</code></td><td>Service locator / dependency injection</td></tr>
+        <tr><td><code>shared_preferences</code> / <code>hive</code></td><td>Local key-value / lightweight NoSQL storage</td></tr>
+        <tr><td><code>cached_network_image</code></td><td>Image loading with disk/memory caching</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="proscons"><span class="num">07</span>Pros &amp; Cons</h2>
+  <div class="split">
+    <div class="col pros">
+      <h4>✓ Pros</h4>
+      <ul>
+        <li>Pixel-identical UI across Android, iOS, web, and desktop from one codebase</li>
+        <li>Excellent, consistent performance — compiled Dart, own GPU-backed renderer</li>
+        <li>Best-in-class hot reload — near-instant, preserves app state</li>
+        <li>Highest code-sharing ratio of the three (90–99%)</li>
+        <li>Batteries-included: navigation, animation, testing all first-party</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>✗ Cons</h4>
+      <ul>
+        <li>Dart is a smaller ecosystem/talent pool than JS or Kotlin/Swift</li>
+        <li>Because it doesn't use native widgets, platform look-and-feel needs deliberate work to nail</li>
+        <li>Larger baseline app size (ships its own engine/renderer in every binary)</li>
+        <li>Cutting-edge native OS features can lag behind official plugin support</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pagenav">
+    <a href="react-native.html"><span class="lbl">Back to</span>← React Native</a>
+    <a class="next" href="comparison.html"><span class="lbl">Next</span>Comparison →</a>
+  </div>
+</main>
+
+</body>
+</html>

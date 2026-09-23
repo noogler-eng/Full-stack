@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Comparison — Mobile Dev Guide</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-dot"></span> Mobile Dev Guide</a>
+    <nav class="crumbs">
+      <a href="index.html">Overview</a>
+      <a href="native.html">Android &amp; iOS (Native)</a>
+      <a href="react-native.html">React Native</a>
+      <a href="flutter.html">Flutter</a>
+      <a href="comparison.html" class="active">Comparison</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">Side by side</div>
+    <h1>Native vs React Native vs Flutter</h1>
+    <p class="lede">
+      The honest summary: they differ mainly in <strong>where the translation layer sits</strong>
+      (nowhere, at the view level, or at the pixel level) — and that one decision cascades into
+      everything else: performance, hiring, code sharing, and how quickly platform-specific UI feels stale.
+    </p>
+  </div>
+
+  <h2><span class="num">01</span>The core architectural difference, visually</h2>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="11.5">
+      <text x="140" y="20" text-anchor="middle" fill="var(--accent)" font-weight="700" font-size="13">NATIVE</text>
+      <rect x="50" y="35" width="180" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="140" y="57" text-anchor="middle" fill="var(--text)">Your code</text>
+      <path d="M140 69 L140 84" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="50" y="84" width="180" height="34" rx="6" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="140" y="106" text-anchor="middle" fill="var(--text-dim)">OS UI toolkit</text>
+      <path d="M140 118 L140 133" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="50" y="133" width="180" height="34" rx="6" fill="var(--bg-elevated)" stroke="var(--border)"/>
+      <text x="140" y="155" text-anchor="middle" fill="var(--text-faint)">Screen</text>
+      <text x="140" y="190" text-anchor="middle" fill="var(--text-faint)" font-size="10">zero layers between code &amp; OS</text>
+
+      <text x="430" y="20" text-anchor="middle" fill="var(--purple)" font-weight="700" font-size="13">REACT NATIVE</text>
+      <rect x="340" y="35" width="180" height="34" rx="6" fill="var(--purple-soft)" stroke="var(--purple)"/>
+      <text x="430" y="57" text-anchor="middle" fill="var(--text)">Your JS/React code</text>
+      <path d="M430 69 L430 84" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="340" y="84" width="180" height="34" rx="6" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="430" y="106" text-anchor="middle" fill="var(--text-dim)">JSI/Fabric → real OS views</text>
+      <path d="M430 118 L430 133" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="340" y="133" width="180" height="34" rx="6" fill="var(--bg-elevated)" stroke="var(--border)"/>
+      <text x="430" y="155" text-anchor="middle" fill="var(--text-faint)">Screen</text>
+      <text x="430" y="190" text-anchor="middle" fill="var(--text-faint)" font-size="10">one thin bridge to native views</text>
+
+      <text x="720" y="20" text-anchor="middle" fill="var(--blue)" font-weight="700" font-size="13">FLUTTER</text>
+      <rect x="630" y="35" width="180" height="34" rx="6" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="720" y="57" text-anchor="middle" fill="var(--text)">Your Dart/widget code</text>
+      <path d="M720 69 L720 84" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="630" y="84" width="180" height="34" rx="6" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="720" y="106" text-anchor="middle" fill="var(--text-dim)">Skia/Impeller draws pixels</text>
+      <path d="M720 118 L720 133" stroke="var(--text-faint)" marker-end="url(#c1)"/>
+      <rect x="630" y="133" width="180" height="34" rx="6" fill="var(--bg-elevated)" stroke="var(--border)"/>
+      <text x="720" y="155" text-anchor="middle" fill="var(--text-faint)">Screen</text>
+      <text x="720" y="190" text-anchor="middle" fill="var(--text-faint)" font-size="10">bypasses OS widgets entirely</text>
+
+      <defs><marker id="c1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker></defs>
+    </svg>
+    <figcaption>Native has no translation layer. RN translates at the component level (still real OS widgets). Flutter skips OS widgets and paints its own.</figcaption>
+  </figure>
+
+  <h2><span class="num">02</span>Full comparison table</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dimension</th><th>Native</th><th>React Native</th><th>Flutter</th></tr></thead>
+      <tbody>
+        <tr><td>Language</td><td>Kotlin / Swift</td><td>JavaScript / TypeScript</td><td>Dart</td></tr>
+        <tr><td>UI rendered by</td><td>OS toolkit directly</td><td>OS toolkit, via Fabric/bridge</td><td>Flutter's own engine (Skia/Impeller)</td></tr>
+        <tr><td>Code sharing (iOS ↔ Android)</td><td>~0%</td><td>70–95%</td><td>90–99%</td></tr>
+        <tr><td>Performance</td><td>Highest ceiling</td><td>Near-native (real views + JS logic)</td><td>Very high (compiled, GPU-backed canvas)</td></tr>
+        <tr><td>Startup time</td><td>Fastest</td><td>Slower (JS bundle + bridge init)</td><td>Fast (AOT compiled)</td></tr>
+        <tr><td>Hot reload</td><td>Limited (partial in Compose/SwiftUI previews)</td><td>Yes — Fast Refresh</td><td>Yes — best-in-class, preserves state</td></tr>
+        <tr><td>Platform look &amp; feel</td><td>Perfect, automatic</td><td>Very good, automatic (real widgets)</td><td>Manual — must opt into Material/Cupertino</td></tr>
+        <tr><td>Access to new OS APIs</td><td>Day one</td><td>Needs a native module/bridge</td><td>Needs a plugin (often lags briefly)</td></tr>
+        <tr><td>Binary size</td><td>Smallest</td><td>Medium (JS engine + bundle)</td><td>Larger (ships engine + renderer)</td></tr>
+        <tr><td>Team/hiring</td><td>2 specialist skillsets (Kotlin + Swift)</td><td>1 skillset (JS/React) — largest talent pool</td><td>1 skillset (Dart) — smaller pool, fast to learn</td></tr>
+        <tr><td>Backing company</td><td>Google (Android), Apple (iOS)</td><td>Meta</td><td>Google</td></tr>
+        <tr><td>Best for</td><td>Performance-critical, platform-defining apps (camera apps, games, system-level tools)</td><td>Teams already deep in React/JS wanting fast iteration</td><td>Pixel-consistent brand experience across every platform, incl. web/desktop</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2><span class="num">03</span>Decision guide</h2>
+
+  <div class="panel">
+    <p><strong>Pick Native</strong> when the app is performance- or capability-critical (AR/camera pipelines, background audio, low-level Bluetooth/hardware), when platform-exact feel is non-negotiable, or when you already have separate iOS/Android teams.</p>
+    <p><strong>Pick React Native</strong> when your team is already a React/web team, you want maximum code reuse with the web (shared logic, sometimes shared components), and you value the largest possible ecosystem/hiring pool.</p>
+    <p><strong>Pick Flutter</strong> when brand/design consistency across every platform matters most, you also want web/desktop targets from the same codebase, and you're fine investing a little more to nail platform-native feel manually.</p>
+  </div>
+
+  <h2><span class="num">04</span>Key terms across all three</h2>
+  <div class="chips">
+    <span class="chip"><b>Bridge</b> — legacy async JSON channel between JS and native in RN</span>
+    <span class="chip"><b>JSI</b> — RN's new synchronous JS↔C++ interface</span>
+    <span class="chip"><b>Fabric</b> — RN's new native rendering system</span>
+    <span class="chip"><b>Hermes</b> — RN's own JS engine</span>
+    <span class="chip"><b>Skia / Impeller</b> — Flutter's graphics rendering engines</span>
+    <span class="chip"><b>Widget tree</b> — Flutter's declarative UI description</span>
+    <span class="chip"><b>Composable</b> — a Jetpack Compose UI function</span>
+    <span class="chip"><b>ART</b> — Android Runtime, compiles/runs Kotlin bytecode</span>
+    <span class="chip"><b>Cocoa Touch</b> — Apple's iOS application layer (UIKit, SwiftUI)</span>
+    <span class="chip"><b>Reconciliation</b> — diffing an old UI tree against a new one (React &amp; Flutter both do this)</span>
+    <span class="chip"><b>AOT / JIT</b> — Ahead-of-Time vs Just-In-Time compilation</span>
+    <span class="chip"><b>Embedder</b> — Flutter's thin per-platform native shell</span>
+  </div>
+
+  <div class="pagenav">
+    <a href="flutter.html"><span class="lbl">Back to</span>← Flutter</a>
+    <a class="next" href="index.html"><span class="lbl">Back to</span>Overview →</a>
+  </div>
+</main>
+
+</body>
+</html>
