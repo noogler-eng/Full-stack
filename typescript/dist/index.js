@@ -1,34 +1,52 @@
 "use strict";
-// Debounce And Throttle Functions
-function search(query) {
-    console.log("search for " + query);
+function one() {
+    console.log('one');
+    two();
+    console.log('three');
 }
-// Debouce - wait until user stops typing for T
-// on every event happens timer gets reset here
-function debounce(func, wait) {
-    let timeout = null;
-    return function (...args) {
-        if (timeout)
-            clearTimeout(timeout);
-        timeout = setTimeout(() => {
-            func(...args);
-        }, wait * 1000);
-    };
+function two() {
+    console.log('two');
 }
-// Throttle - wait for T time and then execute it
-function throttle(func, wait) {
-    let interval = null;
-    return function (...args) {
-        if (!interval) {
-            func(...args);
-            interval = setTimeout(() => {
-                interval = null;
-            }, wait * 1000);
-        }
-    };
+// c, b, a, global in the stack from left to right, a is 
+// the last function called and c is the first function 
+// called, stack is based on LIFO
+function a() {
+    console.log('a');
+    b();
 }
-let input = '';
-for (let i = 0; i < 10; i++) {
-    input += `${i}`;
-    debounce(() => search(input), 2);
+function b() {
+    console.log('b');
+    c();
 }
+function c() {
+    console.log('c');
+}
+// stack overflow, memory leak
+function count() {
+    console.log("count");
+    count();
+}
+// javascript is single threaded, so the stack is based on LIFO,
+// stack - event loop - queue, when stack is empty, queue process
+// events into stack, so the stack is always empty when the queue 
+// is processed
+// Promise - Reject, Resolve, Pending
+// Resolve - when the promise is resolved, the then() function is called
+// Reject - when the promise is rejected, the catch() function is called
+// Pending - when the promise is pending, the finally() function is called
+const sleep_ = (time) => {
+    return new Promise((resolve, reject) => setTimeout(resolve, time));
+};
+function main() {
+    console.log('start');
+    one();
+    console.log('end');
+    a();
+    count();
+    sleep_(1000).then(() => {
+        console.log('sleep done');
+    }).catch((err) => {
+        console.log('sleep error', err);
+    });
+}
+main();
