@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "96656600531",
+    "project_id": "my-expense-b11f5",
+    "storage_bucket": "my-expense-b11f5.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:96656600531:android:8052731323f8ffafc85326",
+        "android_client_info": {
+          "package_name": "com.sharad.myexpense"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": ""
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
