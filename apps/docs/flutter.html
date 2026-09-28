@@ -38,10 +38,12 @@
     <a href="#lang">Language &amp; Tooling</a>
     <a href="#arch">Architecture</a>
     <a href="#render">Rendering Pipeline</a>
+    <a href="#threads">Threading Model</a>
     <a href="#lifecycle">Lifecycle</a>
     <a href="#structure">Project Structure</a>
     <a href="#deps">Standard Dependencies</a>
     <a href="#proscons">Pros &amp; Cons</a>
+    <a href="#glossary">Terminology Glossary</a>
   </div>
 
   <h2 id="lang"><span class="num">01</span>Language &amp; Tooling</h2>
@@ -122,7 +124,73 @@
     with pre-compiled shaders.
   </p>
 
-  <h2 id="lifecycle"><span class="num">04</span>Lifecycle</h2>
+  <h2 id="threads"><span class="num">04</span>Threading Model — Why Flutter Is Architecturally Different</h2>
+
+  <p>
+    This is the part that most clearly explains <em>why</em> Flutter isn't "just another cross-platform
+    wrapper." Native apps mostly reason about one main/UI thread. React Native splits work across a
+    <strong>JS thread</strong> and the native UI thread, talking through JSI/the Bridge. Flutter goes
+    further: the Dart VM and engine run <strong>four dedicated threads</strong> per app, each with one job.
+  </p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
+      <rect x="20" y="30" width="190" height="72" rx="8" fill="var(--blue-soft)" stroke="var(--blue)"/>
+      <text x="115" y="54" text-anchor="middle" fill="var(--text)" font-size="11.5">Platform Thread</text>
+      <text x="115" y="72" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">app's main OS thread —</text>
+      <text x="115" y="86" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">plugins, platform channels</text>
+
+      <rect x="230" y="30" width="190" height="72" rx="8" fill="var(--green-soft)" stroke="var(--green)"/>
+      <text x="325" y="54" text-anchor="middle" fill="var(--text)" font-size="11.5">UI Thread</text>
+      <text x="325" y="72" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">runs your Dart code —</text>
+      <text x="325" y="86" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">build/layout, produces a "Layer Tree"</text>
+
+      <rect x="440" y="30" width="190" height="72" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="535" y="54" text-anchor="middle" fill="var(--text)" font-size="11.5">Raster (GPU) Thread</text>
+      <text x="535" y="72" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">takes the Layer Tree, talks to</text>
+      <text x="535" y="86" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">Skia/Impeller, submits to GPU</text>
+
+      <rect x="650" y="30" width="190" height="72" rx="8" fill="var(--purple-soft)" stroke="var(--purple)"/>
+      <text x="745" y="54" text-anchor="middle" fill="var(--text)" font-size="11.5">IO Thread</text>
+      <text x="745" y="72" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">image decoding, file/caching</text>
+      <text x="745" y="86" text-anchor="middle" fill="var(--text-faint)" font-size="9.5">work off the UI thread</text>
+
+      <path d="M210 66 L230 66" stroke="var(--text-faint)" marker-end="url(#t1)"/>
+      <path d="M420 66 L440 66" stroke="var(--text-faint)" marker-end="url(#t1)"/>
+      <path d="M420 90 L440 90" stroke="var(--text-faint)" stroke-dasharray="3,3"/>
+      <path d="M115 102 L115 130" stroke="var(--text-faint)" marker-end="url(#t1)"/>
+
+      <rect x="20" y="140" width="810" height="90" rx="8" fill="var(--bg-card)" stroke="var(--border)"/>
+      <text x="425" y="165" text-anchor="middle" fill="var(--text-dim)" font-size="11.5">Each thread is a separate Dart <tspan fill="var(--accent)">Isolate</tspan> (or native OS thread) with its own memory —</text>
+      <text x="425" y="184" text-anchor="middle" fill="var(--text-dim)" font-size="11.5">no shared-memory locking between them, they pass messages instead.</text>
+      <text x="425" y="207" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">This is why heavy Dart computation (JSON parsing, image processing) should run in its own</text>
+      <text x="425" y="222" text-anchor="middle" fill="var(--text-faint)" font-size="10.5">Isolate via <tspan fill="var(--text)">compute()</tspan> — otherwise it blocks the UI thread and drops frames, same risk as blocking JS's single thread in RN.</text>
+
+      <defs><marker id="t1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="var(--text-faint)"/></marker></defs>
+    </svg>
+    <figcaption>Four purpose-built threads vs. Native's "one main thread + background work" or RN's "JS thread + native thread."</figcaption>
+  </figure>
+
+  <div class="split">
+    <div class="col pros">
+      <h4>Why this makes Flutter different</h4>
+      <ul>
+        <li>It never asks the OS "please draw a button" — the UI thread + Raster thread pipeline produces pixels itself, every frame.</li>
+        <li>Because the renderer is entirely Flutter's own, animations/scrolling stay smooth even while native plugin code runs on the Platform thread.</li>
+        <li>The same 4-thread pipeline is identical on Android, iOS, web (compiled to Wasm/JS) and desktop — nothing platform-specific in the hot path.</li>
+      </ul>
+    </div>
+    <div class="col cons">
+      <h4>Contrast with the other two</h4>
+      <ul>
+        <li><strong>Native:</strong> one main/UI thread does layout+draw, calls straight into the OS compositor — simplest model, but you own all the threading discipline yourself.</li>
+        <li><strong>React Native:</strong> JS thread computes what to render, sends instructions across JSI/Bridge to the Native/UI thread which owns real OS views.</li>
+        <li><strong>Flutter:</strong> adds a dedicated Raster thread <em>and</em> IO thread that neither Native nor RN has as a first-class concept — because Flutter, not the OS, is responsible for turning layout into pixels.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="lifecycle"><span class="num">05</span>Lifecycle</h2>
 
   <figure class="diagram">
     <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="12">
@@ -165,7 +233,7 @@
     This maps roughly onto both Android's Activity states and iOS's UIApplication states underneath.
   </p>
 
-  <h2 id="structure"><span class="num">05</span>Project Structure</h2>
+  <h2 id="structure"><span class="num">06</span>Project Structure</h2>
   <p>The <code>android/</code> and <code>ios/</code> folders exist but are mostly just thin native shells (the embedder) — almost all real code lives in <code>lib/</code>.</p>
 
   <div class="tree">my_app/
@@ -192,7 +260,7 @@
     RN's workspace packages, just Dart-native tooling instead of npm workspaces.
   </div>
 
-  <h2 id="deps"><span class="num">06</span>Standard Dependencies &amp; Their Roles</h2>
+  <h2 id="deps"><span class="num">07</span>Standard Dependencies &amp; Their Roles</h2>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Dependency</th><th>Role</th></tr></thead>
@@ -208,7 +276,7 @@
     </table>
   </div>
 
-  <h2 id="proscons"><span class="num">07</span>Pros &amp; Cons</h2>
+  <h2 id="proscons"><span class="num">08</span>Pros &amp; Cons</h2>
   <div class="split">
     <div class="col pros">
       <h4>✓ Pros</h4>
@@ -229,6 +297,107 @@
         <li>Cutting-edge native OS features can lag behind official plugin support</li>
       </ul>
     </div>
+  </div>
+
+  <h2 id="glossary"><span class="num">09</span>Terminology Glossary — Every Term You'll Actually Run Into</h2>
+  <p class="dim">Grouped by what part of Flutter they belong to. Skim once, then use this page as a lookup while you read real code.</p>
+
+  <h3>Widgets &amp; UI building blocks</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>Widget</code></td><td>An immutable description of a piece of UI. In Flutter, "everything is a widget" — even padding and alignment are widgets, not properties.</td></tr>
+        <tr><td><code>StatelessWidget</code></td><td>A widget with no mutable state of its own — its <code>build()</code> output depends only on the config passed in.</td></tr>
+        <tr><td><code>StatefulWidget</code></td><td>A widget paired with a separate <code>State</code> object that can hold mutable data and trigger rebuilds via <code>setState()</code>.</td></tr>
+        <tr><td><code>State&lt;T&gt;</code></td><td>The mutable, long-lived object behind a StatefulWidget — survives across rebuilds even though the widget itself is recreated each time.</td></tr>
+        <tr><td><code>BuildContext</code></td><td>A handle to a widget's location in the tree — used to look up inherited data (theme, media query, navigator) from that point upward.</td></tr>
+        <tr><td><code>Key</code> / <code>ValueKey</code> / <code>GlobalKey</code></td><td>Identity for a widget across rebuilds — critical when reordering lists so Flutter doesn't confuse one item's state for another's.</td></tr>
+        <tr><td><code>Scaffold</code></td><td>The standard Material "page skeleton" widget — app bar, body, floating action button, drawer, bottom nav slot.</td></tr>
+        <tr><td><code>MaterialApp</code> / <code>CupertinoApp</code></td><td>Root widget that sets up theming, routing, and localization for an Android-styled or iOS-styled app respectively.</td></tr>
+        <tr><td><code>InheritedWidget</code></td><td>A widget that efficiently broadcasts data down the tree without manual prop-drilling — the low-level mechanism <code>Theme</code>, <code>MediaQuery</code>, and most state-management libraries are built on.</td></tr>
+        <tr><td><code>const</code> constructor</td><td>Marks a widget as compile-time constant so Flutter can skip rebuilding it entirely — a real, measurable performance habit.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>State &amp; data flow</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>setState()</code></td><td>Tells Flutter "this State object's data changed, please rebuild this widget subtree."</td></tr>
+        <tr><td><code>ChangeNotifier</code></td><td>A simple observable class (part of the SDK) that widgets can subscribe to for rebuilds — backbone of the <code>provider</code> package.</td></tr>
+        <tr><td><code>ValueNotifier</code></td><td>A <code>ChangeNotifier</code> that wraps a single value — pairs with <code>ValueListenableBuilder</code>.</td></tr>
+        <tr><td><code>Provider</code> / <code>Riverpod</code></td><td>Dependency-injection + state-management libraries that expose data down the widget tree via <code>BuildContext</code>.</td></tr>
+        <tr><td><code>Bloc</code> / <code>Cubit</code></td><td>Event-driven state management (flutter_bloc) — UI dispatches events, Bloc emits new states in response.</td></tr>
+        <tr><td><code>InheritedModel</code></td><td>A more granular <code>InheritedWidget</code> that lets dependents rebuild only for the specific aspect of data they care about.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Rendering &amp; engine internals</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>Element</code></td><td>The mutable, persistent counterpart to a Widget — lives in the Element tree, holds the link between a Widget and its RenderObject.</td></tr>
+        <tr><td><code>RenderObject</code></td><td>Does the actual layout math and painting — the third tree beneath Widget/Element, roughly Flutter's version of a DOM render layer.</td></tr>
+        <tr><td><code>RenderBox</code></td><td>The most common RenderObject base class — anything with a rectangular 2D size (width/height).</td></tr>
+        <tr><td><code>Layer</code> / <code>Layer Tree</code></td><td>The output of a frame's paint phase — a tree of compositing instructions the Raster thread hands to the GPU.</td></tr>
+        <tr><td><code>Skia</code></td><td>Google's 2D graphics library; Flutter's original rendering backend on all platforms.</td></tr>
+        <tr><td><code>Impeller</code></td><td>Flutter's newer rendering backend (default on iOS, rolling out elsewhere) — precompiles shaders ahead of time to avoid runtime shader-compilation jank.</td></tr>
+        <tr><td><code>Dart VM</code></td><td>Runs your Dart code — JIT during development (fast iteration/hot reload), AOT-compiled to native machine code for release builds.</td></tr>
+        <tr><td><code>Isolate</code></td><td>Dart's unit of concurrency — independent worker with its own memory heap; isolates communicate via message passing, never shared memory.</td></tr>
+        <tr><td><code>compute()</code></td><td>Helper that runs a function on a new Isolate — the standard way to keep heavy work off the UI thread.</td></tr>
+        <tr><td><code>Embedder</code></td><td>The thin, platform-specific shell (Android/iOS/web/desktop) that hosts the Flutter Engine and feeds it input/surface access.</td></tr>
+        <tr><td><code>Skeleton/Shell</code></td><td>Engine term for the C++ core that wires the UI/Raster/IO/Platform threads together per running Flutter instance.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Async &amp; concurrency</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>Future</code></td><td>Dart's promise equivalent — a value that will be available later.</td></tr>
+        <tr><td><code>async</code> / <code>await</code></td><td>Syntax sugar for working with Futures sequentially, same idea as JS.</td></tr>
+        <tr><td><code>Stream</code></td><td>A sequence of async values over time (Dart's Observable) — used for things like text field input or websockets.</td></tr>
+        <tr><td><code>FutureBuilder</code> / <code>StreamBuilder</code></td><td>Widgets that rebuild automatically as a Future resolves or a Stream emits.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Navigation &amp; layout helpers</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>Navigator</code></td><td>Maintains a stack of <code>Route</code>s (screens) — <code>push</code>/<code>pop</code> to navigate.</td></tr>
+        <tr><td><code>go_router</code></td><td>The most common declarative/URL-based routing package, esp. for deep links and web.</td></tr>
+        <tr><td><code>MediaQuery</code></td><td>Gives you the current screen size, padding (notches/safe areas), and text scale — read via <code>BuildContext</code>.</td></tr>
+        <tr><td><code>Theme</code> / <code>ThemeData</code></td><td>App-wide styling (colors, typography) accessible from any widget via <code>Theme.of(context)</code>.</td></tr>
+        <tr><td><code>Slivers</code> / <code>CustomScrollView</code></td><td>Lower-level, composable scrolling building blocks — used for advanced effects like collapsing app bars.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Native interop &amp; tooling</h3>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><td><code>Platform Channel</code></td><td>Async message-passing bridge between Dart and native Kotlin/Swift code — how plugins reach real OS APIs.</td></tr>
+        <tr><td><code>MethodChannel</code> / <code>EventChannel</code></td><td>Specific Platform Channel types — one-shot method calls vs. continuous event streams from native to Dart.</td></tr>
+        <tr><td><code>dart:ffi</code></td><td>Direct foreign-function interface for calling C libraries from Dart without going through a Platform Channel.</td></tr>
+        <tr><td>Hot Reload vs Hot Restart</td><td>Reload injects changed code into the running Dart VM, preserving state; Restart re-runs <code>main()</code> from scratch.</td></tr>
+        <tr><td><code>pubspec.yaml</code></td><td>The project manifest — dependencies, assets, fonts, SDK constraints (Dart's <code>package.json</code>).</td></tr>
+        <tr><td><code>pub.dev</code></td><td>Flutter/Dart's official package registry (equivalent of npm/Maven Central).</td></tr>
+        <tr><td>Golden test</td><td>A test that renders a widget and compares it pixel-for-pixel against a saved reference image.</td></tr>
+        <tr><td>Tree shaking</td><td>Build-time removal of unused code/icons — part of why release binaries aren't as bloated as the engine size alone suggests.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <strong>Reading tip</strong>
+    Every one of these terms shows up constantly in Flutter docs, GitHub issues, and StackOverflow
+    answers with zero explanation — bookmark this table before diving into real Flutter code.
   </div>
 
   <div class="pagenav">
