@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -350,6 +351,25 @@ func main() {
 	// enums - enumrated constants, we can use it to define a set of named constants.
 	fmt.Println("order stays ", Status(Pending), Status(Completed), Status(Failed))
 
+	// generics, passing int or string slice to printSlice function, we can use it to print any
+	// type of slice.
+	printSlice([]int{1, 2, 3, 4, 5})
+	printSlice([]string{"Go", "Python", "Java", "C++"})
+
+	// goroutine
+	// go - goroutine is a lightweight thread of execution, we can use it to run a function
+	// concurrently. parallel execution of code, we can use it to run a function concurrently.
+	var wg sync.WaitGroup
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go task(i, &wg)
+	}
+
+	// wait for all goroutines to finish, we can use it to wait for all goroutines to finish.
+	// wait group -> wg, add, wait
+	wg.Wait()
+	// time.Sleep(time.Second * 2)
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -445,4 +465,19 @@ func (s stripe) pay(amount float32) {
 
 func (s fakePayment) pay(amount float32) {
 	fmt.Println("Paying amount: ", amount)
+}
+
+// any or interface{} can be used to accept any type of slice, but it is not a good practice to use
+// interface{} for any type accepting. we can use generics to accept any type of slice.
+func printSlice[A int | string](items []A) {
+	for _, item := range items {
+		fmt.Println(item)
+	}
+}
+
+func task(i int, w *sync.WaitGroup) {
+	// defer will be executed at the end of the function, it is used to ensure that the Done()
+	// method is called
+	defer w.Done()
+	fmt.Println("printing ", i)
 }
