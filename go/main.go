@@ -54,14 +54,14 @@ type paymenter interface {
 }
 
 // enums - enumrated constants, we can use it to define a set of named constants.
-type Status int
+type Status string
 
 const (
 	// giving pending status a value of 0, completed status a value of 1, and
 	// failed status a value of 2.
-	Pending   Status = 0
-	Completed Status = 1
-	Failed    Status = 2
+	Pending   Status = "pending"
+	Completed Status = "completed"
+	Failed    Status = "failed"
 )
 
 func main() {
