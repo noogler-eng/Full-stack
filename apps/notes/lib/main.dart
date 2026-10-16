@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'second_page.dart';
 
 void main() {
   runApp(const MyApp());
@@ -7,8 +8,14 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  void userTapped(){
+  void userTapped(BuildContext context){
     print("User tapped the button!");
+    // Navigator.push(
+    //   context,
+    //   MaterialPageRoute(builder: (context) => const SecondPage()),
+    // );
+
+    Navigator.pushNamed(context, '/secondPage');
   }
 
   @override
@@ -105,7 +112,7 @@ class MyApp extends StatelessWidget {
                   }
                 ),
                 GestureDetector(
-                  onTap: userTapped,
+                  onTap: () => userTapped(context),
                   child: Container(
                     height: 50,
                     width: 150,
@@ -120,12 +127,53 @@ class MyApp extends StatelessWidget {
                       ),
                     ),
                   ),
-                )
+                ),
+                ElevatedButton(
+                  onPressed: () => userTapped(context),
+                  child: Text('Press Me'),
+                ),
               ],
             ),
           )
+        ),
+        drawer: Drawer(
+          backgroundColor: Colors.white,
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              const DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                ),
+                child: Text('Drawer Header'),
+              ),
+              ListTile(
+                title: const Text('Item 1'),
+                onTap: () {
+                  // Update the state of the app
+                  // ...
+                  // Then close the drawer
+                  Navigator.pop(context);
+                },
+              ),
+              ListTile(
+                title: const Text('Item 2'),
+                onTap: () {
+                  // Update the state of the app
+                  // ...
+                  // Then close the drawer
+                  Navigator.pop(context);
+                },
+              ),
+            ],  
+          )
         )
-      )
+      ),
+      // making an instance of the SecondPage class and passing it to the 
+      // MaterialPageRoute constructor
+      routes: {
+        '/secondPage': (context) => const SecondPage(), 
+      },
     );
   }
 }

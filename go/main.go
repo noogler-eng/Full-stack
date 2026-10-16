@@ -35,6 +35,35 @@ type Address struct {
 	zipCode string
 }
 
+type razorpay struct{}
+type fakePayment struct{}
+type stripe struct{}
+
+// payment struct is used to make a payment using a payment gateway,
+// we can use it to make a payment using any payment gateway. It has a
+// field gateway of type paymenter interface, which is used to make a
+// payment using the payment gateway.
+type payment struct {
+	gateway paymenter
+}
+
+// anything that implements the pay method of paymenter interface can
+// be used as a payment gateway.
+type paymenter interface {
+	pay(amount float32)
+}
+
+// enums - enumrated constants, we can use it to define a set of named constants.
+type Status int
+
+const (
+	// giving pending status a value of 0, completed status a value of 1, and
+	// failed status a value of 2.
+	Pending   Status = 0
+	Completed Status = 1
+	Failed    Status = 2
+)
+
 func main() {
 	fmt.Println("Hello, World!")
 
@@ -295,6 +324,8 @@ func main() {
 	neworder := newOrder(2, 200.0, "Order 2")
 	fmt.Println(neworder, neworder.id, neworder.price, neworder.name, neworder.status, neworder.creaetedAt)
 
+	// making an instance of customer struct and printing its values, we can use it to
+	// create a new customer.
 	customer := Customer{
 		id:        1,
 		name:      "Sharad",
@@ -305,8 +336,20 @@ func main() {
 	fmt.Println(customer, customer.id, customer.name, customer.phone, customer.address, customer.createdAt)
 	fmt.Println(customer.address.zipCode)
 
-	// interfaces
-	
+	// making an instance of payment struct and calling makePayment method on it, we can use it to
+	// make a payment.
+	// stripePaymentGw := stripe{}
+	razorpayPaymentGw := razorpay{}
+	Payment := payment{
+		// initializing the gateway field of payment struct with stripePaymentGw, so that we can use
+		// it to make a payment.
+		gateway: razorpayPaymentGw,
+	}
+	Payment.gateway.pay(100.0)
+
+	// enums - enumrated constants, we can use it to define a set of named constants.
+	fmt.Println("order stays ", Status(Pending), Status(Completed), Status(Failed))
+
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -383,4 +426,23 @@ func newOrder(id int, price float64, name string) *Order {
 		status:     "pending",
 		creaetedAt: time.Now(),
 	}
+}
+
+func (p payment) makePayment(amount float32) {
+	razorpayPaymentGw := fakePayment{}
+	razorpayPaymentGw.pay(amount)
+}
+
+// making an function for the sruct razorpay, it is a function that is associated with the struct
+// razorpay, we can use it
+func (r razorpay) pay(amount float32) {
+	fmt.Println("Paying amount: ", amount)
+}
+
+func (s stripe) pay(amount float32) {
+	fmt.Println("Paying amount: ", amount)
+}
+
+func (s fakePayment) pay(amount float32) {
+	fmt.Println("Paying amount: ", amount)
 }
