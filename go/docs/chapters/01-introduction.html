@@ -1,0 +1,1015 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 01 · Introduction &amp; Setup — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="01">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part I · Chapter 01</div>
+  <h1>Introduction &amp; Setup</h1>
+  <p class="lead">Before we write a single loop, let's understand <em>why</em> Go exists, get it installed, and learn the handful of tools you'll use every day. By the end you'll know exactly what happens between typing <code>go run</code> and seeing "Hello" on your screen.</p>
+  <div class="meta">
+    <span class="pill">⏱ 35 min read</span>
+    <span class="pill">◆ Beginner</span>
+    <span class="pill">▶ 12 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What problems Go was designed to solve, and where it shines in the real world</li>
+      <li>How to install Go on macOS, Linux and Windows, and check that it works</li>
+      <li>What a <em>module</em> is, why <code>GOPATH</code> mostly doesn't matter anymore, and how <code>go mod init</code> works</li>
+      <li>Every line of "Hello, World", explained</li>
+      <li>The everyday toolchain: <code>run</code>, <code>build</code>, <code>fmt</code>, <code>vet</code>, <code>test</code>, <code>doc</code>, <code>install</code>, <code>env</code>, <code>mod tidy</code></li>
+      <li>How compilation produces a single static binary — and how to cross-compile</li>
+      <li>The exact order a Go program starts up in: imports, package variables, <code>init()</code>, then <code>main()</code></li>
+      <li>Comments, doc comments, the automatic-semicolon rule, and why everyone uses <code>gofmt</code></li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>What is Go, and why does it exist?</h2>
+  <p><strong>Go</strong> (often called <em>Golang</em> because "go" is hard to search for) is a programming language created at Google in 2007 by Robert Griesemer, Rob Pike and Ken Thompson. Ken Thompson co-created Unix and the B language (the ancestor of C); Rob Pike worked on Unix, Plan 9 and UTF-8. These are people who had been writing systems software for decades, and they were frustrated.</p>
+  <p>The story goes that Go was sketched out while they were waiting for a giant C++ program to compile. At Google's scale, builds took tens of minutes, codebases had millions of lines, thousands of engineers touched the same code, and the languages in use made it easy to write clever code that nobody else could read. Go was their answer to one question:</p>
+  <div class="callout mental"><div class="callout-title">The question Go answers</div><p>"How do we make a large team of ordinary engineers productive on a large, long-lived codebase that runs on many networked machines with many CPU cores?"</p></div>
+  <p>Go became public as open source in November 2009, and Go 1.0 shipped in March 2012 with a famous promise: the <strong>Go 1 compatibility guarantee</strong>. Code written for Go 1.0 should still compile and run with every later 1.x release. That promise has held for more than a decade, and it's a big reason companies trust Go for long-lived systems.</p>
+
+  <h3>The design goals, in plain English</h3>
+  <table>
+    <thead><tr><th>Goal</th><th>What it means</th><th>How Go achieves it</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Simplicity</strong></td><td>A small language you can hold in your head. Reading code matters more than writing it.</td><td>About 25 keywords. One loop (<code>for</code>). No classes, no inheritance, no exceptions, no operator overloading. The whole spec is readable in an afternoon.</td></tr>
+      <tr><td><strong>Fast compilation</strong></td><td>Big programs build in seconds, so the edit–run loop stays tight.</td><td>No header files, unused imports are forbidden (so the compiler never reads code it doesn't need), and a dependency graph with no cycles.</td></tr>
+      <tr><td><strong>Concurrency built in</strong></td><td>Modern machines have many cores and servers handle thousands of connections at once.</td><td><em>Goroutines</em> (very cheap threads managed by Go) and <em>channels</em> (pipes for passing values between them) are part of the language.</td></tr>
+      <tr><td><strong>Single binary deployment</strong></td><td>Shipping software should be "copy one file and run it".</td><td>The compiler produces one executable that contains your code, all dependencies, and the Go runtime. No interpreter or VM to install.</td></tr>
+      <tr><td><strong>Safety without ceremony</strong></td><td>Catch mistakes early, but don't make you fight the type system.</td><td>Static types with inference (<code>x := 5</code>), garbage collection, bounds-checked slices, no pointer arithmetic.</td></tr>
+      <tr><td><strong>Great tooling</strong></td><td>Formatting, testing, docs and profiling should "just come with it".</td><td>One <code>go</code> command does build, test, format, vet, docs, dependency management and more.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info"><div class="callout-title">Two words you'll hear a lot</div><p><strong>Compiled</strong> means your source code is translated ahead of time into machine code (the instructions your CPU runs directly). <strong>Statically typed</strong> means every variable has a type known at compile time, so the compiler can catch "you passed a string where a number was expected" before your program ever runs.</p></div>
+
+  <h3>Where Go is used</h3>
+  <p>Go is the language of the cloud. A large share of the infrastructure that runs the modern internet is written in it:</p>
+  <ul>
+    <li><strong>Cloud infrastructure:</strong> Docker, Kubernetes, containerd, etcd, Terraform, Prometheus, Grafana's backend, Consul, Vault.</li>
+    <li><strong>Network services and APIs:</strong> microservices, gRPC services, API gateways, proxies (Caddy, Traefik).</li>
+    <li><strong>Command-line tools:</strong> GitHub's <code>gh</code>, Hugo, <code>kubectl</code>, many DevOps CLIs — because a single binary is trivial to distribute.</li>
+    <li><strong>Data pipelines and backend systems:</strong> at companies like Google, Uber, Cloudflare, Twitch, Dropbox, Monzo and many more.</li>
+  </ul>
+  <p>Where Go is a weaker fit: GUI desktop apps, machine-learning model training (Python's ecosystem dominates), hard real-time systems where a garbage collector pause is unacceptable, and situations where you need every last nanosecond of control (C, C++ or Rust).</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Go's "boring" reputation is a feature. In a production team the expensive thing is not typing code — it's reading, reviewing, debugging and changing it two years later. Go deliberately trades expressiveness for <em>uniformity</em>: any Go engineer can open any Go codebase and feel at home within an hour. When you catch yourself missing a clever feature from another language, ask "would my teammate understand this at 3am during an outage?"</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Installing Go</h2>
+  <p>Go is distributed as an official installer from <code>go.dev/dl</code>. You get the compiler, the standard library, and the <code>go</code> tool in one package. Pick your platform:</p>
+
+  <h3>macOS</h3>
+  <p>The easiest route is the official <code>.pkg</code> installer from <code>go.dev/dl</code> (choose <em>ARM64</em> for Apple Silicon M-series Macs, <em>x86-64</em> for Intel). It installs Go into <code>/usr/local/go</code> and adds <code>/usr/local/go/bin</code> to your <code>PATH</code>. Homebrew works too:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">brew install go</code></pre></div>
+
+  <h3>Linux</h3>
+  <p>Distribution packages (<code>apt</code>, <code>dnf</code>) are often several versions behind. The official tarball is the reliable way:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash"># replace the version with the latest from go.dev/dl
+curl -LO https://go.dev/dl/go1.27.1.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.27.1.linux-amd64.tar.gz
+
+# add to your shell profile (~/.bashrc, ~/.zshrc, ...)
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin</code></pre></div>
+
+  <h3>Windows</h3>
+  <p>Download the <code>.msi</code> installer from <code>go.dev/dl</code> and click through it. It installs to <code>C:\Program Files\Go</code> and sets up <code>PATH</code> for you. Open a <em>new</em> terminal (PowerShell or cmd) afterwards so it picks up the new <code>PATH</code>. <code>winget install GoLang.Go</code> also works.</p>
+
+  <h3>Check that it works</h3>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go version
+go version go1.27.1 darwin/arm64</code></pre></div>
+  <p>The output tells you three things: the Go version, the operating system (<code>darwin</code> is macOS's internal name), and the CPU architecture (<code>arm64</code>). You can ask a running program the same thing:</p>
+  <div class="live" data-title="Ask the runtime about itself">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+func main() {
+	fmt.Println("Go version:", runtime.Version())
+	fmt.Println("OS/Arch:   ", runtime.GOOS+"/"+runtime.GOARCH)
+	fmt.Println("CPUs:      ", runtime.NumCPU())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="3-6">Two packages are imported in a parenthesized block: <code>fmt</code> for printing and <code>runtime</code> for facts about the running program.</li>
+      <li data-lines="9" data-out="Go version: go1.27.1"><code>runtime.Version()</code> returns the Go release that <em>compiled</em> this binary — it's baked in, so it doesn't matter what Go is installed where the binary later runs.</li>
+      <li data-lines="10" data-state="GOOS=darwin; GOARCH=arm64" data-out="OS/Arch:    darwin/arm64"><code>runtime.GOOS</code> and <code>runtime.GOARCH</code> are constants, not calls. <code>+</code> glues the strings together. Cross-compile and these would say e.g. <code>linux/amd64</code>.</li>
+      <li data-lines="11" data-state="GOOS=darwin; GOARCH=arm64; NumCPU=8" data-out="CPUs:       8"><code>runtime.NumCPU()</code> asks the OS how many logical CPUs exist <em>right now</em>, so this one varies by machine. Then <code>main</code> returns.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Go version: go1.27.1
+OS/Arch:    darwin/arm64
+CPUs:       8</pre></div>
+  <p class="muted">(The CPU count depends on your machine.)</p>
+
+  <h3>Keeping Go up to date: toolchains</h3>
+  <p>Go releases a new minor version every six months (February and August), each supported until two newer releases are out. Since Go 1.21, the <code>go</code> command can even download the right <em>toolchain</em> automatically: if a project's <code>go.mod</code> says it needs a newer Go than you have installed, <code>go</code> fetches that version and uses it. This is controlled by the <code>GOTOOLCHAIN</code> setting (default <code>auto</code>).</p>
+
+  <div class="callout tip"><p>Need several Go versions side by side? Run <code>go install golang.org/dl/go1.22.12@latest</code> and then <code>go1.22.12 download</code>. You now have a <code>go1.22.12</code> command next to your normal <code>go</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>GOPATH vs modules: where your code lives</h2>
+  <p>If you read older Go tutorials, you'll see a lot about <code>GOPATH</code>. Here's the history, briefly, so it doesn't confuse you.</p>
+  <h3>The old way: GOPATH (before Go 1.11)</h3>
+  <p><code>GOPATH</code> is an environment variable pointing at a single workspace directory (default <code>~/go</code>). In the old days, <em>all</em> Go code had to live inside <code>$GOPATH/src</code>, in a folder matching its import path, e.g. <code>~/go/src/github.com/you/project</code>. There was no notion of versions: everyone shared one copy of each dependency. That made reproducible builds painful.</p>
+  <h3>The modern way: modules (Go 1.11+, default since 1.16)</h3>
+  <p>A <strong>module</strong> is a collection of Go packages that are versioned together. It's defined by a file named <code>go.mod</code> at its root. With modules:</p>
+  <ul>
+    <li>Your project can live <strong>anywhere</strong> on disk — <code>~/code/myapp</code>, your Desktop, wherever.</li>
+    <li>Every dependency has an exact version, recorded in <code>go.mod</code>, with checksums in <code>go.sum</code>.</li>
+    <li>Builds are reproducible: the same <code>go.mod</code> + <code>go.sum</code> gives the same build on every machine.</li>
+  </ul>
+  <p><code>GOPATH</code> still exists, but only as a place for Go to keep things: downloaded modules go into <code>$GOPATH/pkg/mod</code> (the <em>module cache</em>), and programs you <code>go install</code> land in <code>$GOPATH/bin</code>. You never put your own code there anymore.</p>
+
+  <table>
+    <thead><tr><th>Term</th><th>Meaning</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Package</strong></td><td>A directory of <code>.go</code> files compiled together. The unit of code organization and visibility.</td><td><code>fmt</code>, <code>net/http</code>, your <code>./internal/store</code></td></tr>
+      <tr><td><strong>Module</strong></td><td>A tree of packages with a <code>go.mod</code> at the root; the unit of versioning and release.</td><td><code>github.com/google/uuid</code></td></tr>
+      <tr><td><strong>Import path</strong></td><td>Module path + directory inside it. Used in <code>import</code> statements.</td><td><code>example.com/shop/internal/cart</code></td></tr>
+      <tr><td><strong>GOROOT</strong></td><td>Where Go itself (compiler + standard library) is installed.</td><td><code>/usr/local/go</code></td></tr>
+      <tr><td><strong>GOPATH</strong></td><td>Go's workspace for caches and installed binaries.</td><td><code>~/go</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Creating a module with <code>go mod init</code></h3>
+  <p>Every new project starts the same way. Make a folder, then initialize a module with a <em>module path</em> — the name other code would use to import it. By convention this is where the code is (or will be) hosted, like <code>github.com/you/hello</code>. For local experiments, anything works; <code>example.com/...</code> is a common placeholder.</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ mkdir hello && cd hello
+$ go mod init example.com/hello
+go: creating new go.mod: module example.com/hello
+$ cat go.mod
+module example.com/hello
+
+go 1.27.1</code></pre></div>
+  <p>That's the whole file for now. The <code>module</code> line names your module. The <code>go</code> line says which version of the Go language this module is written for — it controls language features and some behaviors (you'll see in Chapter 03 how it changes loop variable semantics). When you add dependencies, <code>require</code> lines appear here too.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Pick the module path you'll actually publish under from day one (e.g. <code>github.com/acme/billing</code>). Renaming a module later means rewriting every import in the codebase and in every consumer. For internal company code, use the internal Git host's path (<code>git.acme.corp/team/billing</code>) and set <code>GOPRIVATE=git.acme.corp</code> so the public proxy is never asked about it.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Hello, World — line by line</h2>
+  <p>Create <code>main.go</code> in your <code>hello</code> folder:</p>
+  <div class="live" data-title="Hello, World runs">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello, Gopher!")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1">The compiler reads the package clause first. <code>package main</code> means "build an executable", not a library.</li>
+      <li data-lines="3"><code>import "fmt"</code> makes the standard formatting package available. Before <code>main</code> runs, the runtime initializes <code>fmt</code> (and everything it imports).</li>
+      <li data-lines="5">Execution of <em>your</em> code begins here, at <code>func main()</code> in package <code>main</code>. It takes no arguments and returns nothing.</li>
+      <li data-lines="6" data-out="Hello, Gopher!"><code>fmt.Println</code> writes its argument to standard output and adds a newline.</li>
+      <li data-lines="7" data-state="exit=0"><code>main</code> returns, so the program exits with status 0. No explicit <code>return 0</code> needed.</li>
+    </ol>
+  </div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go run .
+Hello, Gopher!</code></pre></div>
+  <p>Seven lines. Let's take every one seriously, because each teaches a rule you'll use forever.</p>
+  <ol>
+    <li><code>package main</code> — Every Go file starts by saying which <strong>package</strong> it belongs to. All files in one directory must use the same package name. <code>main</code> is special: it tells Go "this package builds an executable program, not a library."</li>
+    <li>(blank line) — purely for humans. <code>gofmt</code> puts it there.</li>
+    <li><code>import "fmt"</code> — Pulls in the standard library package <code>fmt</code> (short for <em>format</em>; Gophers say "fumpt"), which handles formatted input and output. You may only use packages you import, and you <em>must</em> use every package you import.</li>
+    <li>(blank line)</li>
+    <li><code>func main() {</code> — Declares a function named <code>main</code> that takes no arguments and returns nothing. In package <code>main</code>, the function <code>main</code> is the <strong>entry point</strong>: the program starts here, and when it returns, the program exits.</li>
+    <li><code>fmt.Println("Hello, Gopher!")</code> — Calls the <code>Println</code> function from package <code>fmt</code>. The capital <code>P</code> matters: in Go, a name starting with an uppercase letter is <strong>exported</strong> (visible outside its package). Lowercase names are private to the package. <code>Println</code> prints its arguments separated by spaces and adds a newline.</li>
+    <li><code>}</code> — Closes the function body.</li>
+  </ol>
+  <p>Notice what's <em>not</em> there: no semicolons, no class wrapper, no <code>public static void</code>, no return code. If <code>main</code> returns normally, the exit code is 0.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model: packages are folders</div><p>Think of a package as a folder of files that share one namespace — every file in it can see every other file's names, even lowercase ones. The outside world only sees the Capitalized names. That's the whole visibility system: no <code>public</code>, <code>private</code> or <code>protected</code> keywords.</p></div>
+
+  <p>Let's watch a slightly bigger program run. Every line inside <code>main</code> executes top to bottom, exactly once:</p>
+  <div class="live" data-title="Watch main() execute line by line">
+    <pre><code class="language-go">name := "gopher"
+shout := strings.ToUpper(name)
+fmt.Println("Hello,", name)
+fmt.Println("HELLO,", shout+"!")
+n := len(name)
+fmt.Printf("%q has %d letters\n", name, n)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="name=&quot;gopher&quot;"><code>:=</code> declares a new variable <code>name</code> and gives it the string <code>"gopher"</code>. Go infers the type <code>string</code> from the value.</li>
+      <li data-lines="2" data-state="name=&quot;gopher&quot;; shout=&quot;GOPHER&quot;">We call <code>strings.ToUpper</code> (from the <code>strings</code> package we imported). It returns a <em>new</em> string — strings in Go are immutable, so <code>name</code> is unchanged.</li>
+      <li data-lines="3" data-state="name=&quot;gopher&quot;; shout=&quot;GOPHER&quot;" data-out="Hello, gopher"><code>Println</code> receives two arguments and prints them with a single space between, then a newline.</li>
+      <li data-lines="4" data-state="name=&quot;gopher&quot;; shout=&quot;GOPHER&quot;" data-out="HELLO, GOPHER!"><code>+</code> concatenates strings, so the second argument is <code>"GOPHER!"</code>.</li>
+      <li data-lines="5" data-state="name=&quot;gopher&quot;; shout=&quot;GOPHER&quot;; n=6"><code>len</code> is a built-in function. For a string it returns the number of <em>bytes</em> (here 6, since every letter is one byte in UTF-8).</li>
+      <li data-lines="6" data-state="name=&quot;gopher&quot;; shout=&quot;GOPHER&quot;; n=6" data-out="&quot;gopher&quot; has 6 letters"><code>Printf</code> uses a format string: <code>%q</code> prints a quoted string, <code>%d</code> a decimal integer, and <code>\n</code> is a newline (Printf doesn't add one for you). Then <code>main</code> returns and the program exits with code 0.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Hello, gopher
+HELLO, GOPHER!
+"gopher" has 6 letters</pre></div>
+
+  <h3>The whole language in 25 keywords</h3>
+  <p>One way to feel how small Go is: here is every keyword in the language. You'll know all of them by the end of Part III.</p>
+  <table>
+    <thead><tr><th>Category</th><th>Keywords</th><th>Covered in</th></tr></thead>
+    <tbody>
+      <tr><td>Declarations</td><td><code>package import var const type func</code></td><td>Ch 01, 02, 04</td></tr>
+      <tr><td>Control flow</td><td><code>if else for range switch case default fallthrough break continue goto return defer</code></td><td>Ch 03, 04</td></tr>
+      <tr><td>Composite types</td><td><code>struct interface map chan</code></td><td>Ch 05, 07, 08, 12</td></tr>
+      <tr><td>Concurrency</td><td><code>go select</code></td><td>Ch 12</td></tr>
+    </tbody>
+  </table>
+  <p>Things like <code>int</code>, <code>string</code>, <code>true</code>, <code>nil</code>, <code>len</code>, <code>append</code>, <code>make</code> and <code>min</code> are <em>not</em> keywords — they're <strong>predeclared identifiers</strong> living in the "universe" scope. (That means you technically <em>can</em> shadow them, e.g. name a variable <code>len</code>. Please don't.)</p>
+
+  <!-- ============================================================ -->
+  <h2>The go command: your everyday toolkit</h2>
+  <p>Go ships with one command, <code>go</code>, that has many subcommands. You'll use about ten of them constantly. Here they are with real output.</p>
+
+  <table>
+    <thead><tr><th>Command</th><th>What it does</th><th>When you use it</th></tr></thead>
+    <tbody>
+      <tr><td><code>go run .</code></td><td>Compiles to a temp dir and runs it immediately</td><td>Quick experiments, local dev</td></tr>
+      <tr><td><code>go build</code></td><td>Compiles and writes an executable (or just type-checks libraries)</td><td>Producing a binary to ship</td></tr>
+      <tr><td><code>go fmt ./...</code></td><td>Reformats code to the one official style (runs <code>gofmt -l -w</code>)</td><td>Constantly — usually on save</td></tr>
+      <tr><td><code>go vet ./...</code></td><td>Finds suspicious code that compiles but is probably wrong</td><td>Before every commit; in CI</td></tr>
+      <tr><td><code>go test ./...</code></td><td>Runs tests in <code>*_test.go</code> files</td><td>Constantly; in CI</td></tr>
+      <tr><td><code>go doc pkg.Name</code></td><td>Shows documentation in the terminal</td><td>Looking up an API quickly</td></tr>
+      <tr><td><code>go install pkg@version</code></td><td>Builds a program and puts it in <code>$GOPATH/bin</code></td><td>Installing Go-based CLI tools</td></tr>
+      <tr><td><code>go env</code></td><td>Prints Go's configuration variables</td><td>Debugging "why does my build behave like this?"</td></tr>
+      <tr><td><code>go mod tidy</code></td><td>Adds missing and removes unused dependencies in <code>go.mod</code>/<code>go.sum</code></td><td>After adding or removing imports</td></tr>
+      <tr><td><code>go get pkg@version</code></td><td>Adds or upgrades a dependency in <code>go.mod</code></td><td>Adding a library</td></tr>
+    </tbody>
+  </table>
+  <p>The pattern <code>./...</code> means "this directory and every package below it". You'll type it a lot.</p>
+
+  <h3><code>go run</code> vs <code>go build</code></h3>
+  <p><code>go run</code> is <code>go build</code> + execute + throw the binary away. It's for development. <code>go build</code> leaves the binary on disk:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go build -o hello .
+$ ls -lh hello
+2.3M hello
+$ ./hello
+Hello, Gopher!</code></pre></div>
+  <p>Without <code>-o</code>, the binary is named after the module's last path element (here <code>hello</code>). Both commands cache compiled packages, so the second build is nearly instant.</p>
+
+  <h3><code>go vet</code>: the friendly bug-finder</h3>
+  <p>The compiler checks that your program is <em>legal</em>. <code>go vet</code> checks whether it's <em>sensible</em>. A classic example — the wrong formatting verb:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	name := "gopher"
+	fmt.Printf("Hello, %d\n", name) // wrong verb: %d is for integers
+}</code></pre></div>
+  <p>This compiles and runs (printing garbage like <code>%!d(string=gopher)</code>). But vet catches it:</p>
+  <div class="output error" data-label="go vet main.go"><pre>main.go:7:21: fmt.Printf format %d has arg name of wrong type string</pre></div>
+  <p>Vet checks for dozens of mistakes: wrong <code>Printf</code> arguments, unreachable code, copying a lock by value, misuse of struct tags, loop variables captured incorrectly, suspicious shifts and more. <code>go test</code> automatically runs a subset of vet checks before running tests.</p>
+
+  <h3><code>go fmt</code> / <code>gofmt</code>: one true style</h3>
+  <p>Here's some messy, legal Go code:</p>
+  <div class="code" data-file="main.go (before)"><pre><code class="language-go">package main
+import "fmt"
+func main(){
+x:=1
+    if x&gt;0 {fmt.Println( "positive" )}
+}</code></pre></div>
+  <p>Running <code>gofmt main.go</code> prints the canonical version (add <code>-w</code> to write it back to the file, <code>-l</code> to just list files that need formatting, <code>-d</code> to see a diff):</p>
+  <div class="code" data-file="main.go (after gofmt)"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	x := 1
+	if x &gt; 0 {
+		fmt.Println("positive")
+	}
+}</code></pre></div>
+  <p>Tabs for indentation, spaces for alignment, one statement per line, spaces around binary operators where it helps readability. There are <strong>no options</strong> to configure. That's the point.</p>
+
+  <h3><code>go test</code>: testing is built in</h3>
+  <p>Any file ending in <code>_test.go</code> is a test file. Any function named <code>TestXxx(t *testing.T)</code> inside it is a test. No framework to install:</p>
+  <div class="code" data-file="hello.go"><pre><code class="language-go">package hellotest
+
+// Greeting returns a greeting for name.
+func Greeting(name string) string {
+	return "Hello, " + name + "!"
+}</code></pre></div>
+  <div class="live" data-title="What go test does with TestGreeting">
+    <pre><code class="language-go">package hellotest
+
+import "testing"
+
+func TestGreeting(t *testing.T) {
+	got := Greeting("Go")
+	want := "Hello, Go!"
+	if got != want {
+		t.Errorf("Greeting(%q) = %q, want %q", "Go", got, want)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5" data-out="=== RUN   TestGreeting"><code>go test</code> compiles <code>hello.go</code> and <code>hello_test.go</code> together into a temporary test binary, finds every <code>func TestXxx(t *testing.T)</code>, and calls them. With <code>-v</code> it announces each one.</li>
+      <li data-lines="6" data-state="got=&quot;Hello, Go!&quot;">The test calls the real <code>Greeting</code> function. Same package (<code>hellotest</code>), so even unexported names would be visible here.</li>
+      <li data-lines="7" data-state="got=&quot;Hello, Go!&quot;; want=&quot;Hello, Go!&quot;">The expected value is written out literally. Keep expectations dumb and explicit — never recompute them with the same logic you are testing.</li>
+      <li data-lines="8" data-state="got=&quot;Hello, Go!&quot;; want=&quot;Hello, Go!&quot;">They are equal, so <code>t.Errorf</code> is skipped. Had they differed, <code>Errorf</code> would log the message and mark the test failed, but keep running the rest of the function.</li>
+      <li data-lines="11" data-state="got=&quot;Hello, Go!&quot;; want=&quot;Hello, Go!&quot;; result=PASS" data-out="--- PASS: TestGreeting (0.00s)">The function returns without any failure recorded, so the test passes.</li>
+      <li data-lines="11" data-state="result=PASS" data-out="PASS\nok  	example.com/hellotest	0.477s">All tests in the package passed. The last line shows the package path and how long the run took (this number varies).</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go test -v ./..."><pre>=== RUN   TestGreeting
+--- PASS: TestGreeting (0.00s)
+PASS
+ok  	example.com/hellotest	0.477s</pre></div>
+  <p class="muted">(The timing on the last line varies run to run.) Chapter 15 covers testing in depth: table-driven tests, subtests, benchmarks, fuzzing and coverage.</p>
+
+  <h3><code>go doc</code>: documentation in your terminal</h3>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go doc strings.ToUpper
+package strings // import "strings"
+
+func ToUpper(s string) string
+    ToUpper returns s with all Unicode letters mapped to their upper case.</code></pre></div>
+  <p>It works on your own packages too — we'll see that in the doc comments section below.</p>
+
+  <h3><code>go env</code>: what is Go configured to do?</h3>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go env GOOS GOARCH GOVERSION GOPROXY
+darwin
+arm64
+go1.27.1
+https://proxy.golang.org,direct</code></pre></div>
+  <p>Run <code>go env</code> with no arguments to see everything. Important ones: <code>GOOS</code>/<code>GOARCH</code> (target platform), <code>GOPATH</code>, <code>GOMODCACHE</code> (where downloaded modules live), <code>GOPROXY</code> (where modules are downloaded from), <code>GOPRIVATE</code> (module paths that bypass the proxy), <code>CGO_ENABLED</code> (whether C code may be linked in) and <code>GOFLAGS</code> (default flags for every <code>go</code> command). Change one persistently with <code>go env -w NAME=value</code>.</p>
+
+  <h3><code>go install</code> and <code>go mod tidy</code></h3>
+  <div class="code" data-file="terminal"><pre><code class="language-bash"># install a CLI tool written in Go (lands in $(go env GOPATH)/bin)
+go install golang.org/x/tools/cmd/goimports@latest
+
+# add a dependency to your module
+go get github.com/google/uuid@v1.6.0
+
+# after you add/remove imports: sync go.mod and go.sum with the code
+go mod tidy</code></pre></div>
+  <p><code>go mod tidy</code> is the one to remember. It reads every import in your code, adds any module that's missing, removes ones nothing uses, and updates <code>go.sum</code>. Run it before committing whenever imports changed.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: the pre-commit trio</div><p>Make this muscle memory, and enforce it in CI so nobody has to argue about it in code review:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">gofmt -l . | (! grep .)   # fail if anything is unformatted
+go vet ./...
+go test -race ./...       # -race finds data races in concurrent code</code></pre></div>
+  <p>Many teams add <code>staticcheck</code> or <code>golangci-lint</code> on top, and run <code>go mod tidy</code> in CI and fail if it changes anything (<code>git diff --exit-code go.mod go.sum</code>).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>How compilation works: one static binary</h2>
+  <p>When you run <code>go build</code>, a lot happens in a second or two. Here's the pipeline, simplified:</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="760" height="250" fill="#262624" rx="10"/>
+      <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <!-- sources -->
+      <rect x="20" y="30" width="130" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="85" y="57" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">main.go …</text>
+      <rect x="20" y="88" width="130" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="85" y="115" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">deps (go.mod)</text>
+      <rect x="20" y="146" width="130" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="85" y="173" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">stdlib (fmt…)</text>
+      <!-- compiler -->
+      <rect x="210" y="40" width="190" height="140" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="305" y="64" text-anchor="middle" fill="#7fa6d9" font-size="14" font-weight="600">compiler (per package)</text>
+      <text x="305" y="90" text-anchor="middle" fill="#ece9e1" font-size="12">parse → type-check</text>
+      <text x="305" y="112" text-anchor="middle" fill="#ece9e1" font-size="12">escape analysis, inlining</text>
+      <text x="305" y="134" text-anchor="middle" fill="#ece9e1" font-size="12">SSA optimize → machine code</text>
+      <text x="305" y="160" text-anchor="middle" fill="#a8a49a" font-size="11">results cached in GOCACHE</text>
+      <!-- linker -->
+      <rect x="450" y="70" width="120" height="80" rx="8" fill="#2e2d2a" stroke="#e0b45c"/>
+      <text x="510" y="105" text-anchor="middle" fill="#e0b45c" font-size="14" font-weight="600">linker</text>
+      <text x="510" y="126" text-anchor="middle" fill="#a8a49a" font-size="11">+ Go runtime</text>
+      <!-- binary -->
+      <rect x="615" y="60" width="125" height="100" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/>
+      <text x="677" y="98" text-anchor="middle" fill="#8fbf7f" font-size="14" font-weight="600">one binary</text>
+      <text x="677" y="120" text-anchor="middle" fill="#a8a49a" font-size="11">no VM, no deps</text>
+      <text x="677" y="138" text-anchor="middle" fill="#a8a49a" font-size="11">GOOS/GOARCH</text>
+      <path d="M150 52 L208 90" stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a1)"/>
+      <path d="M150 110 L208 110" stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a1)"/>
+      <path d="M150 168 L208 130" stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a1)"/>
+      <path d="M400 110 L448 110" stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a1)"/>
+      <path d="M570 110 L613 110" stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a1)"/>
+      <text x="380" y="225" text-anchor="middle" fill="#a8a49a" font-size="12">Each package compiles independently (in parallel); the linker stitches everything into a single executable.</text>
+    </svg>
+    <figcaption>From source to a self-contained executable.</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>Resolve dependencies.</strong> The <code>go</code> tool reads <code>go.mod</code>, downloads any missing modules into the module cache, and verifies them against <code>go.sum</code>.</li>
+    <li><strong>Compile each package.</strong> Packages form a graph with no cycles (Go forbids import cycles), so independent packages compile in parallel. Each is parsed, type-checked, analyzed (e.g. <em>escape analysis</em> decides whether a value can live on the fast stack or must go on the garbage-collected heap — Chapter 18), optimized and turned into machine code.</li>
+    <li><strong>Cache.</strong> Compiled packages are stored in the build cache (<code>go env GOCACHE</code>). Unchanged packages are never recompiled.</li>
+    <li><strong>Link.</strong> The linker combines your code, your dependencies, the parts of the standard library you use, and the <strong>Go runtime</strong> (the garbage collector, goroutine scheduler and memory allocator) into one executable file.</li>
+  </ol>
+
+  <h3>"Static" means: just copy it</h3>
+  <p>The resulting binary doesn't need Go installed on the target machine. Cross-compiling for another platform is just two environment variables — no extra toolchain to install:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ GOOS=linux GOARCH=amd64 go build -o hello-linux .
+$ file hello-linux
+hello-linux: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=…, with debug_info, not stripped
+
+$ GOOS=windows GOARCH=amd64 go build -o hello.exe .
+$ file hello.exe
+hello.exe: PE32+ executable (console) x86-64, for MS Windows</code></pre></div>
+  <p>From a Mac, we just built a Linux server binary and a Windows program. Run <code>go tool dist list</code> to see every supported <code>GOOS/GOARCH</code> pair (there are dozens, including <code>linux/arm64</code> for Raspberry Pi and AWS Graviton, and <code>js/wasm</code> / <code>wasip1/wasm</code> for WebAssembly).</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: "static" has fine print</div><p>On Linux, a pure-Go binary is fully static. But if your program (or a dependency) uses <strong>cgo</strong> — calling C code — or certain packages like <code>net</code> and <code>os/user</code> choose the system's C library for DNS/user lookups, the binary may link dynamically against <code>libc</code>. Build with <code>CGO_ENABLED=0</code> to force a pure-Go static binary; this is what you want for minimal Docker images like <code>scratch</code> or <code>distroless</code>. (On macOS, binaries always link the system library <code>libSystem</code>, because Apple requires it.)</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: production build flags</div><p>A typical release build looks like:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=v1.4.2" -o app ./cmd/app</code></pre></div>
+  <p><code>-trimpath</code> removes your local file paths from the binary (reproducible builds, no leaked home directory). <code>-s -w</code> strip the symbol table and debug info (our hello went from 2.3M to 1.5M). <code>-X</code> injects a value into a string variable at link time — the standard way to stamp a version. Also know <code>go version -m ./app</code>: it prints the exact module versions baked into any Go binary, which is gold during incident response.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Editor setup: gopls, VS Code and friends</h2>
+  <p>Go has an official <strong>language server</strong> called <strong>gopls</strong> ("go please"). A language server is a background program your editor talks to for smart features: autocomplete, go-to-definition, find references, rename across the project, inline errors as you type, and organizing imports. Because it's one shared tool, every editor gets the same quality.</p>
+  <h3>VS Code (most popular)</h3>
+  <ol>
+    <li>Install the <strong>Go</strong> extension (published by the Go team at Google).</li>
+    <li>Open a folder containing a <code>go.mod</code>. The extension offers to install <code>gopls</code> and other tools — accept.</li>
+    <li>Turn on format-on-save. The extension formats with <code>gofmt</code> and organizes imports automatically: type <code>strings.ToUpper</code> and the <code>import "strings"</code> line appears on save.</li>
+  </ol>
+  <div class="code" data-file="settings.json"><pre><code class="language-json">{
+  "[go]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
+  },
+  "gopls": {
+    "ui.semanticTokens": true,
+    "ui.diagnostic.staticcheck": true
+  }
+}</code></pre></div>
+  <h3>Other editors</h3>
+  <ul>
+    <li><strong>GoLand</strong> (JetBrains): a full commercial IDE with excellent refactoring and debugging out of the box.</li>
+    <li><strong>Neovim / Vim / Emacs / Helix / Zed</strong>: point the built-in LSP client at <code>gopls</code>.</li>
+  </ul>
+  <p>For debugging, the standard Go debugger is <strong>Delve</strong> (<code>dlv</code>). VS Code and GoLand use it under the hood when you set a breakpoint and press F5.</p>
+
+  <div class="callout tip"><p>Learn three gopls features early: <strong>Go to Definition</strong> (jump into the standard library source — it's very readable and the best way to learn idiomatic Go), <strong>Find References</strong>, and <strong>Rename Symbol</strong> (safe, project-wide renames).</p></div>
+
+  <h3>The Go Playground</h3>
+  <p>At <code>go.dev/play</code> you can run Go in the browser with nothing installed. It's perfect for trying a snippet or sharing a reproducible example in a bug report or code review ("here's a playground link that shows the problem"). Limitations: no network access, limited time and memory, and — a classic surprise — the clock starts at a fixed date (2009-11-10 23:00:00 UTC, Go's open-source birthday), so <code>time.Now()</code> looks frozen and output is deterministic.</p>
+
+  <h3>Reading docs at pkg.go.dev</h3>
+  <p><code>pkg.go.dev</code> hosts documentation for the standard library and every public Go module. Search a package (try <code>strings</code>), and you'll see: the package overview, an index of every exported function and type, runnable examples, the module's version history, its license, and who imports it. Docs are generated directly from code comments — which brings us to comments.</p>
+
+  <!-- ============================================================ -->
+  <h2>Comments and doc comments</h2>
+  <p>Go has two comment styles, same as C:</p>
+  <div class="code" data-file="comments.go"><pre><code class="language-go">// A line comment runs to the end of the line. This is what you'll use 99% of the time.
+
+/* A block comment
+   can span lines. Mostly used for temporarily disabling code
+   or for long license headers. */</code></pre></div>
+  <p>A <strong>doc comment</strong> is simply a comment placed directly above a top-level declaration (package, function, type, const, var), with no blank line between. Tools like <code>go doc</code>, pkg.go.dev and your editor's hover display them. The conventions:</p>
+  <ul>
+    <li>Start with the name of the thing: <code>// Hello returns ...</code>, <code>// Package greet builds ...</code>.</li>
+    <li>Write full sentences. The first sentence is the summary shown in indexes.</li>
+    <li>Since Go 1.19, doc comments support light formatting: blank-line paragraphs, lists starting with <code>-</code>, indented code blocks, <code># Headings</code>, and links like <code>[DefaultName]</code> or <code>[strings.ToUpper]</code>.</li>
+  </ul>
+  <div class="code" data-file="greet/greet.go"><pre><code class="language-go">// Package greet builds friendly greetings.
+//
+// It is a tiny example package used to show how
+// doc comments become documentation.
+package greet
+
+import "fmt"
+
+// DefaultName is used when Hello is called with an empty name.
+const DefaultName = "Gopher"
+
+// Hello returns a greeting for name.
+// If name is empty, it greets [DefaultName] instead.
+func Hello(name string) string {
+	if name == "" {
+		name = DefaultName
+	}
+	return fmt.Sprintf("Hello, %s!", name)
+}</code></pre></div>
+  <div class="live" data-title="Calling into the greet package">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"example.com/doccmt/greet"
+)
+
+func main() {
+	fmt.Println(greet.Hello(""))
+	fmt.Println(greet.Hello("Ada"))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6">The import path is the module path plus the folder: <code>example.com/doccmt</code> + <code>/greet</code>. Inside this file we refer to the package by its name, <code>greet</code>.</li>
+      <li data-lines="10" data-state="name=&quot;&quot;">We call <code>greet.Hello("")</code>. Only <code>Hello</code> (capital H) is reachable from here — a lowercase function in <code>greet</code> would be invisible.</li>
+      <li data-lines="10" data-state="name=&quot;Gopher&quot;">Inside <code>Hello</code>, the empty name triggers the <code>if name == ""</code> branch and <code>name</code> is replaced with the exported constant <code>DefaultName</code>.</li>
+      <li data-lines="10" data-state="name=&quot;Gopher&quot;; result=&quot;Hello, Gopher!&quot;" data-out="Hello, Gopher!"><code>fmt.Sprintf</code> builds the string and <code>Hello</code> returns it; <code>Println</code> prints it.</li>
+      <li data-lines="11" data-state="name=&quot;Ada&quot;; result=&quot;Hello, Ada!&quot;" data-out="Hello, Ada!">Second call: a non-empty name skips the <code>if</code>, so the greeting uses <code>"Ada"</code> directly. <code>main</code> returns and the program exits.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Hello, Gopher!
+Hello, Ada!</pre></div>
+  <p>Now ask <code>go doc</code> about it. Notice how the comments became documentation, and <code>[DefaultName]</code> became a cross-reference:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go doc ./greet
+package greet // import "example.com/doccmt/greet"
+
+Package greet builds friendly greetings.
+
+It is a tiny example package used to show how doc comments become documentation.
+
+const DefaultName = "Gopher"
+func Hello(name string) string</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go doc ./greet Hello
+package greet // import "example.com/doccmt/greet"
+
+func Hello(name string) string
+    Hello returns a greeting for name. If name is empty, it greets DefaultName
+    instead.</code></pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Document <em>every</em> exported identifier, and explain the <em>why</em> and the <em>contract</em>, not the <em>how</em>: what are valid inputs, what's returned on error, is it safe to call from multiple goroutines, who owns (closes) the returned resource. A comment like <code>// GetUser gets the user</code> is noise. <code>// GetUser returns ErrNotFound if no user has the given id. It is safe for concurrent use.</code> saves your teammates real time. Linters like <code>revive</code> can enforce that exported names have doc comments.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Semicolons you don't write</h2>
+  <p>Go's grammar actually uses semicolons to end statements, like C. You just never type them, because the <strong>lexer</strong> (the part of the compiler that splits source text into tokens) inserts them automatically. The rule, simplified:</p>
+  <div class="callout mental"><div class="callout-title">The semicolon rule</div><p>When a line ends with something that could end a statement — an identifier, a literal (<code>42</code>, <code>"hi"</code>), one of the keywords <code>break continue fallthrough return</code>, the operators <code>++ --</code>, or a closing <code>) ] }</code> — Go puts a semicolon there.</p></div>
+  <p>This has one huge consequence: <strong>an opening brace must be on the same line</strong>. Look what happens if you put it on the next line, C#-style:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main()
+{
+	fmt.Println("brace on its own line")
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:6:1: syntax error: unexpected semicolon or newline before {</pre></div>
+  <p>The line <code>func main()</code> ends with <code>)</code>, so Go inserted a semicolon after it — and <code>func main();</code> followed by a lonely <code>{</code> is a syntax error. The same rule explains why a multi-line list needs a trailing comma:</p>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Syntax error"><pre><code class="language-go">nums := []int{
+	1,
+	2,
+	3
+}
+// syntax error: unexpected newline in
+// composite literal; possibly missing
+// comma or }</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Trailing comma"><pre><code class="language-go">nums := []int{
+	1,
+	2,
+	3, // trailing comma required
+}
+// Bonus: adding a 4th line later is a
+// one-line diff in code review.</code></pre></div></div>
+  </div>
+  <p>You <em>can</em> write semicolons yourself to put two statements on one line (<code>a := 1; b := 2</code>), and you'll see them in <code>for</code> loop headers (<code>for i := 0; i &lt; n; i++</code>). <code>gofmt</code> will split the first form onto separate lines anyway.</p>
+
+  <!-- ============================================================ -->
+  <h2>Strict by design: unused imports and variables</h2>
+  <p>Go refuses to compile a program with an unused import or an unused local variable. Beginners find this annoying for about a week. Then they come to love it.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	x := 42
+	fmt.Println("hi")
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:5:2: "os" imported and not used
+./main.go:9:2: declared and not used: x</pre></div>
+  <p>Why so strict? An unused import slows down every build and can drag in side effects (a package's <code>init</code> code runs whenever it's imported). An unused variable is very often a bug — you computed something and forgot to use it, or a typo meant you used a different variable.</p>
+  <div class="callout tip"><p>While experimenting, assign to the <strong>blank identifier</strong> <code>_</code> to silence the error temporarily: <code>_ = x</code>. For imports, <code>import _ "image/png"</code> means "import only for its side effects" (here: registering the PNG decoder). Chapter 02 covers <code>_</code> fully. Better still, let your editor's organize-imports fix imports for you.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>How a Go program starts</h2>
+  <p>When you run a Go binary, a precise sequence happens before your <code>main</code> function's first line. Knowing it removes a whole category of "why is this nil?" bugs.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="760" height="200" fill="#262624" rx="10"/>
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <rect x="15" y="50" width="150" height="80" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="90" y="80" text-anchor="middle" fill="#a8a49a" font-size="12">0 · runtime setup</text>
+      <text x="90" y="102" text-anchor="middle" fill="#ece9e1" font-size="12">heap, GC, scheduler</text>
+      <rect x="200" y="50" width="160" height="80" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="280" y="80" text-anchor="middle" fill="#7fa6d9" font-size="12" font-weight="600">1 · imported packages</text>
+      <text x="280" y="102" text-anchor="middle" fill="#ece9e1" font-size="12">fully initialized first</text>
+      <rect x="395" y="50" width="160" height="80" rx="8" fill="#2e2d2a" stroke="#e0b45c"/>
+      <text x="475" y="80" text-anchor="middle" fill="#e0b45c" font-size="12" font-weight="600">2 · package vars</text>
+      <text x="475" y="102" text-anchor="middle" fill="#ece9e1" font-size="12">in dependency order</text>
+      <rect x="590" y="20" width="155" height="60" rx="8" fill="#2e2d2a" stroke="#e0b45c"/>
+      <text x="667" y="46" text-anchor="middle" fill="#e0b45c" font-size="12" font-weight="600">3 · init() funcs</text>
+      <text x="667" y="66" text-anchor="middle" fill="#ece9e1" font-size="11">in source order</text>
+      <rect x="590" y="110" width="155" height="60" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/>
+      <text x="667" y="136" text-anchor="middle" fill="#8fbf7f" font-size="12" font-weight="600">4 · main()</text>
+      <text x="667" y="156" text-anchor="middle" fill="#ece9e1" font-size="11">returns → exit 0</text>
+      <path d="M165 90 L198 90" stroke="#d97757" stroke-width="1.6" marker-end="url(#a2)"/>
+      <path d="M360 90 L393 90" stroke="#d97757" stroke-width="1.6" marker-end="url(#a2)"/>
+      <path d="M555 80 L588 55" stroke="#d97757" stroke-width="1.6" marker-end="url(#a2)"/>
+      <path d="M667 80 L667 108" stroke="#d97757" stroke-width="1.6" marker-end="url(#a2)"/>
+      <text x="380" y="188" text-anchor="middle" fill="#a8a49a" font-size="12">Steps 1–3 happen for every package, deepest dependency first; each package initializes exactly once.</text>
+    </svg>
+    <figcaption>Program startup order.</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>Runtime setup.</strong> The Go runtime initializes memory, the garbage collector and the goroutine scheduler.</li>
+    <li><strong>Imported packages first.</strong> If <code>main</code> imports <code>fmt</code>, and <code>fmt</code> imports <code>os</code>, then <code>os</code> is initialized before <code>fmt</code>, which is initialized before <code>main</code>. Each package is initialized exactly once, no matter how many packages import it.</li>
+    <li><strong>Package-level variables</strong> are initialized. Order: by <em>dependency</em> first — if <code>a</code>'s initializer uses <code>b</code>, then <code>b</code> is initialized first, even if it's declared later or in another file. Otherwise, in the order they appear.</li>
+    <li><strong><code>init()</code> functions</strong> run. Any file can have any number of <code>func init()</code>. They take no arguments, return nothing, and you cannot call them yourself. Within a package they run in the order the files are presented to the compiler (alphabetical by filename with the <code>go</code> tool) and top to bottom within a file.</li>
+    <li><strong><code>main()</code></strong> runs. When it returns, the program exits — <em>immediately</em>, even if other goroutines are still running.</li>
+  </ol>
+
+  <div class="live" data-title="Trace the startup sequence">
+    <pre><code class="language-go">var greeting = makeGreeting()
+
+func makeGreeting() string {
+	fmt.Println("1. package var initialized")
+	return "hi"
+}
+
+func init() {
+	fmt.Println("2. init() runs, greeting =", greeting)
+	greeting += " there"
+}
+
+func main() {
+	fmt.Println("3. main() runs:", greeting)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="greeting=(not yet set)">Before anything in <code>main</code>, Go initializes package-level variables. <code>greeting</code>'s initializer is a function call, so Go calls <code>makeGreeting()</code>.</li>
+      <li data-lines="3-5" data-state="greeting=(being set)" data-out="1. package var initialized"><code>makeGreeting</code> prints and returns <code>"hi"</code>.</li>
+      <li data-lines="1" data-state="greeting=&quot;hi&quot;">The returned value is stored in <code>greeting</code>. All package variables are now initialized.</li>
+      <li data-lines="8-9" data-state="greeting=&quot;hi&quot;" data-out="2. init() runs, greeting = hi">Next, <code>init()</code> runs automatically. It can rely on every package variable already having its value.</li>
+      <li data-lines="10" data-state="greeting=&quot;hi there&quot;"><code>init</code> modifies the package variable. This is a typical use: finishing setup that can't be written as a simple expression.</li>
+      <li data-lines="13-14" data-state="greeting=&quot;hi there&quot;" data-out="3. main() runs: hi there">Finally <code>main()</code> runs and sees the fully prepared state. When it returns, the program exits with status 0.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1. package var initialized
+2. init() runs, greeting = hi
+3. main() runs: hi there</pre></div>
+
+  <h3>Across multiple files</h3>
+  <p>Here's a package split over three files. Watch how dependency order beats file order for variables, while <code>init</code> functions follow file order:</p>
+  <div class="code" data-file="a.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// total depends on base, so Go initializes base first,
+// even though base is declared later (in b.go).
+var total = trace("total", base*2)
+
+func init() {
+	fmt.Println("init() in a.go")
+}</code></pre></div>
+  <div class="code" data-file="b.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+var base = trace("base", 21)
+
+func init() {
+	fmt.Println("init() in b.go")
+}
+
+func trace(name string, v int) int {
+	fmt.Printf("initializing %s = %d\n", name, v)
+	return v
+}</code></pre></div>
+  <div class="live" data-title="Startup order across three files">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func init() {
+	fmt.Println("init() in main.go (first one)")
+}
+
+func init() {
+	fmt.Println("init() in main.go (second one)")
+}
+
+func main() {
+	fmt.Println("main() starts; total =", total)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="base=(not set); total=(not set)">Before any line of <code>main.go</code> runs, Go initializes package variables across <em>all three files</em>. <code>a.go</code> sorts first, but its <code>total = trace("total", base*2)</code> needs <code>base</code>, so Go jumps to <code>b.go</code>.</li>
+      <li data-lines="1" data-state="base=21; total=(not set)" data-out="initializing base = 21"><code>base = trace("base", 21)</code> in <code>b.go</code> runs first and prints.</li>
+      <li data-lines="1" data-state="base=21; total=42" data-out="initializing total = 42">With <code>base</code> ready, <code>total</code>'s initializer computes <code>21*2</code>. Every package variable is now set.</li>
+      <li data-lines="1" data-state="base=21; total=42" data-out="init() in a.go\ninit() in b.go">Now the <code>init</code> functions run in file order: <code>a.go</code>, then <code>b.go</code>. Variable order followed dependencies; <code>init</code> order follows files.</li>
+      <li data-lines="5-6" data-state="base=21; total=42" data-out="init() in main.go (first one)"><code>main.go</code> is last alphabetically. Its first <code>init</code> runs. Yes, one file can have several.</li>
+      <li data-lines="9-10" data-state="base=21; total=42" data-out="init() in main.go (second one)">Its second <code>init</code> runs, top to bottom within the file.</li>
+      <li data-lines="13-14" data-state="base=21; total=42" data-out="main() starts; total = 42">Only after all of that does <code>main</code> start, and it sees <code>total</code> fully initialized.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>initializing base = 21
+initializing total = 42
+init() in a.go
+init() in b.go
+init() in main.go (first one)
+init() in main.go (second one)
+main() starts; total = 42</pre></div>
+  <p><code>total</code> lives in <code>a.go</code>, which comes first alphabetically, but it needs <code>base</code>, so <code>base</code> is initialized first. Then all the <code>init</code>s run: <code>a.go</code>'s, <code>b.go</code>'s, then <code>main.go</code>'s two in order.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: init() is a trap in large codebases</div><p><code>init</code> runs whenever a package is imported — including in tests and in tools that merely import your package. If it opens a database connection, reads a config file or calls the network, every import becomes slow and fragile, and errors can only be handled by panicking. Prefer explicit setup functions called from <code>main</code> (<code>db, err := store.Open(cfg)</code>). Reserve <code>init</code> for cheap, can't-fail work like registering a driver or building a lookup table.</p></div>
+
+  <h3>Exiting: return from main vs os.Exit</h3>
+  <p>Returning from <code>main</code> exits with status 0. To exit with a different status, call <code>os.Exit(code)</code>. But beware: <code>os.Exit</code> stops the program <em>instantly</em> — deferred functions (Chapter 03) do not run.</p>
+  <div class="live" data-title="os.Exit skips the deferred call">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	defer fmt.Println("cleanup (never printed!)")
+	fmt.Println("doing work...")
+	os.Exit(3) // exits immediately: deferred calls do NOT run
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8" data-state="deferred=[]"><code>main</code> starts. Nothing is scheduled yet.</li>
+      <li data-lines="9" data-state="deferred=[Println cleanup]"><code>defer</code> registers the <code>Println</code> to run when <code>main</code> <em>returns</em>. Nothing prints now.</li>
+      <li data-lines="10" data-state="deferred=[Println cleanup]" data-out="doing work...">Ordinary work prints its line.</li>
+      <li data-lines="11" data-state="deferred=[Println cleanup]; exit=3"><strong>Gotcha:</strong> <code>os.Exit(3)</code> terminates the process on the spot. <code>main</code> never returns, so the deferred call never fires — flushes, file closes and unlocks registered with <code>defer</code> are all skipped.</li>
+      <li data-lines="12" data-state="exit=3">This closing brace is never reached. The shell sees exit status 3 and only one line of output.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Output (exit status 3)"><pre>doing work...</pre></div>
+  <p>The standard fix is to move the real work into a <code>run</code> function that <em>returns</em> an exit code. Its defers fire on the way out, and <code>main</code> becomes a thin shell around it:</p>
+  <div class="live" data-title="The run() pattern: defers fire, then os.Exit">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func run(args []string) int {
+	defer fmt.Println("run: deferred cleanup")
+	if len(args) &lt; 2 {
+		fmt.Println("run: missing argument")
+		return 2
+	}
+	fmt.Println("run: hello,", args[1])
+	return 0
+}
+
+func main() {
+	code := run([]string{"prog"})
+	fmt.Println("main: exiting with", code)
+	os.Exit(code)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="19,8" data-state="args=[prog]; len(args)=1"><code>main</code> calls <code>run</code> with a fake argument list containing only the program name, as if the user typed no arguments.</li>
+      <li data-lines="9" data-state="args=[prog]; deferred=[Println cleanup]"><code>defer</code> does not print yet: it <em>schedules</em> the call to run when <code>run</code> returns, however it returns.</li>
+      <li data-lines="10-11" data-state="args=[prog]; deferred=[Println cleanup]" data-out="run: missing argument"><code>len(args)</code> is 1, which is less than 2, so we take the error branch.</li>
+      <li data-lines="12,9" data-state="args=[prog]; result=2; deferred=[]" data-out="run: deferred cleanup"><code>return 2</code> starts leaving the function, and <strong>right before</strong> control goes back to the caller, the deferred call fires.</li>
+      <li data-lines="19" data-state="code=2">Back in <code>main</code>, <code>code</code> holds 2. Lines 14–15 never ran.</li>
+      <li data-lines="20" data-state="code=2" data-out="main: exiting with 2">We log the exit code.</li>
+      <li data-lines="21" data-state="code=2"><code>os.Exit(2)</code> ends the process immediately with status 2. That's safe now: <code>main</code> has no defers of its own, and <code>run</code>'s cleanup already happened.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Output (exit status 2)"><pre>run: missing argument
+run: deferred cleanup
+main: exiting with 2</pre></div>
+
+  <p>Programs receive command-line arguments in <code>os.Args</code>, a list of strings where <code>os.Args[0]</code> is the program's own name. Let's trace a small CLI run as <code>go run . Ada Linus</code>:</p>
+  <div class="live" data-title="A tiny CLI: arguments, loop and exit code">
+    <pre><code class="language-go">args := os.Args[1:]
+if len(args) == 0 {
+	fmt.Fprintln(os.Stderr, "usage: greet NAME...")
+	os.Exit(2)
+}
+for i, name := range args {
+	fmt.Printf("%d: Hello, %s!\n", i+1, name)
+}
+fmt.Println("greeted", len(args), "people")</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="os.Args=[prog Ada Linus]; args=[Ada Linus]"><code>os.Args[1:]</code> takes everything after the program name. (The <code>[1:]</code> syntax is a <em>slice expression</em> — Chapter 05.)</li>
+      <li data-lines="2" data-state="args=[Ada Linus]; len(args)=2">The length is 2, not 0, so we skip the usage branch. With no arguments, we'd print usage to <em>stderr</em> and exit with status 2 (the Unix convention for "bad usage").</li>
+      <li data-lines="6-7" data-state="args=[Ada Linus]; i=0; name=Ada" data-out="1: Hello, Ada!"><code>range</code> walks the list, giving an index <code>i</code> and the element <code>name</code>. First iteration: index 0, so we print <code>i+1</code>.</li>
+      <li data-lines="6-7" data-state="args=[Ada Linus]; i=1; name=Linus" data-out="2: Hello, Linus!">Second iteration.</li>
+      <li data-lines="9" data-state="args=[Ada Linus]" data-out="greeted 2 people">The loop is done. We print a summary and <code>main</code> returns: exit status 0.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go run . Ada Linus"><pre>1: Hello, Ada!
+2: Hello, Linus!
+greeted 2 people</pre></div>
+  <div class="output" data-label="go run . (no args, exit status 2)"><pre>usage: greet NAME...</pre></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">In the multi-file example, why is <code>base</code> initialized before <code>total</code>, even though <code>a.go</code> (which declares <code>total</code>) comes first?</div>
+    <div class="quiz-opts">
+      <button>Because variables are initialized in reverse alphabetical file order</button>
+      <button>Because <code>init()</code> in <code>b.go</code> runs first</button>
+      <button>Because <code>total</code>'s initializer depends on <code>base</code>, and dependencies are initialized first</button>
+      <button>It's random; Go makes no guarantee</button>
+    </div>
+    <div class="quiz-explain">Package-level variables are initialized in dependency order. <code>total = base*2</code> needs <code>base</code>, so <code>base</code> goes first. All <code>init()</code> functions run only <em>after</em> every package variable is initialized.</div>
+  </div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Which of these will NOT compile?</div>
+    <div class="quiz-opts">
+      <button><code>if x &gt; 0 {</code> on one line, body on the next</button>
+      <button><code>func main()</code> on one line and <code>{</code> on the next</button>
+      <button>A multi-line slice literal ending in <code>3,</code> then <code>}</code></button>
+      <button>Two statements on one line separated by <code>;</code></button>
+    </div>
+    <div class="quiz-explain">The automatic semicolon rule inserts a <code>;</code> after the <code>)</code> at the end of <code>func main()</code>, leaving the <code>{</code> stranded. The other three are all legal Go.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The gofmt philosophy</h2>
+  <p>Most languages have style wars: tabs vs spaces, where braces go, how to align things. Go ended them by shipping a formatter on day one and making its output the community standard. As Rob Pike put it, "Gofmt's style is no one's favorite, yet gofmt is everyone's favorite."</p>
+  <ul>
+    <li><strong>Code reviews focus on substance.</strong> Nobody comments on spacing.</li>
+    <li><strong>Diffs are clean.</strong> Changes show only real changes, never reformatting noise.</li>
+    <li><strong>Tools can rewrite code safely.</strong> Because there's one canonical form, tools like <code>gofmt -r</code>, <code>gopls</code> renames and <code>go fix</code> can edit code and re-format it without anyone noticing a difference in style.</li>
+    <li><strong>All Go looks the same.</strong> The standard library, Kubernetes and your company's code are visually identical, so reading unfamiliar code is easier.</li>
+  </ul>
+  <p>The same philosophy shows up across the toolchain: one build tool, one test runner, one doc format, one dependency system. Go prefers <em>one obvious way</em>.</p>
+
+  <div class="callout tip"><p><code>goimports</code> is <code>gofmt</code> plus automatic adding/removing of import lines; editors usually run it on save. <code>gofumpt</code> is a stricter, community-maintained superset of <code>gofmt</code> that some teams adopt. Either is fine — just make it automatic.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>A senior engineer's workflow</h2>
+  <p>Let's put it all together into the workflow experienced Go engineers actually use day to day.</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash"># start a project
+mkdir billing && cd billing
+go mod init github.com/acme/billing
+git init
+
+# inner loop (seconds)
+go run ./cmd/billing          # run the program
+go test ./...                 # run all tests
+go test -run TestInvoice -v ./internal/invoice   # one test, verbose
+
+# before pushing
+gofmt -l .                    # should print nothing
+go vet ./...
+go test -race -count=1 ./...  # -count=1 disables test result caching
+go mod tidy && git diff --exit-code go.mod go.sum
+
+# ship
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/billing ./cmd/billing</code></pre></div>
+
+  <h3>A typical project layout</h3>
+  <p>Small programs can be a single <code>main.go</code>. As a service grows, most Go teams converge on a layout like this (Chapter 11 explains each piece and Chapter 21 builds one):</p>
+  <div class="code" data-file="project tree"><pre><code class="language-bash">billing/
+├── go.mod              # module github.com/acme/billing
+├── go.sum              # checksums of every dependency (commit it!)
+├── cmd/
+│   └── billing/
+│       └── main.go     # package main: wiring only, flags, startup
+├── internal/           # importable ONLY from inside this module
+│   ├── invoice/
+│   │   ├── invoice.go
+│   │   └── invoice_test.go
+│   └── store/
+│       └── postgres.go
+└── README.md</code></pre></div>
+  <ul>
+    <li><code>cmd/&lt;name&gt;/</code> holds one directory per executable. Keep <code>main</code> thin: parse config, build dependencies, start things.</li>
+    <li><code>internal/</code> is enforced by the <code>go</code> tool: code outside your module can't import it. It's the safe default for everything that isn't a deliberate public API.</li>
+    <li>Tests live next to the code they test, in <code>_test.go</code> files of the same directory.</li>
+    <li>There's no <code>src/</code> directory, no <code>Makefile</code> requirement, and no build config file — <code>go build ./...</code> just works.</li>
+  </ul>
+  <div class="callout tip"><p>Don't start with this structure for a 200-line tool. Start flat (<code>main.go</code> plus a few files in package <code>main</code>), and split into packages when a clear boundary appears. Over-structured small Go projects are a common beginner habit carried over from Java.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: pin your tools</div><p>Teams waste hours when everyone's linter or code generator is a different version. Since Go 1.24, you can record tool dependencies directly in <code>go.mod</code> with <code>go get -tool golang.org/x/tools/cmd/stringer@v0.30.0</code> and run them with <code>go tool stringer</code>. The version is pinned and checksummed like any other dependency, so CI and every laptop use exactly the same tool.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: read the standard library</div><p>The Go standard library is some of the best Go code ever written, and it's right there: <code>go env GOROOT</code>, then open <code>src/strings/strings.go</code> or <code>src/net/http/server.go</code>. When you're unsure what's idiomatic — how to name things, structure errors, write doc comments — copy what the standard library does.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>1 · Make a module that prints its own version, stamped at build time</summary>
+    <p>Create a module with a package-level variable <code>var version = "dev"</code> and a <code>main</code> that prints <code>app version: &lt;version&gt;</code>. Run it with <code>go run .</code>, then build it so that it prints <code>v1.0.0</code> <em>without</em> editing the source. Hint: look at the <code>-ldflags</code> tip above.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="One binary, two versions">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// version is overridden at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
+func main() {
+	fmt.Println("app version:", version)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="version=&quot;dev&quot;">At startup the package variable <code>version</code> gets its initial value <code>"dev"</code> — unless the linker overwrote it. With plain <code>go run .</code> nothing overrides it.</li>
+      <li data-lines="8-9" data-state="version=&quot;dev&quot;" data-out="app version: dev"><code>main</code> prints the current value. This is the first line of output in the solution.</li>
+      <li data-lines="6" data-state="version=&quot;v1.0.0&quot;">Now build with <code>-ldflags="-X main.version=v1.0.0"</code>. The linker patches the string's initial value <em>inside the binary</em>; the source still says <code>"dev"</code>. It only works on package-level <code>string</code> variables, never constants.</li>
+      <li data-lines="8-9" data-state="version=&quot;v1.0.0&quot;" data-out="app version: v1.0.0">Running <code>./app</code> prints the stamped version. Release pipelines use exactly this to embed a Git tag or commit hash.</li>
+    </ol>
+  </div>
+    <div class="code" data-file="terminal"><pre><code class="language-bash">$ go run . &amp;&amp; go build -ldflags="-X main.version=v1.0.0" -o app . &amp;&amp; ./app
+app version: dev
+app version: v1.0.0</code></pre></div>
+    <p><code>-X importpath.name=value</code> only works on package-level <code>string</code> variables (not constants). For package <code>main</code>, the import path is simply <code>main</code>.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>2 · Predict the startup order</summary>
+    <p>Without running it, write down what this program prints. Then run it and check. Hint: remember the order — package variables (by dependency), then <code>init</code>s (in source order), then <code>main</code>.</p>
+    <div class="live" data-title="Step through it (after you predict!)">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+var a = show("a", b+1)
+var b = show("b", 2)
+
+func show(name string, v int) int {
+	fmt.Println("var", name)
+	return v
+}
+
+func init() { fmt.Println("init 1") }
+func init() { fmt.Println("init 2") }
+
+func main() {
+	fmt.Println("main: a =", a)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5-6" data-state="a=(not set); b=(not set)">Before <code>main</code>, Go initializes package variables. <code>a</code> is declared first, but its initializer reads <code>b</code>, so Go must set <code>b</code> first. <strong>Dependency order beats source order.</strong></li>
+      <li data-lines="6,8-10" data-state="a=(not set); b=(being set)" data-out="var b"><code>b</code>'s initializer calls <code>show("b", 2)</code>, which prints and returns 2.</li>
+      <li data-lines="6" data-state="a=(not set); b=2"><code>b</code> now holds 2, so <code>a</code>'s dependency is ready.</li>
+      <li data-lines="5,8-10" data-state="a=(being set); b=2" data-out="var a">Now <code>a</code>'s initializer runs: <code>show("a", b+1)</code> is called with <code>v = 3</code>.</li>
+      <li data-lines="5" data-state="a=3; b=2">All package variables are set. Only now do the <code>init</code> functions get a turn.</li>
+      <li data-lines="13" data-state="a=3; b=2" data-out="init 1">The first <code>init</code> runs. A file may declare several <code>init</code> functions; they run top to bottom.</li>
+      <li data-lines="14" data-state="a=3; b=2" data-out="init 2">The second <code>init</code> runs.</li>
+      <li data-lines="16-17" data-state="a=3; b=2" data-out="main: a = 3">Finally <code>main</code> runs and prints <code>a</code>, which is <code>b + 1 = 3</code>. Then the program exits with status 0.</li>
+    </ol>
+  </div>
+    <div class="solution-label">Solution</div>
+    <div class="output"><pre>var b
+var a
+init 1
+init 2
+main: a = 3</pre></div>
+    <p><code>a</code> depends on <code>b</code>, so <code>b</code> is initialized first (printing "b"), then <code>a</code> (printing "a"). Next both <code>init</code>s run top to bottom. Finally <code>main</code> prints <code>a</code>, which is <code>b + 1 = 3</code>.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>3 · Cross-compile and inspect</summary>
+    <p>Build your hello program for <code>linux/arm64</code> with cgo disabled, then use <code>go version -m</code> on the result to see the build information Go embedded in it.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="terminal"><pre><code class="language-bash">$ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o hello-arm64 . &amp;&amp; go version -m hello-arm64
+hello-arm64: go1.27.1
+	path	example.com/hello
+	mod	example.com/hello	(devel)	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0</code></pre></div>
+    <p>Every Go binary carries its Go version, module path, dependency versions and key build settings. <code>go version -m</code> works on any Go binary — even ones you didn't build.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Go was designed at Google for large teams and large codebases: simple, fast to compile, concurrent, and deployable as one binary.</li>
+      <li>Install from <code>go.dev/dl</code>; check with <code>go version</code>. Toolchains can auto-upgrade per project via <code>go.mod</code>.</li>
+      <li>Use <strong>modules</strong>: <code>go mod init &lt;path&gt;</code> anywhere on disk. <code>GOPATH</code> is now just a cache and install location.</li>
+      <li><code>package main</code> + <code>func main()</code> = an executable. Capitalized names are exported; lowercase names are package-private.</li>
+      <li>Daily tools: <code>go run</code>, <code>build</code>, <code>fmt</code>, <code>vet</code>, <code>test</code>, <code>doc</code>, <code>mod tidy</code>. Automate fmt/vet/test in CI.</li>
+      <li>Builds produce a self-contained binary; cross-compile with <code>GOOS</code>/<code>GOARCH</code>; use <code>CGO_ENABLED=0</code> for fully static Linux builds.</li>
+      <li>Startup order: imported packages → package variables (dependency order) → <code>init()</code>s → <code>main()</code>. <code>os.Exit</code> skips deferred calls.</li>
+      <li>Semicolons are inserted automatically at line ends, so opening braces go on the same line and multi-line literals need trailing commas.</li>
+      <li>Unused imports and variables are compile errors. <code>gofmt</code> is non-negotiable — let your editor run it on save.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

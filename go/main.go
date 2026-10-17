@@ -370,6 +370,16 @@ func main() {
 	// wait group -> wg, add, wait
 	wg.Wait()
 	// time.Sleep(time.Second * 2)
+
+	// channels
+	// sending data
+	messageChan := make(chan string)
+	messageChan <- "Hello, World!"
+
+	// receiving data
+	// <- is used to receive data from a channel, we can use it to receive data from a channel.
+	msg := <-messageChan
+	fmt.Println(msg)
 }
 
 // function can return multiple values, we can use it to return multiple values
@@ -384,7 +394,7 @@ func getLanguages() []string {
 
 func processIt(fn func(a int) int) {
 	fmt.Println(fn(5))
-}
+} 
 
 func returnFunc() func(a int) int {
 	// we can implement here cachec as it is works as a global for this function,

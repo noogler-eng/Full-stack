@@ -1,0 +1,2164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 19 · The Senior Engineer Playbook — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="19">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part VI · Chapter 19</div>
+  <h1>The Senior Engineer Playbook</h1>
+  <p class="lead">Knowing the syntax makes you a Go programmer. Knowing the idioms, the traps and the taste makes you the person everyone wants reviewing their pull request. This chapter is the second part: the habits, the 25 classic gotchas (each one run for real), the tools, and the design instincts that senior Go engineers lean on every day.</p>
+  <div class="meta">
+    <span class="pill">⏱ 60 min read</span>
+    <span class="pill">◆ Advanced</span>
+    <span class="pill">▶ 21 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What the Go proverbs mean in plain English, and how they change the code you write</li>
+      <li>Idiomatic naming: short names, receivers, package names without stutter, MixedCaps and initialisms</li>
+      <li>How to make the zero value useful, how errors should flow, and "accept interfaces, return structs"</li>
+      <li>25 real gotchas, each with a runnable demo and its real output, and the fix for each one</li>
+      <li>A code-review checklist, and how to set up <code>go vet</code>, staticcheck and golangci-lint</li>
+      <li>Package design, dependency direction, API design with functional options or config structs</li>
+      <li>Concurrency rules of thumb, and a full "how I'd review this PR" walk-through</li>
+    </ul>
+  </div>
+
+  <h2>Why a playbook? What "senior" means in Go</h2>
+  <p>Go is a small language. You can learn every keyword in a weekend. So why do some Go codebases feel calm and obvious, while others feel like a maze? The difference is almost never clever features. It is <strong>taste</strong>: a shared set of habits about naming, errors, package boundaries and concurrency that the Go community has agreed on over 15 years.</p>
+  <p>A senior Go engineer is not someone who writes the trickiest code. It is someone whose code is <em>boring in the best way</em>. Six months later, a new hire can open the file and understand it in one read. Nothing surprising happens at runtime. Errors explain themselves. Goroutines always finish.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of Go code like a well-run kitchen. Every tool has one obvious place. Every cook uses the same names for things. Nobody invents a new way to chop onions. The food is not more exciting because of it, but the kitchen can serve 500 people on a Friday night without fires. Idioms are the kitchen rules.</p></div>
+
+  <p>This chapter is organised the way you'd grow into the role:</p>
+  <ol>
+    <li><strong>Mindset</strong>: the Go proverbs and what they ask of you.</li>
+    <li><strong>Everyday idioms</strong>: naming, zero values, errors, interfaces.</li>
+    <li><strong>The traps</strong>: 25 gotchas you will meet in real code, each with a demo.</li>
+    <li><strong>The tools</strong>: vet, staticcheck, golangci-lint, and a review checklist.</li>
+    <li><strong>Design</strong>: packages, dependencies, APIs, docs, concurrency.</li>
+    <li><strong>Practice</strong>: reviewing a genuinely bad pull request and rewriting it.</li>
+  </ol>
+
+  <h2>The Go proverbs, explained simply</h2>
+  <p>In 2015 Rob Pike (one of Go's creators) gave a talk called "Go Proverbs": short sayings that capture the spirit of the language. They are worth knowing because senior engineers quote them in code reviews all the time. Here are the ones that matter most, in plain English, with what they mean for your code.</p>
+
+  <table>
+    <thead><tr><th>Proverb</th><th>What it means</th><th>What you do differently</th></tr></thead>
+    <tbody>
+      <tr><td><em>Don't communicate by sharing memory; share memory by communicating.</em></td><td>Instead of many goroutines poking at one variable under a lock, pass the data along a channel so only one goroutine owns it at a time.</td><td>Reach for channels when data <em>moves</em> between stages. Use a mutex when many goroutines just read and update one shared thing.</td></tr>
+      <tr><td><em>Concurrency is not parallelism.</em></td><td>Concurrency is how you <em>structure</em> a program (many independent tasks). Parallelism is <em>running</em> things at the same instant on many CPUs.</td><td>Design for independent tasks first. Whether they run in parallel is the runtime's job.</td></tr>
+      <tr><td><em>The bigger the interface, the weaker the abstraction.</em></td><td>An interface with one method (like <code>io.Reader</code>) fits hundreds of types. One with 12 methods fits one type and is basically a mirror of it.</td><td>Keep interfaces to 1–3 methods. Define them where they are <em>used</em>.</td></tr>
+      <tr><td><em>Make the zero value useful.</em></td><td>A variable declared with no value should already work, like <code>var mu sync.Mutex</code> or <code>var buf bytes.Buffer</code>.</td><td>Design structs so a constructor is optional, not mandatory.</td></tr>
+      <tr><td><em><code>interface{}</code> says nothing.</em></td><td><code>any</code> gives the compiler zero information, so it can't help you.</td><td>Use concrete types or generics. Use <code>any</code> only at true boundaries (JSON, logging).</td></tr>
+      <tr><td><em>Gofmt's style is no one's favorite, yet gofmt is everyone's favorite.</em></td><td>Nobody loves every formatting choice, but nobody argues about formatting anymore either.</td><td>Run <code>gofmt</code>/<code>goimports</code> on save. Never debate tabs in review.</td></tr>
+      <tr><td><em>A little copying is better than a little dependency.</em></td><td>Copying a 10-line helper is cheaper than importing a library with 40 transitive dependencies.</td><td>Think before <code>go get</code>. Every dependency is code you now own.</td></tr>
+      <tr><td><em>Clear is better than clever.</em></td><td>Code is read 10× more than it is written.</td><td>Prefer the obvious loop over the clever one-liner.</td></tr>
+      <tr><td><em>Errors are values.</em></td><td>An error is a normal value you can store, compare, wrap and program with. It is not a special control-flow jump.</td><td>Handle errors with ordinary code: wrap, inspect with <code>errors.Is</code>/<code>As</code>, aggregate with <code>errors.Join</code>.</td></tr>
+      <tr><td><em>Don't just check errors, handle them gracefully.</em></td><td><code>if err != nil { return err }</code> everywhere throws away the story of what went wrong.</td><td>Add context: <code>fmt.Errorf("load config %q: %w", path, err)</code>.</td></tr>
+      <tr><td><em>Don't panic.</em></td><td>Panics are for bugs that should never happen, not for "file not found".</td><td>Return errors. Panic only on programmer errors or impossible states at startup.</td></tr>
+      <tr><td><em>Reflection is never clear.</em></td><td><code>reflect</code> code is hard to read and slow.</td><td>Leave it to libraries like <code>encoding/json</code>. Use generics instead.</td></tr>
+      <tr><td><em>Syscall must always be guarded with build tags. Cgo is not Go.</em></td><td>Cgo makes builds slow, cross-compiling painful and crashes harder to debug.</td><td>Stay pure Go unless you truly need a C library.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><p>In review, a proverb is a shortcut for a long conversation. Writing "the bigger the interface, the weaker the abstraction, can we split this?" is friendlier and faster than a paragraph about coupling. But never use a proverb as a weapon. Explain the concrete problem in <em>this</em> code too.</p></div>
+
+  <h2>Idiomatic naming</h2>
+  <p>Naming is where Go looks most different from Java or C#. Go names are short, and they lean on context. The rule of thumb from the Go team: <strong>the further a name is used from where it is declared, the longer and more descriptive it should be.</strong></p>
+
+  <h3>Short names for short lives</h3>
+  <p>A loop index that lives for three lines is <code>i</code>, not <code>currentIndexOfUser</code>. A reader that lives inside a ten-line function is <code>r</code>. A package-level variable used across many files deserves a real name like <code>defaultTimeout</code>.</p>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">func SumAllTheNumbers(listOfNumbers []int) int {
+	totalSumValue := 0
+	for indexValue := 0; indexValue &lt; len(listOfNumbers); indexValue++ {
+		totalSumValue += listOfNumbers[indexValue]
+	}
+	return totalSumValue
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">func Sum(nums []int) int {
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}</code></pre></div></div>
+  </div>
+
+  <h3>Receiver names</h3>
+  <p>The receiver is the <code>(s *Server)</code> part of a method. Go style says: use a <strong>one or two letter abbreviation of the type</strong>, and use the <strong>same one on every method</strong>. Never use <code>this</code> or <code>self</code>; they hint that you are thinking in another language.</p>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">func (this *Client) Get() {}
+func (self *Client) Post() {}
+func (client *Client) Delete() {}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">func (c *Client) Get()    {}
+func (c *Client) Post()   {}
+func (c *Client) Delete() {}</code></pre></div></div>
+  </div>
+
+  <h3>Package names: short, lowercase, no stutter</h3>
+  <p>A package name is part of every name it exports. Callers write <code>http.Client</code>, not just <code>Client</code>. So the package name is already "half the name". <strong>Stutter</strong> is when you repeat it: <code>user.UserService</code> reads as "user user service".</p>
+  <ul>
+    <li>Lowercase, one word, no underscores or mixedCaps: <code>httputil</code>, <code>strconv</code>, <code>task</code>.</li>
+    <li>Name it after what it <em>provides</em>, not what it <em>contains</em>. Avoid <code>util</code>, <code>common</code>, <code>helpers</code>, <code>models</code>, <code>base</code>. These become junk drawers.</li>
+    <li>Don't repeat the package name in exported names: <code>task.Service</code>, <code>task.New</code>, <code>bytes.Buffer</code>, <code>list.New</code>.</li>
+  </ul>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Stutters"><pre><code class="language-go">package user
+
+type UserService struct{}
+func NewUserService() *UserService
+func (s *UserService) GetUserByID(id int)
+
+// caller: user.NewUserService().GetUserByID(7)</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Reads well"><pre><code class="language-go">package user
+
+type Service struct{}
+func NewService() *Service
+func (s *Service) ByID(id int)
+
+// caller: user.NewService().ByID(7)</code></pre></div></div>
+  </div>
+
+  <h3>MixedCaps and initialisms</h3>
+  <p>Go uses <code>MixedCaps</code> (exported) or <code>mixedCaps</code> (unexported). Never <code>snake_case</code>, never <code>ALL_CAPS</code> constants. The first letter decides visibility: capital means exported (visible outside the package).</p>
+  <p><strong>Initialisms</strong> (acronyms like ID, URL, HTTP, JSON, API) keep a <em>consistent case</em>: all upper or all lower. So it's <code>userID</code>, <code>ServeHTTP</code>, <code>parseURL</code>, <code>xmlHTTPRequest</code>; never <code>userId</code>, <code>ServeHttp</code>, <code>parseUrl</code>.</p>
+
+  <table>
+    <thead><tr><th>✗ Not idiomatic</th><th>✓ Idiomatic</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>user_id</code></td><td><code>userID</code></td><td>No underscores; initialism stays upper</td></tr>
+      <tr><td><code>MAX_RETRIES</code></td><td><code>maxRetries</code> / <code>MaxRetries</code></td><td>Constants use MixedCaps like everything else</td></tr>
+      <tr><td><code>GetName()</code></td><td><code>Name()</code></td><td>Getters drop "Get"; setters keep "Set": <code>SetName()</code></td></tr>
+      <tr><td><code>HttpClient</code></td><td><code>HTTPClient</code></td><td>Initialisms keep one case</td></tr>
+      <tr><td><code>IReader</code>, <code>ReaderInterface</code></td><td><code>Reader</code></td><td>No Hungarian prefixes; one-method interfaces end in <em>-er</em></td></tr>
+      <tr><td><code>utils.FormatDate</code></td><td><code>datefmt.Format</code> or just a function where it's used</td><td>Packages named after a purpose</td></tr>
+      <tr><td><code>err1, err2, err3</code></td><td><code>err</code> reused</td><td>One <code>err</code> per flow is normal Go</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip"><p>Error variables start with <code>Err</code> (<code>ErrNotFound</code>), error types end with <code>Error</code> (<code>*PathError</code>). Error <em>strings</em> are lowercase with no final punctuation, because they get glued into longer messages: <code>"open config: permission denied"</code>.</p></div>
+
+  <h2>Make the zero value useful</h2>
+  <p>Every Go type has a <strong>zero value</strong>: the value a variable gets when you declare it without assigning anything. <code>0</code> for numbers, <code>""</code> for strings, <code>nil</code> for pointers, slices and maps, and a struct with every field at its zero value.</p>
+  <p>The proverb asks you to design types so that the zero value <em>already works</em>. The standard library does this everywhere. You never call <code>NewMutex()</code> or <code>NewBuffer()</code>: you just declare one. That means fewer constructors, fewer "forgot to initialise" bugs, and types that embed cleanly in other structs.</p>
+
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"fmt"
+	"strings"
+	"sync"
+)
+
+// Counter needs no constructor: its zero value is ready to use.
+type Counter struct {
+	mu   sync.Mutex     // zero Mutex = unlocked
+	hits map[string]int // nil until first write; we handle that
+}
+
+func (c *Counter) Hit(page string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hits == nil {
+		c.hits = make(map[string]int)
+	}
+	c.hits[page]++
+}
+
+func (c *Counter) Get(page string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits[page] // reading a nil map is fine: returns 0
+}
+
+func main() {
+	var buf bytes.Buffer // ready to write
+	buf.WriteString("hello ")
+	buf.WriteString("buffer")
+	fmt.Println(buf.String())
+
+	var sb strings.Builder // ready to write
+	sb.WriteString("hello builder")
+	fmt.Println(sb.String())
+
+	var nums []int // nil slice: append just works
+	nums = append(nums, 1, 2, 3)
+	fmt.Println(nums, len(nums))
+
+	var c Counter // no NewCounter() needed
+	fmt.Println("before:", c.Get("/home"))
+	c.Hit("/home")
+	c.Hit("/home")
+	fmt.Println("after:", c.Get("/home"))
+}</code></pre></div>
+<div class="output"><pre>hello buffer
+hello builder
+[1 2 3] 3
+before: 0
+after: 2</pre></div>
+
+  <p>The trick inside <code>Counter.Hit</code> is <strong>lazy initialisation</strong>: create the map the first time you need it. Reading a nil map is safe (it returns the zero value), so <code>Get</code> needs no check at all. Only writing to a nil map panics, which is gotcha #2 below.</p>
+
+  <div class="callout senior"><p>If your type truly can't have a useful zero value (it needs a database handle, say), that's fine: provide a <code>New...</code> constructor and document "use NewX to create a X". But try first. A struct that works with <code>var x T</code> is a joy to test and to embed.</p></div>
+
+  <h2>Errors flow, interfaces and abstraction</h2>
+  <h3>How errors should flow through layers</h3>
+  <p>In a real program an error is born deep down (the database, the file system) and travels up through layers until someone can do something about it. Think of it like a parcel being forwarded: each layer adds a label saying what it was doing, but only the final recipient opens it.</p>
+  <ol>
+    <li><strong>The bottom layer</strong> reports <em>what happened</em>, ideally as a sentinel (<code>ErrNotFound</code>) or a typed error.</li>
+    <li><strong>Middle layers</strong> add <em>what they were trying to do</em> with <code>fmt.Errorf("...: %w", err)</code>. The <code>%w</code> keeps the original error inside so <code>errors.Is</code> can still find it.</li>
+    <li><strong>The edge</strong> (HTTP handler, <code>main</code>, a worker loop) <em>handles it once</em>: log it, translate it to a status code, retry, or show it to the user.</li>
+  </ol>
+
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+)
+
+var ErrNotFound = errors.New("not found") // sentinel: callers can test for it
+
+// --- store layer: reports WHAT happened
+func findUser(id int) (string, error) {
+	if id != 1 {
+		return "", ErrNotFound
+	}
+	return "ann", nil
+}
+
+// --- service layer: adds WHAT IT WAS DOING, keeps the cause with %w
+func greet(id int) (string, error) {
+	name, err := findUser(id)
+	if err != nil {
+		return "", fmt.Errorf("greet user %d: %w", id, err)
+	}
+	return "hello " + name, nil
+}
+
+// --- edge (handler/main): handles the error ONCE - log it or translate it
+func main() {
+	log := slog.New(slog.NewTextHandler(os.Stdout, &amp;slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{} // drop time so output is stable
+			}
+			return a
+		},
+	}))
+	for _, id := range []int{1, 7} {
+		msg, err := greet(id)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			log.Warn("user missing", "id", id, "err", err)
+		case err != nil:
+			log.Error("unexpected", "err", err)
+		default:
+			fmt.Println(msg)
+		}
+	}
+}</code></pre></div>
+<div class="output"><pre>hello ann
+level=WARN msg="user missing" id=7 err="greet user 7: not found"</pre></div>
+
+  <p>Look at the final error string: <code>greet user 7: not found</code>. It reads like a breadcrumb trail from the top down. And because we wrapped with <code>%w</code>, <code>errors.Is(err, ErrNotFound)</code> is still true at the edge.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: log OR return, never both</div><p>If every layer logs the error and then returns it, one failure produces five log lines saying the same thing. Each layer must choose: <em>handle</em> it (log, retry, translate) or <em>return</em> it (with context). Not both.</p></div>
+
+  <h3>Accept interfaces, return structs</h3>
+  <p>This is one of the most quoted pieces of Go advice. It means:</p>
+  <ul>
+    <li><strong>Accept interfaces</strong>: when your function only needs a <em>behaviour</em> (something that can Read), ask for the smallest interface that describes it. Then callers can hand you a file, a network connection, a string, a test fake, anything.</li>
+    <li><strong>Return structs</strong>: when you <em>build</em> something, return the concrete type (<code>*Store</code>). The caller gets every method and field, can see real documentation, and can define their <em>own</em> small interface on their side if they need one.</li>
+  </ul>
+
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// CountLines ACCEPTS an interface: anything that can Read.
+func CountLines(r io.Reader) (int, error) {
+	sc := bufio.NewScanner(r)
+	n := 0
+	for sc.Scan() {
+		n++
+	}
+	return n, sc.Err()
+}
+
+// Store is a concrete type. NewStore RETURNS the struct, not an interface.
+type Store struct{ data map[string]string }
+
+func NewStore() *Store { return &amp;Store{data: map[string]string{}} }
+
+func (s *Store) Put(k, v string)             { s.data[k] = v }
+func (s *Store) Get(k string) (string, bool) { v, ok := s.data[k]; return v, ok }
+
+func main() {
+	n1, _ := CountLines(strings.NewReader("a\nb\nc\n"))
+	n2, _ := CountLines(bytes.NewBufferString("one\ntwo\n"))
+	f, _ := os.Open("main.go")
+	defer f.Close()
+	n3, _ := CountLines(f)
+	fmt.Println("string:", n1, "buffer:", n2, "file main.go:", n3)
+
+	s := NewStore()
+	s.Put("lang", "go")
+	v, ok := s.Get("lang")
+	fmt.Println(v, ok)
+}</code></pre></div>
+<div class="output"><pre>string: 3 buffer: 2 file main.go: 42
+go true</pre></div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>An interface is a <em>job description</em> written by the person hiring. The employer (the function using the dependency) writes "must be able to Read". Any candidate who can Read gets the job. The candidate (the concrete type) doesn't need to know the job description exists. That's why Go interfaces live in the <em>consumer's</em> package, not the producer's.</p></div>
+
+  <h3>Avoid premature abstraction</h3>
+  <p>New Go developers coming from Java often create an interface for every struct "just in case": <code>UserService</code> interface, <code>userServiceImpl</code> struct, a factory, a mock. In Go this is usually wasted effort. Because interfaces are satisfied implicitly, you can add one <strong>later</strong>, at the moment a second implementation or a test actually needs it, without touching the concrete type at all.</p>
+  <ul>
+    <li><strong>Rule of three</strong>: write it concretely once, copy it the second time, and abstract on the third.</li>
+    <li>Don't create an interface with exactly one implementation unless it's at a real boundary (database, external API, clock) that tests need to fake.</li>
+    <li>Don't reach for generics until you've written the same function for two or three types.</li>
+    <li>A plain function beats a strategy pattern. A <code>func(int) bool</code> parameter is an interface with zero ceremony.</li>
+  </ul>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Java in Go"><pre><code class="language-go">type UserRepository interface {
+	Create(u User) error
+	Get(id int) (User, error)
+	Update(u User) error
+	Delete(id int) error
+	List() ([]User, error)
+	Count() (int, error)
+}
+
+type userRepositoryImpl struct{ db *sql.DB }
+
+func NewUserRepository(db *sql.DB) UserRepository {
+	return &amp;userRepositoryImpl{db: db}
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Go"><pre><code class="language-go">// Concrete type, returned as a struct.
+type UserStore struct{ db *sql.DB }
+
+func NewUserStore(db *sql.DB) *UserStore {
+	return &amp;UserStore{db: db}
+}
+
+// In the package that NEEDS it, a tiny interface:
+type userGetter interface {
+	Get(ctx context.Context, id int) (User, error)
+}</code></pre></div></div>
+  </div>
+
+  <h2>The 25 gotchas, with runnable demos</h2>
+  <p>Every Go engineer has been bitten by most of these. Each one below is a complete program that was really run; the output shown is what Go 1.27 printed. Read the code, predict the output, then check. That habit of predicting is exactly what makes these stick.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="210" rx="10" fill="#262624"/>
+      <g font-size="13" fill="#ece9e1">
+        <rect x="20" y="24" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#d97757"/>
+        <text x="100" y="52" text-anchor="middle" font-weight="600">Memory &amp; values</text>
+        <text x="100" y="74" text-anchor="middle" fill="#a8a49a" font-size="11">#3 #5 #19 #25</text>
+        <rect x="196" y="24" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+        <text x="276" y="52" text-anchor="middle" font-weight="600">Nil traps</text>
+        <text x="276" y="74" text-anchor="middle" fill="#a8a49a" font-size="11">#2 #4 #18</text>
+        <rect x="372" y="24" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/>
+        <text x="452" y="52" text-anchor="middle" font-weight="600">Scope &amp; timing</text>
+        <text x="452" y="74" text-anchor="middle" fill="#a8a49a" font-size="11">#1 #6 #7 #14 #22</text>
+        <rect x="548" y="24" width="152" height="72" rx="8" fill="#2e2d2a" stroke="#e0b45c"/>
+        <text x="624" y="52" text-anchor="middle" font-weight="600">Concurrency</text>
+        <text x="624" y="74" text-anchor="middle" fill="#a8a49a" font-size="11">#8 #9 #15 #17 #23</text>
+        <rect x="108" y="116" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+        <text x="188" y="144" text-anchor="middle" font-weight="600">Types &amp; numbers</text>
+        <text x="188" y="166" text-anchor="middle" fill="#a8a49a" font-size="11">#12 #20 #21</text>
+        <rect x="284" y="116" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+        <text x="364" y="144" text-anchor="middle" font-weight="600">Stdlib surprises</text>
+        <text x="364" y="166" text-anchor="middle" fill="#a8a49a" font-size="11">#10 #13 #16 #24</text>
+        <rect x="460" y="116" width="160" height="72" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+        <text x="540" y="144" text-anchor="middle" font-weight="600">Performance</text>
+        <text x="540" y="166" text-anchor="middle" fill="#a8a49a" font-size="11">#8 #11 #22</text>
+      </g>
+    </svg>
+    <figcaption>The 25 gotchas fall into a handful of families. Learn the family and you'll spot new members on your own.</figcaption>
+  </figure>
+
+  <h3>#1 Loop variable capture (before Go 1.22)</h3>
+  <p>Before Go 1.22, a <code>for</code> loop had <strong>one</strong> variable <code>i</code> shared by every iteration. Closures captured that single variable, so by the time they ran, it held its final value. Go 1.22 changed the rules: each iteration now gets a <strong>fresh copy</strong>. The rule is decided by the <code>go</code> line in your <code>go.mod</code>. Here is the same program in a module that says <code>go 1.21</code>, and then in our normal <code>go 1.27</code> module.</p>
+  <div class="live" data-title="One shared i (go 1.21 rules)">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var prints []func()
+	for i := 0; i &lt; 3; i++ {
+		prints = append(prints, func() { fmt.Print(i, " ") })
+	}
+	for _, p := range prints {
+		p()
+	}
+	fmt.Println()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="prints=[]">We collect closures to run later. This walkthrough follows the <strong>go 1.21</strong> rules, where the loop has one <code>i</code> for all iterations.</li>
+      <li data-lines="7-8" data-state="i=0; prints=[f0]">Iteration 0 appends a closure. It captures the <em>variable</em> <code>i</code>, not its current value.</li>
+      <li data-lines="7-8" data-state="i=1; prints=[f0 f1]">Iteration 1: the same <code>i</code> is incremented to 1, and a second closure captures that same variable.</li>
+      <li data-lines="7-8" data-state="i=2; prints=[f0 f1 f2]">Iteration 2: a third closure, still the same <code>i</code>.</li>
+      <li data-lines="7" data-state="i=3">The loop increments <code>i</code> to 3, the condition <code>i &lt; 3</code> fails, and the loop ends. All three closures point at an <code>i</code> that now holds 3.</li>
+      <li data-lines="10-11" data-state="i=3">Now we call each closure. Each reads <code>i</code> right now, and right now it is 3.</li>
+      <li data-lines="13" data-out="3 3 3 ">Output: <strong>3 3 3</strong>. With <code>go 1.22</code> or later in go.mod, each iteration gets its own <code>i</code>, so the closures see 0, 1, 2 and print <code>0 1 2</code>.</li>
+    </ol>
+  </div>
+<div class="output" data-label="Output with go 1.21 in go.mod"><pre>3 3 3 </pre></div>
+<div class="output" data-label="Output with go 1.27 in go.mod"><pre>0 1 2 </pre></div>
+  <div class="callout warn"><p>Old code (and old blog posts) is full of <code>i := i</code> lines to work around this. In a module at Go 1.22+ they are harmless but unnecessary, and <code>go fix</code> / modern linters will offer to remove them. When you upgrade the <code>go</code> line in an old module, the semantics change, so run the tests.</p></div>
+
+  <h3>#2 Writing to a nil map</h3>
+  <p>A declared-but-not-made map is <code>nil</code>. Reading from it is fine and returns the zero value. Writing to it panics.</p>
+  <div class="live" data-title="Reading is fine, writing panics">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var counts map[string]int // nil map: reads work, writes panic
+	fmt.Println("read from nil map:", counts["go"])
+	counts["go"]++
+	fmt.Println("never printed")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="counts=nil"><code>var counts map[string]int</code> declares a map but never makes one. Its value is <code>nil</code>: no hash table exists.</li>
+      <li data-lines="7" data-state="counts=nil" data-out="read from nil map: 0">Reading a missing key from a nil map is allowed and returns the zero value, <code>0</code>. This makes the bug easy to miss.</li>
+      <li data-lines="8" data-state="counts=nil" data-out="panic: assignment to entry in nil map"><code>counts["go"]++</code> needs to store a value, but there is no table to store into. The runtime panics.</li>
+      <li data-lines="9">This line never runs; the program exits with status 2. Fix: <code>counts := make(map[string]int)</code> or a map literal.</li>
+    </ol>
+  </div>
+<div class="output error" data-label="Runtime panic"><pre>read from nil map: 0
+panic: assignment to entry in nil map
+
+goroutine 1 [running]:
+main.main()
+	example/g02/main.go:8 +0xa4
+exit status 2</pre></div>
+  <p><strong>Fix:</strong> <code>make</code> the map, use a literal (<code>map[string]int{}</code>), or lazily initialise it as part of a useful zero value:</p>
+  <div class="live" data-title="A lazily initialized map">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Stats struct {
+	counts map[string]int
+}
+
+// Add lazily creates the map, so the zero Stats is usable.
+func (s *Stats) Add(word string) {
+	if s.counts == nil {
+		s.counts = make(map[string]int)
+	}
+	s.counts[word]++
+}
+
+func main() {
+	var s Stats
+	s.Add("go")
+	s.Add("go")
+	fmt.Println(s.counts)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="18" data-state="s.counts=nil">The zero <code>Stats</code> has a nil map. Writing to it now would panic.</li>
+      <li data-lines="19,10-11" data-state="s.counts=nil">First <code>Add</code>. The method has a pointer receiver, so it can modify <code>s</code>. It checks for the nil map...</li>
+      <li data-lines="12" data-state="s.counts=map[]">...and creates it. This is the only time <code>make</code> runs.</li>
+      <li data-lines="14" data-state="s.counts=map[go:1]">Now the write is safe.</li>
+      <li data-lines="20,10-14" data-state="s.counts=map[go:2]">Second <code>Add</code>: the map exists, so we skip <code>make</code> and just increment.</li>
+      <li data-lines="21" data-state="s.counts=map[go:2]" data-out="map[go:2]">The zero value is useful, which is a Go idiom: callers can write <code>var s Stats</code> with no constructor.</li>
+    </ol>
+  </div>
+<div class="output"><pre>map[go:2]</pre></div>
+
+  <h3>#3 Slice aliasing on append</h3>
+  <p>A slice is a small header: a pointer to a backing array, a length and a capacity. If there is spare capacity, <code>append</code> writes into the <em>same</em> array instead of copying. Two appends from the same base can overwrite each other.</p>
+
+  <div class="live" data-title="Two appends, one backing array">
+    <pre><code class="language-go">func main() {
+	base := make([]int, 3, 10) // len 3, cap 10: room to grow in place
+	a := append(base, 1)
+	b := append(base, 2) // writes into the SAME backing array slot as a[3]
+	fmt.Println("a:", a)
+	fmt.Println("b:", b)
+
+	// Fix: force a fresh array with a full slice expression (cap = len).
+	safe := base[:len(base):len(base)]
+	c := append(safe, 1)
+	d := append(safe, 2)
+	fmt.Println("c:", c, "d:", d)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="base=[0 0 0]; len=3; cap=10">We make a slice with length 3 but capacity 10. The backing array has 7 unused slots after the visible part.</li>
+      <li data-lines="3" data-state="base=[0 0 0]; array[3]=1; a=[0 0 0 1]">Appending <code>1</code> fits in the spare capacity, so Go writes into slot 3 of the <em>same</em> array. <code>a</code> is a new header pointing at that array with len 4.</li>
+      <li data-lines="4" data-state="base=[0 0 0]; array[3]=2; a=[0 0 0 2]; b=[0 0 0 2]">Appending <code>2</code> to <code>base</code> (still len 3) writes into slot 3 again, overwriting the <code>1</code>. Both <code>a</code> and <code>b</code> look at that slot.</li>
+      <li data-lines="5-6" data-state="a=[0 0 0 2]; b=[0 0 0 2]" data-out="a: [0 0 0 2]\nb: [0 0 0 2]">Surprise: <code>a</code> also ends in 2.</li>
+      <li data-lines="9" data-state="safe=[0 0 0]; len=3; cap=3">The <strong>full slice expression</strong> <code>s[low:high:max]</code> caps the capacity at 3. There is no spare room now.</li>
+      <li data-lines="10-11" data-state="c=[0 0 0 1] (new array); d=[0 0 0 2] (another new array)">Each append has to allocate a fresh array, so <code>c</code> and <code>d</code> are independent.</li>
+      <li data-lines="12" data-out="c: [0 0 0 1] d: [0 0 0 2]">Correct, independent results.</li>
+    </ol>
+  </div>
+<div class="output"><pre>a: [0 0 0 2]
+b: [0 0 0 2]
+c: [0 0 0 1] d: [0 0 0 2]</pre></div>
+  <div class="callout senior"><p>If a function receives a slice and appends to it, document whether it may modify the caller's data, or defensively <code>slices.Clone</code> first. This bug often appears in "build a list of paths" recursion, where sibling branches share a prefix slice and stomp each other's last element.</p></div>
+
+  <h3>#4 The nil interface that isn't nil</h3>
+  <p>An interface value is a pair: <strong>(type, value)</strong>. It is only <code>nil</code> when <em>both</em> parts are empty. If you put a nil <code>*MyErr</code> pointer inside an <code>error</code>, the type part is filled in, so the interface is <em>not</em> nil. This is the most famous Go gotcha of all.</p>
+
+  <div class="live" data-title="Why err != nil when the pointer is nil">
+    <pre><code class="language-go">func validate(ok bool) error {
+	var p *MyErr // typed nil pointer
+	if !ok {
+		p = &amp;MyErr{}
+	}
+	return p // BUG: an interface holding (*MyErr)(nil) is NOT nil
+}
+
+func validateFixed(ok bool) error {
+	if !ok {
+		return &amp;MyErr{}
+	}
+	return nil // return a literal nil interface
+}
+
+func main() {
+	err := validate(true)
+	fmt.Println("err == nil?", err == nil)
+	fmt.Printf("inside the interface: type=%T, pointer is nil=%v\n", err, err.(*MyErr) == nil)
+	fmt.Println("fixed == nil?", validateFixed(true) == nil)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17" data-state="ok=true">main calls <code>validate(true)</code>. Everything is fine, so we expect no error.</li>
+      <li data-lines="2" data-state="p=(*MyErr)(nil)">We declare <code>p</code> as a <code>*MyErr</code>. Its value is a nil pointer, but its <em>static type</em> is <code>*MyErr</code>.</li>
+      <li data-lines="3" data-state="p=(*MyErr)(nil)"><code>ok</code> is true, so we skip the assignment. <code>p</code> stays nil.</li>
+      <li data-lines="6" data-state="returned error=(type=*MyErr, value=nil)">Returning <code>p</code> as an <code>error</code> wraps it in an interface: the type slot says <code>*MyErr</code>, the value slot says nil. That pair is not the empty pair.</li>
+      <li data-lines="18" data-state="err=(type=*MyErr, value=nil)" data-out="err == nil? false"><code>err == nil</code> compares against the empty pair <code>(nil, nil)</code>. The type slot is filled, so the answer is <strong>false</strong>.</li>
+      <li data-lines="19" data-out="inside the interface: type=*main.MyErr, pointer is nil=true">Looking inside proves it: the dynamic type is <code>*main.MyErr</code>, and the pointer it holds really is nil.</li>
+      <li data-lines="9-13,20" data-out="fixed == nil? true">The fix: return the literal <code>nil</code> on the success path. Never return a typed nil pointer through an interface.</li>
+    </ol>
+  </div>
+<div class="output"><pre>err == nil? false
+inside the interface: type=*main.MyErr, pointer is nil=true
+fixed == nil? true</pre></div>
+
+  <h3>#5 <code>range</code> copies values</h3>
+  <p><code>for _, p := range players</code> gives you a <em>copy</em> of each element. Changing <code>p</code> changes the copy, not the slice. To modify in place, index into the slice.</p>
+  <div class="live" data-title="Changing the copy vs the element">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Player struct {
+	Name  string
+	Score int
+}
+
+func main() {
+	players := []Player{{"ann", 1}, {"bob", 2}}
+
+	for _, p := range players {
+		p.Score += 100 // modifies a COPY
+	}
+	fmt.Println("after value loop:", players)
+
+	for i := range players {
+		players[i].Score += 100 // modifies the element itself
+	}
+	fmt.Println("after index loop:", players)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="players=[{ann 1} {bob 2}]">A slice of structs. Each element is stored inline in the backing array.</li>
+      <li data-lines="13-14" data-state="p={ann 101}; players[0]={ann 1}">Iteration 0: <code>p</code> is a <strong>copy</strong> of <code>players[0]</code>. Adding 100 changes the copy only.</li>
+      <li data-lines="13-14" data-state="p={bob 102}; players[1]={bob 2}">Iteration 1: same story. <code>p</code> is overwritten with a fresh copy of the next element.</li>
+      <li data-lines="16" data-state="players=[{ann 1} {bob 2}]" data-out="after value loop: [{ann 1} {bob 2}]">The slice is unchanged. No error, no warning.</li>
+      <li data-lines="18-19" data-state="i=0; players[0]={ann 101}">Now we range over indexes only and write through <code>players[i]</code>. This touches the element in the backing array.</li>
+      <li data-lines="18-19" data-state="i=1; players[1]={bob 102}">Same for index 1.</li>
+      <li data-lines="21" data-state="players=[{ann 101} {bob 102}]" data-out="after index loop: [{ann 101} {bob 102}]">Both scores changed. (Storing <code>[]*Player</code> also works, but then every element is a separate allocation.)</li>
+    </ol>
+  </div>
+<div class="output"><pre>after value loop: [{ann 1} {bob 2}]
+after index loop: [{ann 101} {bob 102}]</pre></div>
+  <div class="callout tip"><p>Ranging over a slice of big structs also copies each one, which costs time. If the struct is large and you only read it, <code>for i := range s { p := &amp;s[i] ... }</code> avoids the copy.</p></div>
+
+  <h3>#6 <code>defer</code> evaluates its arguments immediately</h3>
+  <p><code>defer f(x)</code> schedules <code>f</code> to run later, but it reads <code>x</code> <em>right now</em>. A deferred closure, on the other hand, reads variables when it finally runs.</p>
+  <div class="live" data-title="When does defer read x?">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	x := 1
+	defer fmt.Println("deferred arg sees x =", x) // x evaluated NOW
+	defer func() { fmt.Println("closure sees x =", x) }()
+	x = 42
+	fmt.Println("main returns with x =", x)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="x=1">We set <code>x</code> to 1.</li>
+      <li data-lines="7" data-state="x=1; deferred#1=Println(&quot;...&quot;, 1)">The first <code>defer</code> evaluates its arguments <strong>now</strong>: it stores the string and the number 1. The call itself waits.</li>
+      <li data-lines="8" data-state="x=1; deferred#1=Println(..., 1); deferred#2=closure over x">The second <code>defer</code> stores a closure. Closures capture the <em>variable</em>, not its current value.</li>
+      <li data-lines="9" data-state="x=42">We change <code>x</code> to 42.</li>
+      <li data-lines="10" data-out="main returns with x = 42">Normal print.</li>
+      <li data-lines="8" data-out="closure sees x = 42">main returns. Defers run in <strong>last-in, first-out</strong> order, so the closure runs first and reads the current <code>x</code>: 42.</li>
+      <li data-lines="7" data-out="deferred arg sees x = 1">Then the first defer runs with the value it saved long ago: 1.</li>
+    </ol>
+  </div>
+<div class="output"><pre>main returns with x = 42
+closure sees x = 42
+deferred arg sees x = 1</pre></div>
+  <p>This matters for things like <code>defer log.Printf("took %v", time.Since(start))</code>: <code>time.Since</code> runs immediately, so it always logs about 0s. Write <code>defer func() { log.Printf("took %v", time.Since(start)) }()</code> instead.</p>
+
+  <h3>#7 The shadowed <code>err</code></h3>
+  <p><code>:=</code> declares <em>new</em> variables. Inside a nested block, it creates a new <code>err</code> that hides (<strong>shadows</strong>) the outer one. The outer one is never updated.</p>
+  <div class="live" data-title="Two variables, both called err">
+    <pre><code class="language-go">func run() error {
+	var err error
+	for i := 1; i &lt;= 3; i++ {
+		v, err := step(i) // := declares a NEW err that shadows the outer one
+		if err != nil {
+			fmt.Println("  inner saw:", err)
+			continue
+		}
+		_ = v
+	}
+	return err // the outer err was never assigned
+}
+
+func main() {
+	fmt.Println("run() returned:", run())</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="outer err=nil">The function declares an outer <code>err</code>, meaning to return it.</li>
+      <li data-lines="3-4" data-state="i=1; outer err=nil; inner err=nil">Inside the loop, <code>v, err := step(i)</code> declares a brand-new <code>v</code> <em>and</em> a brand-new <code>err</code> scoped to the loop body.</li>
+      <li data-lines="3-4" data-state="i=2; outer err=nil; inner err=step 2 failed">On iteration 2 the inner <code>err</code> gets the failure.</li>
+      <li data-lines="5-7" data-state="i=2; outer err=nil" data-out="  inner saw: step 2 failed">We print it and continue. The outer <code>err</code> is untouched.</li>
+      <li data-lines="3-4" data-state="i=3; outer err=nil; inner err=nil">Iteration 3 succeeds.</li>
+      <li data-lines="11" data-state="outer err=nil">We return the outer <code>err</code>, which was never assigned.</li>
+      <li data-lines="15" data-out="run() returned: &lt;nil&gt;">The caller thinks everything worked. The failure was silently swallowed.</li>
+    </ol>
+  </div>
+<div class="output"><pre>  inner saw: step 2 failed
+run() returned: &lt;nil&gt;</pre></div>
+  <p><strong>Fix:</strong> declare <code>v</code> separately and use <code>=</code>, or (much better) return the error right where it happens. <code>go vet</code> does not catch this by default; the <code>shadow</code> analyzer and golangci-lint's <code>govet</code> with <code>enable: [shadow]</code> do.</p>
+
+  <h3>#8 <code>time.After</code> in a loop</h3>
+  <p><code>time.After(d)</code> creates a new timer every call. In a hot <code>select</code> loop that's a fresh timer every iteration. Before Go 1.23 those timers couldn't be garbage-collected until they fired, so a loop with <code>time.After(time.Hour)</code> was a real <strong>memory leak</strong>. Since Go 1.23, unreferenced timers are collectable, so it's no longer a leak, but it is still needless allocation. Measured:</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func allocs(f func()) uint64 {
+	var a, b runtime.MemStats
+	runtime.ReadMemStats(&amp;a)
+	f()
+	runtime.ReadMemStats(&amp;b)
+	return b.Mallocs - a.Mallocs
+}
+
+func main() {
+	events := make(chan int)
+	const n = 10000
+
+	naive := allocs(func() {
+		for range n {
+			select {
+			case &lt;-events:
+			case &lt;-time.After(time.Hour): // a brand-new timer every iteration
+			default:
+			}
+		}
+	})
+
+	reused := allocs(func() {
+		t := time.NewTimer(time.Hour)
+		defer t.Stop()
+		for range n {
+			t.Reset(time.Hour) // one timer, reset each time
+			select {
+			case &lt;-events:
+			case &lt;-t.C:
+			default:
+			}
+		}
+	})
+
+	fmt.Println("time.After in loop: allocations =", naive)
+	fmt.Println("reused timer:       allocations =", reused)
+}</code></pre></div>
+<div class="output"><pre>time.After in loop: allocations = 30000
+reused timer:       allocations = 3</pre></div>
+  <p>Ten thousand iterations, thirty thousand allocations versus three. For a hot loop, create one timer and <code>Reset</code> it. (Since 1.23, <code>Reset</code> and <code>Stop</code> also guarantee no stale value is left in <code>t.C</code>, which removes the old "drain the channel" dance.)</p>
+
+  <h3>#9 Unbuffered channel deadlock</h3>
+  <p>An unbuffered channel is a hand-off: a send waits until someone receives. If the only goroutine sends and then plans to receive, it waits forever. Go detects that <em>every</em> goroutine is stuck and crashes.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int) // unbuffered: a send waits for a receiver
+	ch &lt;- 1              // nobody is receiving -&gt; blocks forever
+	fmt.Println(&lt;-ch)
+}</code></pre></div>
+<div class="output error" data-label="Runtime crash"><pre>fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+	example/g09/main.go:7 +0x38
+exit status 2</pre></div>
+  <div class="live" data-title="Two ways out of the deadlock">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int)
+	go func() { ch &lt;- 1 }() // sender in another goroutine
+	fmt.Println(&lt;-ch)
+
+	buf := make(chan int, 1) // or give the channel room for one value
+	buf &lt;- 2
+	fmt.Println(&lt;-buf)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="ch=unbuffered">An unbuffered channel: a send completes only when a receiver takes the value at the same moment.</li>
+      <li data-lines="7" data-state="goroutines=2">The fix is to send from <strong>another goroutine</strong>. It starts and blocks on <code>ch &lt;- 1</code> until someone receives.</li>
+      <li data-lines="8" data-state="goroutines=1; got=1" data-out="1">main reaches <code>&lt;-ch</code>. The two goroutines meet, the value is handed over, and both continue.</li>
+      <li data-lines="10" data-state="buf=[] cap=1">The other fix: a <strong>buffered</strong> channel with room for one value.</li>
+      <li data-lines="11" data-state="buf=[2]">The send drops the value into the buffer and returns right away. No receiver is needed yet.</li>
+      <li data-lines="12" data-state="buf=[]" data-out="2">The receive takes it back out. A buffer of 1 only helps for 1 pending value: a second send would block again.</li>
+    </ol>
+  </div>
+<div class="output"><pre>1
+2</pre></div>
+  <div class="callout warn"><p>The runtime only reports a deadlock when <em>all</em> goroutines are blocked. In a server, other goroutines (the HTTP listener, timers) keep running, so a stuck goroutine just silently hangs forever. That's a leak, see #17.</p></div>
+
+  <h3>#10 Map iteration order is random</h3>
+  <p>Go deliberately randomises map iteration so nobody accidentally depends on it. Output differs run to run; this is one real run:</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+func main() {
+	m := map[string]int{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
+	for range 3 {
+		for k := range m {
+			fmt.Print(k, " ")
+		}
+		fmt.Println()
+	}
+	// Need a stable order? Sort the keys.
+	fmt.Println("sorted:", slices.Sorted(maps.Keys(m)))
+}</code></pre></div>
+<div class="output" data-label="Output (order varies between runs)"><pre>a b c d e 
+e a b c d 
+a b c d e 
+sorted: [a b c d e]</pre></div>
+  <p>Tests that compare JSON or printed maps can flake because of this. Sort the keys (<code>slices.Sorted(maps.Keys(m))</code>) or compare with <code>maps.Equal</code>. Note that <code>fmt.Println(m)</code> does print maps in sorted key order, which is why printed maps look stable.</p>
+
+  <h3>#11 String concatenation in a loop</h3>
+  <p>Strings are immutable. <code>s += w</code> allocates a new string and copies everything so far, every time. That's quadratic work. A <code>strings.Builder</code> grows a buffer instead. Benchmark (900 words, using Go 1.24's <code>b.Loop</code>):</p>
+<div class="code" data-file="concat_test.go"><pre><code class="language-go">package concat
+
+import (
+	"strings"
+	"testing"
+)
+
+var words = strings.Fields(strings.Repeat("go is fun ", 300))
+
+func BenchmarkPlus(b *testing.B) {
+	for b.Loop() {
+		s := ""
+		for _, w := range words {
+			s += w // copies the whole string every time: O(n^2)
+		}
+		_ = s
+	}
+}
+
+func BenchmarkBuilder(b *testing.B) {
+	for b.Loop() {
+		var sb strings.Builder
+		for _, w := range words {
+			sb.WriteString(w)
+		}
+		_ = sb.String()
+	}
+}</code></pre></div>
+<div class="output" data-label="go test -bench . -benchmem"><pre>goos: darwin
+goarch: arm64
+pkg: concat
+cpu: Apple M1
+BenchmarkPlus-8      	   11498	    103555 ns/op	 1005522 B/op	     899 allocs/op
+BenchmarkBuilder-8   	  309160	      3873 ns/op	    8440 B/op	      11 allocs/op</pre></div>
+  <p>About 27× faster and 120× less memory. For two or three pieces, <code>+</code> is perfectly fine and clearer. The problem is only in loops.</p>
+
+  <h3>#12 Integer division and overflow</h3>
+  <p>Dividing two integers gives an integer: the fraction is thrown away (truncated toward zero). Converting to float <em>after</em> the division is too late. Integers also wrap silently on overflow.</p>
+  <div class="live" data-title="Arithmetic that surprises">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	total, count := 7, 2
+	fmt.Println("7 / 2       =", total/count) // integer division truncates
+	fmt.Println("-7 / 2      =", -7/2)        // truncates toward zero
+	fmt.Println("7 % -2      =", 7%-2)        // sign follows the dividend
+	avg := float64(total) / float64(count)
+	fmt.Println("float avg   =", avg)
+	fmt.Println("bad float   =", float64(total/count)) // converted too late
+
+	var b uint8 = 255
+	b++
+	fmt.Println("uint8 255+1 =", b) // silent wrap-around
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6-7" data-state="total=7; count=2" data-out="7 / 2       = 3">Both operands are <code>int</code>, so <code>/</code> is <strong>integer division</strong>: the .5 is thrown away.</li>
+      <li data-lines="8" data-out="-7 / 2      = -3">Go truncates toward zero, so -3.5 becomes <strong>-3</strong>, not -4 (Python would say -4).</li>
+      <li data-lines="9" data-out="7 % -2      = 1">The sign of <code>%</code> follows the dividend (7), not the divisor.</li>
+      <li data-lines="10-11" data-state="avg=3.5" data-out="float avg   = 3.5">Convert <em>before</em> dividing: <code>float64(7) / float64(2)</code> is a float division.</li>
+      <li data-lines="12" data-out="bad float   = 3">Converting <em>after</em> is too late: <code>total/count</code> is already 3, and <code>float64(3)</code> is just 3.</li>
+      <li data-lines="14" data-state="b=255">A <code>uint8</code> holds 0 to 255. We start at the top.</li>
+      <li data-lines="15" data-state="b=0"><code>b++</code> overflows. Go does not panic; unsigned integers wrap around silently.</li>
+      <li data-lines="16" data-state="b=0" data-out="uint8 255+1 = 0">255 + 1 = <strong>0</strong>. Watch for this in counters, sizes and anything parsed from untrusted input.</li>
+    </ol>
+  </div>
+<div class="output"><pre>7 / 2       = 3
+-7 / 2      = -3
+7 % -2      = 1
+float avg   = 3.5
+bad float   = 3
+uint8 255+1 = 0</pre></div>
+
+  <h3>#13 JSON ignores unexported fields</h3>
+  <p><code>encoding/json</code> uses reflection, and reflection can only see <em>exported</em> (capitalised) fields. A lowercase field is silently skipped in both directions, with no error.</p>
+  <div class="live" data-title="What encoding/json can see">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+type User struct {
+	Name     string `json:"name"`
+	email    string // lowercase: unexported, invisible to encoding/json
+	Password string `json:"-"`              // explicitly skipped
+	Nick     string `json:"nick,omitempty"` // dropped when empty
+}
+
+func main() {
+	u := User{Name: "Ann", email: "ann@example.com", Password: "s3cret"}
+	b, _ := json.Marshal(u)
+	fmt.Println(string(b))
+
+	var back User
+	_ = json.Unmarshal([]byte(`{"name":"Bob","email":"bob@example.com"}`), &amp;back)
+	fmt.Printf("%+v\n", back)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8-13"><code>encoding/json</code> uses reflection, and reflection can only see <strong>exported</strong> (capitalized) fields. Tags tweak the rest.</li>
+      <li data-lines="16" data-state="u={Name:Ann email:ann@… Password:s3cret Nick:}">We fill in three fields. <code>Nick</code> stays empty.</li>
+      <li data-lines="17" data-state="b={&quot;name&quot;:&quot;Ann&quot;}">Marshal walks the fields: <code>Name</code> becomes <code>"name"</code>; <code>email</code> is lowercase and skipped; <code>Password</code> has <code>json:"-"</code>; <code>Nick</code> is empty with <code>omitempty</code>.</li>
+      <li data-lines="18" data-out="{&quot;name&quot;:&quot;Ann&quot;}">Only the name survives. Here the hidden password is a feature, but the silent loss of <code>email</code> is the bug.</li>
+      <li data-lines="20-21" data-state="back={Name:Bob email: Password: Nick:}">Decoding has the same blind spot. <code>"email"</code> is in the JSON, but json cannot set an unexported field, so it is silently dropped. No error is returned.</li>
+      <li data-lines="22" data-out="{Name:Bob email: Password: Nick:}"><code>%+v</code> shows field names: <code>email</code> is empty. If you need a field on the wire, export it and give it a tag.</li>
+    </ol>
+  </div>
+<div class="output"><pre>{"name":"Ann"}
+{Name:Bob email: Password: Nick:}</pre></div>
+  <div class="callout tip"><p>The tag <code>json:"-"</code> is how you <em>deliberately</em> hide an exported field (like a password hash). Don't rely on lowercase names for that; one rename to <code>Email</code> and it leaks.</p></div>
+
+  <h3>#14 Closing over the loop variable in goroutines</h3>
+  <p>The goroutine version of #1, and historically the one that caused real production bugs: every goroutine greeted the same person. Again, the <code>go</code> line in <code>go.mod</code> decides. Goroutine order is nondeterministic; these are representative runs.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	for _, name := range []string{"ann", "bob", "cat"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("hello", name)
+		}()
+	}
+	wg.Wait()
+}</code></pre></div>
+<div class="output" data-label="go 1.21 in go.mod"><pre>hello cat
+hello cat
+hello cat</pre></div>
+<div class="output" data-label="go 1.27 in go.mod (order varies)"><pre>hello cat
+hello ann
+hello bob</pre></div>
+
+  <h3>#15 Copying a mutex</h3>
+  <p>A <code>sync.Mutex</code> must never be copied after first use. A value receiver copies the whole struct, including the lock, so each call locks its own private copy and increments a private <code>n</code>. The program "works", but protects nothing and changes nothing.</p>
+  <div class="live" data-title="Each call locks its own copy">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Counter struct {
+	mu sync.Mutex
+	n  int
+}
+
+// Value receiver: c is a COPY, including a copy of the mutex.
+func (c Counter) Inc() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	fmt.Println("n =", c.n)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="21" data-state="c={mu:unlocked n:0}"><code>c</code> is a zero <code>Counter</code>: an unlocked mutex and <code>n = 0</code>. Both zero values are ready to use.</li>
+      <li data-lines="22,14" data-state="c.n=0; copy.n=0"><code>c.Inc()</code> has a <strong>value receiver</strong>, so Go copies the whole struct into the method's <code>c</code>, mutex included.</li>
+      <li data-lines="15-17" data-state="c.n=0; copy.n=1; copy.mu=locked">The method locks the <em>copy's</em> mutex and increments the <em>copy's</em> <code>n</code>. The caller's lock and counter are never touched.</li>
+      <li data-lines="18" data-state="c.n=0">The method returns and the copy is thrown away, along with its <code>n = 1</code>.</li>
+      <li data-lines="23,14-18" data-state="c.n=0">The second call makes a fresh copy and repeats the same useless work.</li>
+      <li data-lines="24" data-state="c.n=0" data-out="n = 0">The counter is still 0. With goroutines this would also be a data race, because no two calls share a lock. Fix: <code>func (c *Counter) Inc()</code>. <code>go vet</code>'s copylocks check catches this.</li>
+    </ol>
+  </div>
+<div class="output"><pre>n = 0</pre></div>
+  <p><code>go vet</code> catches it:</p>
+<div class="output error" data-label="go vet ."><pre>main.go:14:9: Inc passes lock by value: example/g15.Counter contains sync.Mutex</pre></div>
+  <p><strong>Fix:</strong> use a pointer receiver, <code>func (c *Counter) Inc()</code>, on every method of any type that contains a mutex, and pass such structs by pointer.</p>
+
+  <h3>#16 Forgetting to close (and drain) a response body</h3>
+  <p>An HTTP response body is a live network stream. If you don't read it to the end and <code>Close</code> it, the connection can't go back into the pool, so the next request has to open a new TCP (and maybe TLS) connection. Under load you run out of file descriptors. This demo uses <code>httptrace</code> to ask "was this connection reused?":</p>
+  <div class="live" data-title="Is the connection reused?">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
+	"strings"
+)
+
+func get(url string, drainAndClose bool) {
+	reused := false
+	trace := &amp;httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+	}
+	req, _ := http.NewRequest("GET", url, nil)
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	if drainAndClose {
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+	}
+	fmt.Println("  connection reused:", reused)
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("x", 1024))
+	}))
+	defer srv.Close()
+
+	fmt.Println("forgetting Body.Close():")
+	for range 3 {
+		get(srv.URL, false)
+	}
+	http.DefaultClient.CloseIdleConnections()
+	fmt.Println("draining + closing the body:")
+	for range 3 {
+		get(srv.URL, true)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="31-34" data-state="srv=httptest server">We start a local test server that answers every request with 1 KB of <code>x</code>.</li>
+      <li data-lines="36" data-out="forgetting Body.Close():">First, the buggy client.</li>
+      <li data-lines="38,12-19" data-state="drainAndClose=false; reused=false"><code>get</code> installs an <code>httptrace</code> hook that records whether the TCP connection came from the idle pool, then sends the request.</li>
+      <li data-lines="23,27" data-state="drainAndClose=false; reused=false" data-out="  connection reused: false">We never read or close the body, so the connection stays busy. It cannot go back to the pool.</li>
+      <li data-lines="37-38" data-state="calls=3; open conns=3" data-out="  connection reused: false\n  connection reused: false">Each later call has to dial a brand-new connection. Under load this means thousands of sockets and "too many open files".</li>
+      <li data-lines="40-41" data-out="draining + closing the body:">We drop the idle pool, then try the correct version.</li>
+      <li data-lines="43,23-25" data-state="drainAndClose=true; reused=false" data-out="  connection reused: false">The first call dials fresh (the pool is empty). <code>io.Copy(io.Discard, ...)</code> reads the body to the end, and the deferred <code>Close</code> returns the connection to the pool.</li>
+      <li data-lines="43,27" data-state="drainAndClose=true; reused=true" data-out="  connection reused: true\n  connection reused: true">Calls 2 and 3 pick up that same idle connection: <strong>reused: true</strong>.</li>
+    </ol>
+  </div>
+<div class="output"><pre>forgetting Body.Close():
+  connection reused: false
+  connection reused: false
+  connection reused: false
+draining + closing the body:
+  connection reused: false
+  connection reused: true
+  connection reused: true</pre></div>
+  <p>Without closing, every request opens a new connection. With drain + close, after the first request every connection is reused. Always write <code>defer resp.Body.Close()</code> right after checking the error.</p>
+
+  <h3>#17 Goroutine leaks</h3>
+  <p>A goroutine that blocks forever is never collected. It keeps its stack and everything it references alive. The classic shape: launch N goroutines, take the first answer, and leave the others stuck sending to a channel nobody reads.</p>
+  <div class="live" data-title="Counting leaked goroutines">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// leaky returns the first result, but the losing goroutines block forever
+// on an unbuffered send that nobody will ever receive.
+func leaky() int {
+	ch := make(chan int)
+	for i := range 3 {
+		go func() { ch &lt;- i }()
+	}
+	return &lt;-ch
+}
+
+// fixed gives every sender somewhere to go (buffer) - or use a context.
+func fixed(ctx context.Context) int {
+	ch := make(chan int, 3)
+	for i := range 3 {
+		go func() {
+			select {
+			case ch &lt;- i:
+			case &lt;-ctx.Done():
+			}
+		}()
+	}
+	return &lt;-ch
+}
+
+func main() {
+	before := runtime.NumGoroutine()
+	for range 100 {
+		leaky()
+	}
+	time.Sleep(50 * time.Millisecond)
+	fmt.Println("leaky: goroutines grew from", before, "to", runtime.NumGoroutine())
+
+	before = runtime.NumGoroutine()
+	for range 100 {
+		fixed(context.Background())
+	}
+	time.Sleep(50 * time.Millisecond)
+	fmt.Println("fixed: goroutines went from", before, "to", runtime.NumGoroutine())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="35" data-state="before=1">We record how many goroutines exist: just <code>main</code>, so 1.</li>
+      <li data-lines="36-37,12-13" data-state="ch=unbuffered">First call to <code>leaky</code>. It makes an <strong>unbuffered</strong> channel: every send needs a receiver waiting.</li>
+      <li data-lines="14-15" data-state="goroutines=4">It starts three senders. Each tries <code>ch &lt;- i</code> and blocks until someone receives.</li>
+      <li data-lines="17" data-state="goroutines=3 (2 stuck)"><code>leaky</code> receives once and returns. One sender finishes; the other two are blocked on a channel that nothing will ever read again. They leak.</li>
+      <li data-lines="36-37" data-state="calls=100; stuck=200">100 calls leave 2 stuck goroutines each: 200 leaked goroutines that are never garbage collected.</li>
+      <li data-lines="39-40" data-state="before=1; now=201" data-out="leaky: goroutines grew from 1 to 201">After a short sleep the count is 1 + 200 = <strong>201</strong>. In a server this grows until memory runs out.</li>
+      <li data-lines="42-44,21-22" data-state="before=201; ch=buffered(3)">The fixed version gives the channel a buffer of 3, so every sender has a slot.</li>
+      <li data-lines="23-31" data-state="buffered=3 sends">All three sends succeed immediately (the <code>ctx.Done()</code> case is a second escape hatch). <code>fixed</code> reads one value and returns; the senders already finished.</li>
+      <li data-lines="46-47" data-state="before=201; now=201" data-out="fixed: goroutines went from 201 to 201">100 calls, zero new goroutines left behind. (The 200 from the leaky phase are still stuck.)</li>
+    </ol>
+  </div>
+<div class="output"><pre>leaky: goroutines grew from 1 to 201
+fixed: goroutines went from 201 to 201</pre></div>
+  <p>100 calls leaked 200 goroutines. In a server that handles a million requests a day, that's a slow-motion outage. Every goroutine you start needs an answer to "<strong>how does this goroutine end?</strong>".</p>
+  <div class="callout senior"><p>In tests, check for leaks automatically. Snapshot <code>runtime.NumGoroutine()</code> before and after, or use <code>go.uber.org/goleak</code>, which fails the test if goroutines outlive it. Recent Go releases also ship an experimental goroutine-leak profile in <code>runtime/pprof</code> that finds goroutines blocked on unreachable channels.</p></div>
+
+  <h3>#18 nil slice vs empty slice in JSON</h3>
+  <p>Both have length 0 and both work with <code>append</code> and <code>range</code>. But JSON tells them apart, and your frontend team will notice.</p>
+  <div class="live" data-title="null vs [] on the wire">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+type Resp struct {
+	Items []string `json:"items"`
+}
+
+func main() {
+	var nilSlice []string
+	empty := []string{}
+	a, _ := json.Marshal(Resp{Items: nilSlice})
+	b, _ := json.Marshal(Resp{Items: empty})
+	fmt.Println("nil slice:  ", string(a))
+	fmt.Println("empty slice:", string(b))
+	fmt.Println("both have len 0:", len(nilSlice) == len(empty))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13" data-state="nilSlice=nil; len=0">A declared but unassigned slice is <code>nil</code>: no backing array at all.</li>
+      <li data-lines="14" data-state="nilSlice=nil; empty=[] (non-nil, len 0)"><code>[]string{}</code> is an empty but <strong>non-nil</strong> slice. It points at a zero-length array.</li>
+      <li data-lines="15" data-state="a={&quot;items&quot;:null}"><code>encoding/json</code> encodes a nil slice as <code>null</code>.</li>
+      <li data-lines="16" data-state="a={&quot;items&quot;:null}; b={&quot;items&quot;:[]}">...and an empty slice as <code>[]</code>. Same length, different JSON.</li>
+      <li data-lines="17-18" data-out="nil slice:   {&quot;items&quot;:null}\nempty slice: {&quot;items&quot;:[]}">A JavaScript client doing <code>resp.items.length</code> crashes on <code>null</code>. This is the bug.</li>
+      <li data-lines="19" data-out="both have len 0: true">Inside Go the two behave the same for <code>len</code>, <code>range</code> and <code>append</code>, which is why the difference is easy to miss. Initialize response slices with <code>[]T{}</code> or <code>make</code>.</li>
+    </ol>
+  </div>
+<div class="output"><pre>nil slice:   {"items":null}
+empty slice: {"items":[]}
+both have len 0: true</pre></div>
+  <p>For API responses, initialise list fields to <code>[]T{}</code> so clients always get an array. (Go's experimental <code>encoding/json/v2</code> changes this default and encodes nil slices as <code>[]</code>.)</p>
+
+  <h3>#19 Arrays are values; slice headers are copied</h3>
+  <p>An array (<code>[3]int</code>) is copied whole when assigned or passed. A slice passes a <em>header</em> by value: the callee shares the data but has its own length. So a callee can change elements you see, but an <code>append</code> in the callee is invisible to you.</p>
+  <div class="live" data-title="What does each callee really get?">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func zero(a [3]int) { a[0] = 0 }          // gets a copy of the whole array
+func zeroS(s []int) { s[0] = 0 }          // gets a header pointing at shared data
+func grow(s []int)  { s = append(s, 99) } // caller never sees the new len
+
+func main() {
+	arr := [3]int{1, 2, 3}
+	zero(arr)
+	fmt.Println("array after zero: ", arr)
+
+	sl := []int{1, 2, 3}
+	zeroS(sl)
+	fmt.Println("slice after zeroS:", sl)
+	grow(sl)
+	fmt.Println("slice after grow: ", sl)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="arr=[1 2 3]"><code>arr</code> is an <strong>array</strong>: the three ints are the value itself.</li>
+      <li data-lines="11,5" data-state="arr=[1 2 3]; a=[0 2 3] (copy)">Passing an array copies all of it. <code>zero</code> sets <code>a[0]</code> on its own private copy, which is thrown away on return.</li>
+      <li data-lines="12" data-state="arr=[1 2 3]" data-out="array after zero:  [1 2 3]">The caller's array is untouched.</li>
+      <li data-lines="14" data-state="sl=[1 2 3]; len=3; cap=3"><code>sl</code> is a <strong>slice</strong>: a small header (pointer, len, cap) pointing at a hidden array.</li>
+      <li data-lines="15,6" data-state="sl=[0 2 3]; s=[0 2 3] (same array)"><code>zeroS</code> gets a copy of the header, but the copy points at the <em>same</em> backing array. Writing <code>s[0]</code> writes the shared data.</li>
+      <li data-lines="16" data-state="sl=[0 2 3]" data-out="slice after zeroS: [0 2 3]">So the caller sees the change.</li>
+      <li data-lines="17,7" data-state="sl=[0 2 3]; len(sl)=3; s=[0 2 3 99]; len(s)=4"><code>grow</code> appends. cap is 3, so append allocates a new array and assigns the new header to the <em>local</em> <code>s</code>. The caller's header still says len 3.</li>
+      <li data-lines="18" data-state="sl=[0 2 3]" data-out="slice after grow:  [0 2 3]">The 99 is lost. If a function changes a slice's length, it must <strong>return</strong> the new slice, like <code>append</code> itself does.</li>
+    </ol>
+  </div>
+<div class="output"><pre>array after zero:  [1 2 3]
+slice after zeroS: [0 2 3]
+slice after grow:  [0 2 3]</pre></div>
+  <p>The fix for <code>grow</code> is the pattern the built-in <code>append</code> uses: <em>return</em> the new slice, <code>s = grow(s)</code>.</p>
+
+  <h3>#20 Pointer-receiver methods and interfaces</h3>
+  <p>If a method has a pointer receiver, only the <em>pointer</em> type has that method in its method set. A plain value can't satisfy the interface.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Shape interface{ Area() float64 }
+
+type Square struct{ side float64 }
+
+func (s *Square) Area() float64 { return s.side * s.side } // pointer receiver
+
+func main() {
+	var sh Shape = Square{side: 2} // value does not have the pointer method
+	fmt.Println(sh.Area())
+}</code></pre></div>
+<div class="output error" data-label="Compile error"><pre># example/g20
+./main.go:12:17: cannot use Square{…} (value of struct type Square) as Shape value in variable declaration: Square does not implement Shape (method Area has pointer receiver)</pre></div>
+  <p><strong>Fix:</strong> <code>var sh Shape = &amp;Square{side: 2}</code>. Why the rule? A value stored in an interface isn't addressable, so Go couldn't take its address to call a pointer method safely.</p>
+
+  <h3>#21 Strings are bytes, not characters</h3>
+  <p><code>len(s)</code> counts <em>bytes</em>. <code>s[i]</code> gives a byte. Slicing can cut a multi-byte UTF-8 character in half. <code>range</code> over a string decodes <em>runes</em> (Unicode code points), and the index jumps by the rune's byte width.</p>
+  <div class="live" data-title="Bytes, runes and range">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unicode/utf8"
+)
+
+func main() {
+	s := "héllo"
+	fmt.Println("len (bytes):  ", len(s))
+	fmt.Println("rune count:   ", utf8.RuneCountInString(s))
+	fmt.Println("s[1] (a byte):", s[1])
+	fmt.Println("s[:2]:        ", s[:2]) // cuts é in half
+	for i, r := range s {                // range decodes runes
+		fmt.Printf("%d:%c ", i, r)
+	}
+	fmt.Println()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="s=&quot;héllo&quot;; bytes=[68 C3 A9 6C 6C 6F]">A Go string is a read-only slice of <strong>bytes</strong>, UTF-8 encoded. <code>é</code> is not ASCII, so it takes two bytes: <code>0xC3 0xA9</code>.</li>
+      <li data-lines="10" data-state="s=&quot;héllo&quot;; len(s)=6" data-out="len (bytes):   6"><code>len</code> counts bytes, not characters: 1 + 2 + 1 + 1 + 1 = <strong>6</strong>.</li>
+      <li data-lines="11" data-state="s=&quot;héllo&quot;; runes=5" data-out="rune count:    5"><code>utf8.RuneCountInString</code> decodes the bytes and counts code points: 5.</li>
+      <li data-lines="12" data-state="s[1]=0xC3" data-out="s[1] (a byte): 195">Indexing gives a single <code>byte</code>. <code>s[1]</code> is the <em>first half</em> of é, <code>0xC3</code> = 195, not the letter.</li>
+      <li data-lines="13" data-state="s[:2]=[68 C3]" data-out="s[:2]:         h�">Slicing also works on byte offsets. <code>s[:2]</code> cuts é in half, leaving an invalid UTF-8 sequence that prints as the replacement character.</li>
+      <li data-lines="14-15" data-state="i=0; r='h'"><code>range</code> over a string decodes one <strong>rune</strong> per step. <code>i</code> is the byte offset where that rune starts.</li>
+      <li data-lines="14-15" data-state="i=1; r='é'">é starts at byte 1 and is two bytes long...</li>
+      <li data-lines="14-15" data-state="i=3; r='l'">...so the next offset is <strong>3</strong>, not 2. The index jumps over the second byte of é.</li>
+      <li data-lines="14-15" data-state="i=5; r='o'" data-out="0:h 1:é 3:l 4:l 5:o ">The last two runes are at offsets 4 and 5. <code>Printf</code> wrote each pair on the same line, shown here all at once.</li>
+      <li data-lines="17">A final newline. Rule of thumb: use <code>range</code> or <code>[]rune(s)</code> when you mean characters, and byte offsets only when you know the text is ASCII.</li>
+    </ol>
+  </div>
+<div class="output"><pre>len (bytes):   6
+rune count:    5
+s[1] (a byte): 195
+s[:2]:         h�
+0:h 1:é 3:l 4:l 5:o </pre></div>
+
+  <h3>#22 <code>defer</code> inside a loop</h3>
+  <p><code>defer</code> runs when the <em>function</em> returns, not when the loop iteration ends. Open 10,000 files in a loop with <code>defer f.Close()</code> and you hold 10,000 file descriptors until the very end.</p>
+  <div class="live" data-title="When do the deferred Closes fire?">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	dir, _ := os.MkdirTemp("", "defer")
+	defer os.RemoveAll(dir)
+	for i := range 3 {
+		name := filepath.Join(dir, fmt.Sprintf("f%d.txt", i))
+		os.WriteFile(name, []byte("hi"), 0o644)
+	}
+
+	// BAD: every Close waits until processAll returns.
+	processAll := func() {
+		for i := range 3 {
+			f, _ := os.Open(filepath.Join(dir, fmt.Sprintf("f%d.txt", i)))
+			defer func() { fmt.Println("  closing", filepath.Base(f.Name())); f.Close() }()
+			fmt.Println("  opened", filepath.Base(f.Name()))
+		}
+		fmt.Println("  loop done")
+	}
+	fmt.Println("defer in loop:")
+	processAll()
+
+	// GOOD: move the body into a function so defer runs per iteration.
+	processOne := func(i int) {
+		f, _ := os.Open(filepath.Join(dir, fmt.Sprintf("f%d.txt", i)))
+		defer func() { fmt.Println("  closing", filepath.Base(f.Name())); f.Close() }()
+		fmt.Println("  opened", filepath.Base(f.Name()))
+	}
+	fmt.Println("defer in helper:")
+	for i := range 3 {
+		processOne(i)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-15" data-state="dir=/tmp/defer…; files=f0 f1 f2">Setup: create a temp dir with three small files. The <code>defer os.RemoveAll(dir)</code> will clean up when main ends.</li>
+      <li data-lines="26-27" data-out="defer in loop:">We call <code>processAll</code>, the buggy version.</li>
+      <li data-lines="19-22" data-state="i=0; f=f0.txt; pending defers=[close f0]" data-out="  opened f0.txt">Iteration 0 opens <code>f0.txt</code> and registers a deferred close. The defer belongs to <strong>the function</strong>, not the loop body, so it does not run at the end of the iteration.</li>
+      <li data-lines="19-22" data-state="i=1; f=f1.txt; pending defers=[close f0, close f1]" data-out="  opened f1.txt">Iteration 1 opens another file. Two files are now open at once.</li>
+      <li data-lines="19-22" data-state="i=2; f=f2.txt; pending defers=[close f0, close f1, close f2]" data-out="  opened f2.txt">Iteration 2: three open files. With 10,000 files you would hit the OS limit ("too many open files").</li>
+      <li data-lines="24" data-state="pending defers=[close f0, close f1, close f2]" data-out="  loop done">The loop ends and still nothing has been closed.</li>
+      <li data-lines="25,21" data-state="pending defers=[]" data-out="  closing f2.txt\n  closing f1.txt\n  closing f0.txt">Only when <code>processAll</code> returns do the defers fire, in <strong>LIFO</strong> order: f2, f1, f0.</li>
+      <li data-lines="35" data-out="defer in helper:">Now the fix: the loop body lives in its own function.</li>
+      <li data-lines="36-37,30-33" data-state="i=0; f=f0.txt" data-out="  opened f0.txt\n  closing f0.txt"><code>processOne(0)</code> opens f0 and its defer fires as soon as <code>processOne</code> returns. Only one file is open at a time.</li>
+      <li data-lines="36-37,30-33" data-state="i=1..2" data-out="  opened f1.txt\n  closing f1.txt\n  opened f2.txt\n  closing f2.txt">The same open-close pair repeats for f1 and f2. Then main returns and its own deferred <code>RemoveAll</code> deletes the directory.</li>
+    </ol>
+  </div>
+<div class="output"><pre>defer in loop:
+  opened f0.txt
+  opened f1.txt
+  opened f2.txt
+  loop done
+  closing f2.txt
+  closing f1.txt
+  closing f0.txt
+defer in helper:
+  opened f0.txt
+  closing f0.txt
+  opened f1.txt
+  closing f1.txt
+  opened f2.txt
+  closing f2.txt</pre></div>
+
+  <h3>#23 <code>recover</code> only works in the same goroutine</h3>
+  <p><code>recover()</code> catches a panic only when called from a deferred function in the <strong>same goroutine</strong> that panicked. A panic in any goroutine with no recover kills the <em>entire</em> process, no matter what main does.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	defer func() {
+		// This recover is in main's goroutine. It cannot catch a panic
+		// that happens in a different goroutine.
+		if r := recover(); r != nil {
+			fmt.Println("recovered:", r)
+		}
+	}()
+	go func() {
+		panic("boom in worker")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("unreachable")
+}</code></pre></div>
+<div class="output error" data-label="Process crash"><pre>panic: boom in worker
+
+goroutine 19 [running]:
+main.main.func2()
+	example/g23/main.go:17 +0x2c
+created by main.main in goroutine 1
+	example/g23/main.go:16 +0x40
+exit status 2</pre></div>
+  <div class="callout danger"><div class="callout-title">Danger</div><p>One unprotected <code>go func()</code> that panics takes down your whole server and every in-flight request. <code>net/http</code> recovers panics in handlers for you, but goroutines <em>you</em> start from a handler are not covered. Long-lived background goroutines should have their own <code>defer func() { if r := recover(); r != nil { log... } }()</code>.</p></div>
+
+  <h3>#24 Comparing wrapped errors with <code>==</code></h3>
+  <p>Once an error has been wrapped with <code>%w</code>, it's a different value. <code>==</code> fails; <code>errors.Is</code> unwraps the chain and finds it. <code>errors.As</code> finds an error of a given <em>type</em> and gives you its fields.</p>
+  <div class="live" data-title="Following the wrap chain">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+)
+
+func load(path string) error {
+	_, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("load config %q: %w", path, err)
+	}
+	return nil
+}
+
+func main() {
+	err := load("/does/not/exist.yaml")
+	fmt.Println(err)
+	fmt.Println("err == fs.ErrNotExist:         ", err == fs.ErrNotExist)
+	fmt.Println("errors.Is(err, fs.ErrNotExist):", errors.Is(err, fs.ErrNotExist))
+
+	var pe *fs.PathError
+	if errors.As(err, &amp;pe) {
+		fmt.Println("errors.As found PathError, op =", pe.Op)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="19,11" data-state="path=/does/not/exist.yaml">main calls <code>load</code>, which tries to read a file that does not exist. <code>os.ReadFile</code> returns a <code>*fs.PathError</code>.</li>
+      <li data-lines="12-13" data-state="err=*fs.PathError{Op:open}">We add context with <code>%w</code>. That builds a new error whose message is ours plus the original, and whose <code>Unwrap()</code> returns the <code>*fs.PathError</code>.</li>
+      <li data-lines="19" data-state="err=*fmt.wrapError → *fs.PathError → ErrNotExist">Back in main, <code>err</code> is the outer wrapper. The chain has three links: wrapper, PathError, and the sentinel <code>fs.ErrNotExist</code> inside it.</li>
+      <li data-lines="20" data-state="err=*fmt.wrapError → *fs.PathError → ErrNotExist" data-out="load config &quot;/does/not/exist.yaml&quot;: open /does/not/exist.yaml: no such file or directory"><code>Println</code> shows the full message: our context first, then the original text.</li>
+      <li data-lines="21" data-state="err=*fmt.wrapError → *fs.PathError → ErrNotExist" data-out="err == fs.ErrNotExist:          false"><strong>The bug:</strong> <code>==</code> compares only the outermost error, the wrapper. It is not the sentinel, so the answer is false even though the file really is missing.</li>
+      <li data-lines="22" data-state="err=*fmt.wrapError → *fs.PathError → ErrNotExist" data-out="errors.Is(err, fs.ErrNotExist): true"><code>errors.Is</code> walks the chain with <code>Unwrap</code> link by link and finds the sentinel deep inside.</li>
+      <li data-lines="24-26" data-state="pe=*fs.PathError{Op:open}" data-out="errors.As found PathError, op = open"><code>errors.As</code> walks the same chain looking for a <em>type</em>. It finds the <code>*fs.PathError</code>, stores it in <code>pe</code>, and we can read its fields.</li>
+    </ol>
+  </div>
+<div class="output"><pre>load config "/does/not/exist.yaml": open /does/not/exist.yaml: no such file or directory
+err == fs.ErrNotExist:          false
+errors.Is(err, fs.ErrNotExist): true
+errors.As found PathError, op = open</pre></div>
+
+  <h3>#25 Map elements are not addressable</h3>
+  <p>Maps move their entries around as they grow, so Go won't let you take the address of an entry or assign to a field inside it.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Point struct{ X, Y int }
+
+func main() {
+	m := map[string]Point{"a": {1, 2}}
+	m["a"].X = 10 // map elements are not addressable
+	fmt.Println(m)
+}</code></pre></div>
+<div class="output error" data-label="Compile error"><pre># example/g25
+./main.go:9:2: cannot assign to struct field m["a"].X in map</pre></div>
+  <div class="live" data-title="Copy out, change, store back">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Point struct{ X, Y int }
+
+func main() {
+	m := map[string]Point{"a": {1, 2}}
+	p := m["a"] // copy out
+	p.X = 10    // change
+	m["a"] = p  // store back
+	fmt.Println(m)
+
+	ptrs := map[string]*Point{"a": {1, 2}} // or store pointers
+	ptrs["a"].X = 10
+	fmt.Println(*ptrs["a"])
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8" data-state="m[a]={1 2}">The map holds <code>Point</code> <strong>values</strong>. A value stored in a map has no fixed address (the map may move it when it grows), so <code>m["a"].X = 10</code> is a compile error.</li>
+      <li data-lines="9" data-state="m[a]={1 2}; p={1 2}"><code>p := m["a"]</code> copies the struct out of the map. <code>p</code> is an ordinary local variable, so it is addressable.</li>
+      <li data-lines="10" data-state="m[a]={1 2}; p={10 2}">We change the copy. The map still holds the old value at this moment.</li>
+      <li data-lines="11" data-state="m[a]={10 2}; p={10 2}">Storing <code>p</code> back replaces the whole value in the map. Now the change is visible.</li>
+      <li data-lines="12" data-state="m[a]={10 2}" data-out="map[a:{10 2}]">Printing shows the update.</li>
+      <li data-lines="14" data-state="ptrs[a]=&amp;{1 2}">Alternative: store <strong>pointers</strong>. The map element is the pointer; the struct it points at lives on the heap and is addressable.</li>
+      <li data-lines="15" data-state="ptrs[a]=&amp;{10 2}"><code>ptrs["a"].X = 10</code> follows the pointer and writes into the struct directly. No copy-back needed.</li>
+      <li data-lines="16" data-state="ptrs[a]=&amp;{10 2}" data-out="{10 2}">Dereferencing prints the updated struct. The trade-off: pointer values mean shared mutable state, so pick deliberately.</li>
+    </ol>
+  </div>
+<div class="output"><pre>map[a:{10 2}]
+{10 2}</pre></div>
+
+  <h3>The gotchas at a glance</h3>
+  <table>
+    <thead><tr><th>#</th><th>Gotcha</th><th>Symptom</th><th>Fix</th><th>Caught by</th></tr></thead>
+    <tbody>
+      <tr><td>1, 14</td><td>Loop var capture</td><td>All closures see last value</td><td>Go 1.22+ <code>go.mod</code></td><td>compiler semantics</td></tr>
+      <tr><td>2</td><td>Nil map write</td><td>panic</td><td><code>make</code> / lazy init</td><td>tests, nilaway</td></tr>
+      <tr><td>3</td><td>Append aliasing</td><td>Data overwritten</td><td><code>s[a:b:b]</code>, <code>slices.Clone</code></td><td>review</td></tr>
+      <tr><td>4</td><td>Typed nil in interface</td><td><code>err != nil</code> on success</td><td>Return literal <code>nil</code></td><td>staticcheck (some cases)</td></tr>
+      <tr><td>5</td><td>Range copy</td><td>Updates lost</td><td>Index: <code>s[i].x</code></td><td>review</td></tr>
+      <tr><td>6</td><td>Defer arg eval</td><td>Stale value logged</td><td>Defer a closure</td><td>vet (<code>defers</code> for time.Since)</td></tr>
+      <tr><td>7</td><td>Shadowed err</td><td>Error swallowed</td><td>Return early / <code>=</code></td><td>govet shadow</td></tr>
+      <tr><td>8</td><td><code>time.After</code> in loop</td><td>Alloc churn (leak pre-1.23)</td><td>Reuse a Timer</td><td>review</td></tr>
+      <tr><td>9</td><td>Unbuffered deadlock</td><td>fatal error / hang</td><td>Receiver goroutine / buffer</td><td>runtime, tests</td></tr>
+      <tr><td>10</td><td>Map order</td><td>Flaky tests</td><td>Sort keys</td><td>tests</td></tr>
+      <tr><td>11</td><td><code>+=</code> strings</td><td>Slow, O(n²)</td><td><code>strings.Builder</code></td><td>benchmarks, perfsprint</td></tr>
+      <tr><td>12</td><td>Int division</td><td>Lost fraction</td><td>Convert first</td><td>review</td></tr>
+      <tr><td>13</td><td>Unexported JSON</td><td>Field missing</td><td>Capitalise + tag</td><td>staticcheck, musttag</td></tr>
+      <tr><td>15</td><td>Mutex copy</td><td>No protection</td><td>Pointer receivers</td><td><code>go vet</code> copylocks</td></tr>
+      <tr><td>16</td><td>Body not closed</td><td>FD exhaustion</td><td><code>defer resp.Body.Close()</code></td><td>bodyclose</td></tr>
+      <tr><td>17</td><td>Goroutine leak</td><td>Memory creeps up</td><td>Buffer / ctx / done chan</td><td>goleak, pprof</td></tr>
+      <tr><td>18</td><td>nil vs empty slice</td><td><code>null</code> in JSON</td><td><code>[]T{}</code></td><td>API tests</td></tr>
+      <tr><td>19</td><td>Array/slice copies</td><td>Changes invisible</td><td>Return the slice</td><td>review</td></tr>
+      <tr><td>20</td><td>Pointer method sets</td><td>"does not implement"</td><td>Use <code>&amp;T{}</code></td><td>compiler</td></tr>
+      <tr><td>21</td><td>Bytes vs runes</td><td>Garbled text</td><td><code>range</code>, <code>utf8</code></td><td>tests with non-ASCII</td></tr>
+      <tr><td>22</td><td>Defer in loop</td><td>Resources held</td><td>Helper function</td><td>gocritic deferInLoop</td></tr>
+      <tr><td>23</td><td>Panic in goroutine</td><td>Process dies</td><td>Recover inside the goroutine</td><td>review</td></tr>
+      <tr><td>24</td><td><code>==</code> on wrapped err</td><td>Check never matches</td><td><code>errors.Is</code>/<code>As</code></td><td>errorlint</td></tr>
+      <tr><td>25</td><td>Map element field</td><td>Compile error</td><td>Copy-modify-store / pointers</td><td>compiler</td></tr>
+    </tbody>
+  </table>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A function declared <code>func find() error</code> does <code>var e *NotFoundError; return e</code>. The caller does <code>if err := find(); err != nil { ... }</code>. What happens?</div>
+    <div class="quiz-opts"><button>It doesn't compile</button><button>The if-body is skipped because the pointer is nil</button><button>The if-body runs, because the interface holds a type</button><button>It panics with a nil pointer dereference</button></div>
+    <div class="quiz-explain">The returned <code>error</code> is the pair <code>(*NotFoundError, nil)</code>. Its type part is set, so it's not equal to a nil interface and the if-body runs. That's gotcha #4. Return a literal <code>nil</code> on success.</div>
+  </div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">What does <code>x := 5; defer fmt.Println(x); x = 10</code> print when the function returns?</div>
+    <div class="quiz-opts"><button>10</button><button>5</button><button>Nothing, defer only runs on panic</button><button>It depends on the scheduler</button></div>
+    <div class="quiz-explain">Deferred call arguments are evaluated at the <code>defer</code> statement, so <code>5</code> is captured right then. Only a deferred <em>closure</em> would see 10.</div>
+  </div>
+
+  <h2>Tooling and the code-review checklist</h2>
+  <p>Linters are robot reviewers. They never get tired, never miss the boring stuff, and free human reviewers to think about design. A senior engineer sets them up on day one and makes CI fail on warnings.</p>
+
+  <h3><code>go vet</code>: built in, zero setup</h3>
+  <p><code>go vet</code> ships with Go and runs a set of high-confidence checks: wrong <code>Printf</code> verbs, copied locks, malformed struct tags, unreachable code, suspicious self-assignment and more. <code>go test</code> even runs a subset automatically. Here's a file with four bugs:</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+)
+
+type Config struct {
+	Port int `json:port` // malformed struct tag
+}
+
+func main() {
+	name := "gopher"
+	age := 12
+	fmt.Printf("%d is %s years old\n", name, age) // verbs swapped
+	fmt.Sprintf("hi %s", name)                    // result thrown away
+	age = age                                     // self-assignment
+	fmt.Println(Config{})
+}</code></pre></div>
+<div class="output error" data-label="go vet ."><pre>main.go:8:2: struct field tag `json:port` not compatible with reflect.StructTag.Get: bad syntax for struct tag value
+main.go:15:2: result of fmt.Sprintf call not used
+main.go:16:2: self-assignment of age
+main.go:14:14: fmt.Printf format %d has arg name of wrong type string</pre></div>
+  <p>All four found, with file and line. Run <code>go vet ./...</code> in CI, always.</p>
+
+  <h3>staticcheck: the essential second opinion</h3>
+  <p><a href="https://staticcheck.dev">staticcheck</a> is the most respected third-party analyzer. It finds real bugs (<code>SA</code> checks: misuse of APIs, impossible conditions, deprecated calls), simplifications (<code>S</code>), and style issues (<code>ST</code>). Install and run it like this:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go install honnef.co/go/tools/cmd/staticcheck@latest
+staticcheck ./...</code></pre></div>
+  <p>Its output looks just like vet's: <code>path/file.go:line:col: message (CHECK-ID)</code>. The check ID (like <code>SA4006</code>, "a value assigned to a variable is never read") is what you search for to understand a warning.</p>
+
+  <h3>golangci-lint: many linters, one config</h3>
+  <p><a href="https://golangci-lint.run">golangci-lint</a> runs dozens of linters in parallel (including vet and staticcheck) with one config file and caching. It's the de-facto standard in company codebases. Here is a sensible starting <code>.golangci.yml</code> for golangci-lint v2:</p>
+  <div class="code" data-file=".golangci.yml"><pre><code class="language-yaml">version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # "standard" = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - bodyclose     # #16: response bodies must be closed
+    - errorlint     # #24: use errors.Is / errors.As, %w
+    - gocritic      # many small correctness/style checks (deferInLoop...)
+    - gosec         # security: weak crypto, SQL string building, file perms
+    - misspell      # typos in comments and strings
+    - nilerr        # returning nil when err != nil
+    - noctx         # HTTP requests without a context
+    - revive        # configurable style linter (golint successor)
+    - unconvert     # needless type conversions
+    - unparam       # function params that are always the same value
+  settings:
+    govet:
+      enable:
+        - shadow    # #7: shadowed variables
+    errcheck:
+      check-type-assertions: true
+    revive:
+      rules:
+        - name: exported      # exported things need doc comments
+        - name: var-naming    # userId -&gt; userID
+        - name: receiver-naming
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">golangci-lint run ./...          # lint everything
+golangci-lint run --fix ./...    # apply automatic fixes
+golangci-lint fmt                # run the configured formatters</code></pre></div>
+
+  <div class="callout senior"><p>Turning on 40 linters in a legacy codebase produces 3,000 warnings and everybody ignores them. Instead, start with <code>default: standard</code> plus a handful that catch real bugs (bodyclose, errorlint, noctx), fix those, then add more. Use <code>new-from-rev</code> (or <code>--new-from-rev=origin/main</code>) to only flag issues in changed code while you pay down the rest. And when you suppress, always say why: <code>//nolint:gosec // G404: math/rand is fine for jitter</code>.</p></div>
+
+  <h3>Other tools worth knowing</h3>
+  <ul>
+    <li><code>go test -race ./...</code>: the data race detector. Non-negotiable in CI for concurrent code.</li>
+    <li><code>govulncheck ./...</code>: reports known vulnerabilities in code paths you actually call (Chapter 20).</li>
+    <li><code>gopls</code>: the language server. Its "modernize" analyzers suggest newer idioms (<code>min</code>/<code>max</code>, <code>slices.Contains</code>, range-over-int) and <code>go fix</code> can now apply many of them.</li>
+    <li><code>go mod tidy -diff</code>: fail CI if <code>go.mod</code>/<code>go.sum</code> aren't tidy.</li>
+  </ul>
+
+  <h3>A code-review checklist</h3>
+  <p>Code review is where seniors spend a big part of their week. A checklist keeps reviews consistent and stops you from only commenting on whatever you happened to notice first. Here's one, ordered from "blocks merge" to "nice to have".</p>
+
+  <table>
+    <thead><tr><th>Area</th><th>Questions to ask</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Correctness</strong></td><td>Does it do what the PR says? Are edge cases handled: empty input, nil, zero, huge input, unicode? Is every error checked and either handled or returned with context?</td></tr>
+      <tr><td><strong>Concurrency</strong></td><td>For every <code>go</code> statement: how does it end? Who owns each piece of shared data? Is there a lock, a channel, or a clear "only one goroutine touches this"? Did CI run with <code>-race</code>?</td></tr>
+      <tr><td><strong>Resources</strong></td><td>Is every <code>Close</code>, <code>Stop</code>, <code>cancel</code> and <code>Unlock</code> deferred right after acquisition? Any <code>defer</code> in a loop? Do HTTP clients have timeouts?</td></tr>
+      <tr><td><strong>Context</strong></td><td>Is <code>ctx</code> the first parameter of anything that does I/O? Is it passed down, not replaced with <code>context.Background()</code>? Is it never stored in a struct?</td></tr>
+      <tr><td><strong>API &amp; design</strong></td><td>Is the exported surface as small as possible? Do names read well at the call site (no stutter)? Interfaces small and defined by the consumer? Any premature abstraction?</td></tr>
+      <tr><td><strong>Errors</strong></td><td>Wrapped with <code>%w</code> and lowercase messages? Sentinel or typed errors where callers need to branch? No log-and-return?</td></tr>
+      <tr><td><strong>Tests</strong></td><td>Does the test fail without the fix? Table-driven where there are many cases? Do tests avoid <code>time.Sleep</code> and real network calls?</td></tr>
+      <tr><td><strong>Security</strong></td><td>SQL built with placeholders, not <code>Sprintf</code>? User input validated and size-limited (<code>http.MaxBytesReader</code>)? Secrets not logged?</td></tr>
+      <tr><td><strong>Performance</strong></td><td>Only where it matters: allocations in hot loops, N+1 queries, unbounded slices or maps that grow forever. Is there a benchmark for the claim?</td></tr>
+      <tr><td><strong>Readability</strong></td><td>Can you understand each function in one read? Doc comments on exported identifiers? Comments explain <em>why</em>, not <em>what</em>?</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">How to leave review comments</div><p>Label the weight of each comment so the author knows what blocks the merge: <strong>"blocking:"</strong> for bugs, <strong>"suggestion:"</strong> for improvements, <strong>"nit:"</strong> for tiny style things, <strong>"question:"</strong> when you genuinely don't know. Ask questions instead of giving orders ("what happens if <code>ids</code> is empty?"). Praise good things too. And if a comment would take more than three back-and-forths, switch to a call.</p></div>
+
+  <h2>Design principles: packages, boundaries, dependencies</h2>
+  <p>Good Go architecture is mostly about <strong>packages</strong>. A package is Go's unit of encapsulation: everything lowercase is private to it. That's a powerful tool for drawing boundaries.</p>
+
+  <h3>Small, focused packages</h3>
+  <ul>
+    <li>A package should have <strong>one clear purpose</strong> you can describe in a sentence without the word "and".</li>
+    <li>Organise by <strong>domain</strong> (<code>task</code>, <code>billing</code>, <code>auth</code>), not by technical layer (<code>models</code>, <code>controllers</code>, <code>services</code>). Layer packages force every feature change to touch five packages, and they tend to import each other in circles.</li>
+    <li>Don't split too early, either. One package with five files is better than five packages with one file each. Split when a clear boundary appears.</li>
+    <li>Use <code>internal/</code> to stop other modules importing code you don't want to support as a public API.</li>
+  </ul>
+
+  <h3>Dependency direction</h3>
+  <p>Dependencies should point <strong>inward</strong>, toward your core business logic. The domain (what a Task <em>is</em>, the rules about it) depends on nothing. The outer layers (HTTP, Postgres, Kafka) depend on the domain. That way you can swap your database or add a gRPC API without touching the core.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <defs><marker id="arr19" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <rect x="0" y="0" width="720" height="260" rx="10" fill="#262624"/>
+      <g font-size="13" fill="#ece9e1" text-anchor="middle">
+        <rect x="24" y="36" width="170" height="64" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+        <text x="109" y="62" font-weight="600">cmd/api (main)</text>
+        <text x="109" y="82" fill="#a8a49a" font-size="11">wires everything together</text>
+        <rect x="24" y="160" width="170" height="64" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+        <text x="109" y="186" font-weight="600">httpapi</text>
+        <text x="109" y="206" fill="#a8a49a" font-size="11">handlers, JSON, routing</text>
+        <rect x="526" y="36" width="170" height="64" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+        <text x="611" y="62" font-weight="600">postgres</text>
+        <text x="611" y="82" fill="#a8a49a" font-size="11">implements task.Store</text>
+        <rect x="526" y="160" width="170" height="64" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+        <text x="611" y="186" font-weight="600">memstore</text>
+        <text x="611" y="206" fill="#a8a49a" font-size="11">implements task.Store</text>
+        <rect x="270" y="88" width="180" height="84" rx="10" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+        <text x="360" y="118" font-weight="700">task (domain)</text>
+        <text x="360" y="138" fill="#a8a49a" font-size="11">Task, Service, Store iface</text>
+        <text x="360" y="156" fill="#8fbf7f" font-size="11">imports nothing of ours</text>
+      </g>
+      <g stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#arr19)">
+        <line x1="194" y1="74" x2="268" y2="112"/>
+        <line x1="194" y1="190" x2="268" y2="152"/>
+        <line x1="526" y1="74" x2="452" y2="112"/>
+        <line x1="526" y1="190" x2="452" y2="152"/>
+      </g>
+      <text x="360" y="244" fill="#a8a49a" font-size="12" text-anchor="middle" font-family="Inter, sans-serif">Arrows mean "imports". Every arrow points at the domain; the domain points at nothing.</text>
+    </svg>
+    <figcaption>Dependency direction: outer adapters depend on the core, never the other way round. The capstone in Chapter 21 uses exactly this shape.</figcaption>
+  </figure>
+
+  <p>The trick that makes this work is again "interfaces belong to the consumer": the <code>task</code> package declares the <code>Store</code> interface it needs, and <code>postgres</code> satisfies it without <code>task</code> ever importing <code>postgres</code>. Only <code>main</code> knows about both and plugs them together. This also makes import cycles (which Go forbids) nearly impossible.</p>
+
+  <div class="callout tip"><p>A quick health check: run <code>go list -deps ./internal/task | grep yourmodule</code>. Your domain package should import almost nothing from your own module.</p></div>
+
+  <h2>API design: functional options and config structs</h2>
+  <p>Constructors grow. <code>NewServer(addr)</code> becomes <code>NewServer(addr, timeout, maxConn, logger, tlsConfig, ...)</code>, and every new knob breaks every caller. Go has two idiomatic ways to keep constructors stable.</p>
+
+  <h3>Functional options</h3>
+  <p>An <strong>option</strong> is a function that tweaks the thing being built. The constructor sets defaults, then applies each option in order. Callers pass only what they care about, and you can add new options without breaking anybody.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Server struct {
+	addr    string
+	timeout time.Duration
+	maxConn int
+	logf    func(string, ...any)
+}
+
+// Option is a function that tweaks a Server while it is being built.
+type Option func(*Server)
+
+func WithTimeout(d time.Duration) Option { return func(s *Server) { s.timeout = d } }
+func WithMaxConn(n int) Option           { return func(s *Server) { s.maxConn = n } }
+func WithLogger(f func(string, ...any)) Option {
+	return func(s *Server) { s.logf = f }
+}
+
+// NewServer has one required argument and any number of options.
+func NewServer(addr string, opts ...Option) *Server {
+	s := &amp;Server{ // sensible defaults first
+		addr:    addr,
+		timeout: 30 * time.Second,
+		maxConn: 100,
+		logf:    func(string, ...any) {},
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+func main() {
+	a := NewServer(":8080")
+	fmt.Printf("defaults: addr=%s timeout=%v maxConn=%d\n", a.addr, a.timeout, a.maxConn)
+
+	b := NewServer(":9090",
+		WithTimeout(5*time.Second),
+		WithMaxConn(10),
+		WithLogger(func(f string, args ...any) { fmt.Printf("[log] "+f+"\n", args...) }),
+	)
+	fmt.Printf("custom:   addr=%s timeout=%v maxConn=%d\n", b.addr, b.timeout, b.maxConn)
+	b.logf("listening on %s", b.addr)
+}</code></pre></div>
+<div class="output"><pre>defaults: addr=:8080 timeout=30s maxConn=100
+custom:   addr=:9090 timeout=5s maxConn=10
+[log] listening on :9090</pre></div>
+
+  <h3>Config structs</h3>
+  <p>The simpler alternative: one struct holding all the settings, where the zero value of each field means "use the default". It's easy to read, easy to load from a file, and easy to print.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Config groups every knob. The zero value of each field means "use the default".
+type Config struct {
+	Addr    string
+	Timeout time.Duration
+	MaxConn int
+}
+
+type Server struct{ cfg Config }
+
+func NewServer(cfg Config) *Server {
+	if cfg.Addr == "" {
+		cfg.Addr = ":8080"
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+	if cfg.MaxConn == 0 {
+		cfg.MaxConn = 100
+	}
+	return &amp;Server{cfg: cfg}
+}
+
+func main() {
+	s := NewServer(Config{Timeout: 5 * time.Second})
+	fmt.Printf("%+v\n", s.cfg)
+}</code></pre></div>
+<div class="output"><pre>{Addr::8080 Timeout:5s MaxConn:100}</pre></div>
+
+  <table>
+    <thead><tr><th></th><th>Functional options</th><th>Config struct</th></tr></thead>
+    <tbody>
+      <tr><td>Best for</td><td>Libraries with many optional, rarely used knobs</td><td>Applications; settings loaded from env/files</td></tr>
+      <tr><td>Adding a knob</td><td>New <code>WithX</code> function</td><td>New field</td></tr>
+      <tr><td>Discoverability</td><td>Godoc lists all <code>With...</code> functions</td><td>All fields visible in one place</td></tr>
+      <tr><td>Weakness</td><td>More boilerplate; hard to serialise</td><td>Can't tell "zero on purpose" from "not set"</td></tr>
+      <tr><td>Stdlib example</td><td><code>grpc.Dial(addr, opts...)</code> (third-party)</td><td><code>http.Server{Addr:..., ReadTimeout:...}</code>, <code>slog.HandlerOptions</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><p>Default to a config struct. It's what the standard library does for <code>http.Server</code>, <code>tls.Config</code> and <code>slog.HandlerOptions</code>. Reach for functional options when you're publishing a library and expect it to grow for years. Either way: required things are positional parameters, optional things go in the options.</p></div>
+
+  <h3>Documentation that people actually read</h3>
+  <p>Go documentation is just comments placed directly above a declaration, with no blank line between. <code>go doc</code> and pkg.go.dev render them. The conventions are simple:</p>
+  <ul>
+    <li>Every exported identifier gets a comment that starts with its <strong>name</strong>: <code>// Client talks to the users service.</code></li>
+    <li>Every package gets a package comment, in one file (often <code>doc.go</code>): <code>// Package task manages to-do items.</code></li>
+    <li>Say what it does, what the arguments mean, what errors it can return, and whether it's safe for concurrent use.</li>
+    <li>Use <code>[Name]</code> to link to other identifiers, and indent code examples.</li>
+    <li>Mark old APIs with a paragraph starting <code>Deprecated:</code>; tools will warn callers.</li>
+    <li>Write <strong>example functions</strong> (<code>func ExampleClient_Users()</code> in a <code>_test.go</code> file with an <code>// Output:</code> comment). They show up in docs <em>and</em> run as tests, so they never go stale.</li>
+  </ul>
+  <div class="code" data-file="doc.go"><pre><code class="language-go">// Package ratelimit provides a token-bucket rate limiter.
+//
+// A [Limiter] is safe for concurrent use by multiple goroutines.
+// Create one with [New]:
+//
+//	lim := ratelimit.New(10, time.Second) // 10 events per second
+//	if lim.Allow() {
+//		handle()
+//	}
+package ratelimit
+
+// Allow reports whether an event may happen now. It never blocks.
+// Use [Limiter.Wait] to block until an event is allowed.
+func (l *Limiter) Allow() bool { /* ... */ }
+
+// Wait blocks until an event is allowed or ctx is done.
+// It returns ctx.Err() if the context ends first.
+//
+// Deprecated: use [Limiter.WaitN] with n=1.
+func (l *Limiter) Wait(ctx context.Context) error { /* ... */ }</code></pre></div>
+
+  <h2>Concurrency rules of thumb</h2>
+  <p>Go makes starting goroutines trivially easy, which is exactly why it needs discipline. These rules prevent the vast majority of concurrency bugs we saw above.</p>
+  <ol>
+    <li><strong>Know how every goroutine ends.</strong> Before writing <code>go</code>, answer: what makes it return? A closed channel, a cancelled context, finished work. If you can't answer, don't start it.</li>
+    <li><strong>The caller decides concurrency.</strong> Write synchronous functions (<code>func Fetch(ctx, id) (User, error)</code>). Let the caller wrap them in goroutines if they want. Synchronous APIs are easier to test and compose.</li>
+    <li><strong>The sender closes the channel</strong>, never the receiver, and only when there are no more sends. Closing is a broadcast "no more values", not a cleanup requirement.</li>
+    <li><strong>Pass <code>context.Context</code> as the first parameter</strong> to anything that blocks or does I/O, and respect <code>ctx.Done()</code>.</li>
+    <li><strong>Use <code>sync.WaitGroup</code> (<code>wg.Go</code> since 1.25) or <code>errgroup</code></strong> to wait for a group of goroutines; never <code>time.Sleep</code> or a busy-loop.</li>
+    <li><strong>Protect shared state with exactly one strategy</strong>: one mutex, or one owning goroutine with channels. Keep the lock and the data it guards next to each other in the struct, and keep critical sections tiny (no I/O while holding a lock).</li>
+    <li><strong>Bound your concurrency.</strong> 10,000 items doesn't mean 10,000 goroutines hitting the database. Use a worker pool, a semaphore channel, or <code>errgroup.SetLimit</code>.</li>
+    <li><strong>Prefer giving each goroutine its own slot</strong> (<code>results[i] = ...</code>) over sharing one slice under a lock. No contention, no ordering issues.</li>
+    <li><strong>Run tests with <code>-race</code></strong>, always, in CI.</li>
+    <li><strong>Start simple.</strong> A mutex around a map is fine. Lock-free atomics and sharded maps come after a profile proves you need them.</li>
+  </ol>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A goroutine is like hiring a contractor. Before you hire, you write down how the job ends and how they'll tell you they're done. You'd never hire someone with "just keep doing stuff forever, I'll never check on you". That's what an unmanaged <code>go func()</code> is.</p></div>
+
+  <h2>How I'd review this PR: a walk-through</h2>
+  <p>A teammate opens a pull request: "Add FetchUsers to load several users concurrently". Here is the code, unchanged. Read it once and count the problems before scrolling on. (It's a full program with a fake server so we can actually run it.)</p>
+
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+)
+
+type user struct {
+	Id   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+var Results []user
+
+func FetchUsers(baseUrl string, ids []int) []user {
+	for _, id := range ids {
+		go func() {
+			resp, _ := http.Get(fmt.Sprintf("%s/users/%d", baseUrl, id))
+			body, _ := io.ReadAll(resp.Body)
+			var u user
+			json.Unmarshal(body, &amp;u)
+			Results = append(Results, u)
+		}()
+	}
+	for len(Results) &lt; len(ids) {
+	}
+	return Results
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var id int
+		fmt.Sscanf(r.URL.Path, "/users/%d", &amp;id)
+		fmt.Fprintf(w, `{"id":%d,"name":"user%d"}`, id, id)
+	}))
+	defer srv.Close()
+	fmt.Println(len(FetchUsers(srv.URL, []int{1, 2, 3, 4})), "users")
+}</code></pre></div>
+
+  <p>Running it with the race detector printed a data race report, and then the program <strong>never finished</strong>; we had to kill it after 20 seconds:</p>
+<div class="output error" data-label="go run -race . (then hung, killed manually)"><pre>==================
+WARNING: DATA RACE
+Write at 0x00010557dd00 by goroutine 12:
+  main.FetchUsers.func1()
+      example/prbad/main.go:25 +0x294
+
+Previous read at 0x00010557dd00 by main goroutine:
+  main.FetchUsers()
+      example/prbad/main.go:28 +0xf0
+  main.main()
+      example/prbad/main.go:40 +0xe0
+
+Goroutine 12 (running) created at:
+  main.FetchUsers()
+      example/prbad/main.go:20 +0x50
+  main.main()
+      example/prbad/main.go:40 +0xe0
+==================</pre></div>
+  <p>Why it hangs: the main goroutine spins in <code>for len(Results) &lt; len(ids) {}</code>, reading <code>Results</code> without any synchronisation. With no happens-before relationship, the compiler and CPU are free never to show it the other goroutines' writes, and the concurrent <code>append</code>s can lose elements too. Now let's walk through the review line by line.</p>
+
+  <div class="live" data-title="Reviewing FetchUsers line by line">
+    <pre><code class="language-go">type user struct {
+	Id   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+var Results []user
+
+func FetchUsers(baseUrl string, ids []int) []user {
+	for _, id := range ids {
+		go func() {
+			resp, _ := http.Get(fmt.Sprintf("%s/users/%d", baseUrl, id))
+			body, _ := io.ReadAll(resp.Body)
+			var u user
+			json.Unmarshal(body, &amp;u)
+			Results = append(Results, u)
+		}()
+	}
+	for len(Results) &lt; len(ids) {
+	}
+	return Results
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-4" data-state="issues=2">"<strong>nit:</strong> <code>user</code> is unexported but returned from an exported function, so callers can't name the type. <code>Id</code> should be <code>ID</code> (initialism rule)."</li>
+      <li data-lines="6" data-state="issues=3">"<strong>blocking:</strong> a package-level <code>Results</code> means two concurrent calls to <code>FetchUsers</code> mix their results, and a second call returns the first call's users too. Global mutable state has to go."</li>
+      <li data-lines="8" data-state="issues=5">"<strong>suggestion:</strong> <code>baseUrl</code> should be <code>baseURL</code>. And there's no <code>context.Context</code>, so callers can't cancel or set deadlines. Also: no error return, so failures are invisible."</li>
+      <li data-lines="11" data-state="issues=7">"<strong>blocking:</strong> <code>http.Get</code> uses the default client with <em>no timeout</em>; one slow server hangs this forever. The error is discarded with <code>_</code>; if the request fails, <code>resp</code> is nil and the next line panics."</li>
+      <li data-lines="12" data-state="issues=9">"<strong>blocking:</strong> the body is never closed (connection leak, gotcha #16), and the status code is never checked, so a 404 page gets decoded as a user."</li>
+      <li data-lines="14" data-state="issues=10">"<strong>blocking:</strong> <code>json.Unmarshal</code>'s error is ignored. Prefer <code>json.NewDecoder(resp.Body).Decode</code>, which streams instead of reading everything into memory."</li>
+      <li data-lines="15" data-state="issues=11">"<strong>blocking:</strong> data race: several goroutines <code>append</code> to the same slice with no lock. The race detector confirms it. Results can be lost or corrupted."</li>
+      <li data-lines="18-19" data-state="issues=12">"<strong>blocking:</strong> a busy-wait loop burns a CPU core and, without synchronisation, may never terminate (it didn't when I ran it). Use a <code>sync.WaitGroup</code>."</li>
+      <li data-lines="9-17" data-state="issues=12; verdict=request changes">"<strong>suggestion:</strong> results come back in random order. If order matters, write to <code>results[i]</code>. Also consider limiting concurrency if <code>ids</code> can be large." Verdict: request changes, with a sketch of the fix.</li>
+    </ol>
+  </div>
+
+  <p>And here is the rewrite. Notice that it's not cleverer, it's just <em>careful</em>: a client type with a timeout, context everywhere, every error handled with context, the body closed, status checked, one slot per goroutine so no lock is needed, and <code>errors.Join</code> to report every failure.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"time"
+)
+
+// User is a user returned by the users service.
+type User struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Client talks to the users service. Create one with NewClient.
+type Client struct {
+	baseURL string
+	http    *http.Client
+}
+
+// NewClient returns a Client with a sane request timeout.
+func NewClient(baseURL string) *Client {
+	return &amp;Client{baseURL: baseURL, http: &amp;http.Client{Timeout: 5 * time.Second}}
+}
+
+// User fetches a single user by ID.
+func (c *Client) User(ctx context.Context, id int) (User, error) {
+	url := fmt.Sprintf("%s/users/%d", c.baseURL, id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("build request for user %d: %w", id, err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return User{}, fmt.Errorf("get user %d: %w", id, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return User{}, fmt.Errorf("get user %d: unexpected status %s", id, resp.Status)
+	}
+	var u User
+	if err := json.NewDecoder(resp.Body).Decode(&amp;u); err != nil {
+		return User{}, fmt.Errorf("decode user %d: %w", id, err)
+	}
+	return u, nil
+}
+
+// Users fetches users concurrently. Results keep the order of ids.
+func (c *Client) Users(ctx context.Context, ids []int) ([]User, error) {
+	users := make([]User, len(ids))
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Go(func() { // each goroutine writes only its own index: no lock needed
+			users[i], errs[i] = c.User(ctx, id)
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var id int
+		fmt.Sscanf(r.URL.Path, "/users/%d", &amp;id)
+		if id == 13 {
+			http.Error(w, "unlucky", http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"id":%d,"name":"user%d"}`, id, id)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	users, err := c.Users(ctx, []int{1, 2, 3, 4})
+	fmt.Println(users, err)
+
+	_, err = c.Users(ctx, []int{1, 13})
+	fmt.Println("error:", err)
+}</code></pre></div>
+<div class="output" data-label="go run -race . (no races reported)"><pre>[{1 user1} {2 user2} {3 user3} {4 user4}] &lt;nil&gt;
+error: get user 13: unexpected status 404 Not Found</pre></div>
+
+  <div class="callout senior"><p>Notice the shape of the fix: <code>Client.User</code> is a plain <strong>synchronous</strong> function that's trivial to test on its own, and <code>Users</code> adds concurrency on top. That's rule #2 from the concurrency list. In review, suggesting this split is often more valuable than pointing out the individual bugs, because it prevents the next ten.</p></div>
+
+  <h3>Practice exercises</h3>
+  <details class="exercise">
+    <summary>Exercise 1: Fix the shadowed error and the defer in this function</summary>
+    <p>This function should copy every file in <code>paths</code> into <code>w</code> and return the first error. It has two bugs from this chapter. Find and fix them.</p>
+    <div class="code" data-file="buggy.go"><pre><code class="language-go">func concatFiles(w io.Writer, paths []string) error {
+	var err error
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			break
+		}
+		defer f.Close()
+		_, err = io.Copy(w, f)
+	}
+	return err
+}</code></pre></div>
+    <p>Hint: what does <code>break</code> leave in the outer <code>err</code>? When does each file get closed?</p>
+    <div class="solution-label">Solution</div>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func concatFiles(w io.Writer, paths []string) error {
+	for _, p := range paths {
+		if err := copyFile(w, p); err != nil {
+			return err // return at the failure; nothing to shadow
+		}
+	}
+	return nil
+}
+
+// copyFile owns one file, so its defer runs once per file.
+func copyFile(w io.Writer, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("concat: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(w, f); err != nil {
+		return fmt.Errorf("concat %s: %w", path, err)
+	}
+	return nil
+}
+
+func main() {
+	dir, _ := os.MkdirTemp("", "ex1")
+	defer os.RemoveAll(dir)
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	os.WriteFile(a, []byte("hello "), 0o644)
+	os.WriteFile(b, []byte("world\n"), 0o644)
+
+	var out strings.Builder
+	fmt.Println("ok:", concatFiles(&amp;out, []string{a, b}), "-&gt;", strings.TrimSpace(out.String()))
+	err := concatFiles(&amp;out, []string{a, "missing.txt"})
+	fmt.Println("missing:", err)
+}</code></pre></div>
+<div class="output"><pre>ok: &lt;nil&gt; -&gt; hello world
+missing: concat: open missing.txt: no such file or directory</pre></div>
+    <p>Bug 1 (gotcha #7): <code>f, err := os.Open(p)</code> shadowed the outer <code>err</code>, so the function returned nil on failure. Bug 2 (gotcha #22): all files stayed open until the function returned. Moving the body into <code>copyFile</code> fixes both: <code>defer</code> runs per file, and errors return immediately with context.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: Redesign a constructor with a config struct</summary>
+    <p>A colleague wrote <code>func NewCache(size int, ttl time.Duration, onEvict func(string), metrics bool, name string) *Cache</code>. Every call site looks like <code>NewCache(100, 0, nil, false, "")</code>. Redesign it so that the common call is short, new settings don't break callers, and defaults are applied in one place.</p>
+    <div class="solution-label">Solution</div>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// CacheConfig configures a Cache. The zero value is valid.
+type CacheConfig struct {
+	Size    int              // max entries; 0 means 1000
+	TTL     time.Duration    // 0 means entries never expire
+	OnEvict func(key string) // optional callback
+	Metrics bool             // export hit/miss counters
+	Name    string           // used in logs and metrics; "" means "cache"
+}
+
+// Cache is a size-bounded key/value cache.
+type Cache struct {
+	cfg CacheConfig
+}
+
+// NewCache returns a Cache configured by cfg. Defaults are applied here, once.
+func NewCache(cfg CacheConfig) *Cache {
+	if cfg.Size == 0 {
+		cfg.Size = 1000
+	}
+	if cfg.Name == "" {
+		cfg.Name = "cache"
+	}
+	if cfg.OnEvict == nil {
+		cfg.OnEvict = func(string) {}
+	}
+	return &amp;Cache{cfg: cfg}
+}
+
+func main() {
+	a := NewCache(CacheConfig{}) // the common case is short
+	b := NewCache(CacheConfig{Name: "sessions", TTL: 30 * time.Minute})
+	fmt.Printf("a: name=%s size=%d ttl=%v\n", a.cfg.Name, a.cfg.Size, a.cfg.TTL)
+	fmt.Printf("b: name=%s size=%d ttl=%v\n", b.cfg.Name, b.cfg.Size, b.cfg.TTL)
+}</code></pre></div>
+<div class="output"><pre>a: name=cache size=1000 ttl=0s
+b: name=sessions size=1000 ttl=30m0s</pre></div>
+    <p>Required settings would stay positional parameters. Here nothing is truly required, so everything moved into <code>CacheConfig</code>, and the zero config is valid. Adding a new field later breaks nobody.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: Stop the goroutine leak</summary>
+    <p><code>firstResponse</code> asks three mirrors for a file and returns the fastest answer. Run it 100 times in a loop and <code>runtime.NumGoroutine()</code> keeps growing. Fix it two ways: with a buffered channel, and with a context that cancels the slow mirrors.</p>
+    <div class="code" data-file="leak.go"><pre><code class="language-go">func firstResponse(mirrors []string) string {
+	ch := make(chan string)
+	for _, m := range mirrors {
+		go func() { ch &lt;- fetch(m) }()
+	}
+	return &lt;-ch
+}</code></pre></div>
+    <div class="solution-label">Solution</div>
+    <p>Fix A: <code>ch := make(chan string, len(mirrors))</code>. Every sender has a slot, so the losers complete their send and exit. Fix B (better, because it also stops wasted work): pass a context, <code>defer cancel()</code> after receiving the first result, make <code>fetch</code> honour <code>ctx</code>, and have senders <code>select</code> on <code>ch &lt;- v</code> and <code>&lt;-ctx.Done()</code>. The <code>fixed</code> function in gotcha #17 above shows the select pattern, and its output proves the goroutine count stays flat.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Go seniority is about <strong>boring, obvious code</strong>: short names in small scopes, no stutter, MixedCaps, consistent initialisms (<code>userID</code>, <code>ServeHTTP</code>).</li>
+      <li>Design types whose <strong>zero value works</strong>; lazy-initialise maps; constructors are optional.</li>
+      <li>Errors flow upward gaining context with <code>%w</code>, and are <strong>handled once</strong> at the edge. Inspect with <code>errors.Is</code>/<code>errors.As</code>, never <code>==</code> on wrapped errors.</li>
+      <li><strong>Accept interfaces, return structs.</strong> Define small interfaces where they're used, and only when a second implementation or a test needs one.</li>
+      <li>Memorise the big traps: typed nil in interfaces, append aliasing, shadowed <code>err</code>, defer argument timing, nil map writes, mutex copies, unclosed bodies, goroutine leaks, panics in goroutines.</li>
+      <li>Automate taste: <code>gofmt</code>, <code>go vet</code>, staticcheck, golangci-lint and <code>-race</code> in CI, so humans can review design.</li>
+      <li>Packages are organised by domain, dependencies point inward, and <code>main</code> wires everything together.</li>
+      <li>Prefer config structs for apps and functional options for growing libraries. Document every exported name, starting with the name.</li>
+      <li>For every goroutine, know how it ends. Write synchronous functions and let callers add concurrency.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

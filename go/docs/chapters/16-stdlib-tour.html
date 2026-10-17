@@ -1,0 +1,2056 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 16 · Standard Library Tour — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="16">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part V · Chapter 16</div>
+  <h1>Standard Library Tour</h1>
+  <p class="lead">Go ships with a big, well-designed standard library. You can read files, parse JSON, handle time zones, build a CLI, log in a structured way and run other programs without installing a single third-party package. This chapter walks through the parts you'll use every week, then puts them together into a small, real command-line tool.</p>
+  <div class="meta">
+    <span class="pill">⏱ 50 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 13 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>Why <code>io.Reader</code> and <code>io.Writer</code> are the "USB ports" of Go, and how to snap them together</li>
+      <li>Reading line by line with <code>bufio.Scanner</code>, and why a <code>bufio.Writer</code> must be flushed</li>
+      <li>Working with files, permissions, environment variables, arguments and exit codes</li>
+      <li>Building and walking paths portably with <code>path/filepath</code></li>
+      <li>JSON in depth: struct tags, <code>omitempty</code> vs <code>omitzero</code>, unknown JSON, streaming, custom marshalers</li>
+      <li>CSV, the <code>time</code> package (the famous 2006-01-02 layout), time zones and the monotonic clock</li>
+      <li>CLIs with <code>flag</code>, structured logs with <code>log/slog</code>, plus <code>math/rand/v2</code>, sorting, <code>os/exec</code> and <code>embed</code></li>
+      <li>How to build a small but production-shaped CLI tool end to end, with tests</li>
+    </ul>
+  </div>
+
+  <h2>Why the standard library matters</h2>
+  <p>In many languages the first thing you do on a new project is install a pile of packages: one for HTTP, one for JSON, one for logging, one for command-line flags. In Go, the standard library (often called the <em>stdlib</em>) already covers most of that, and it is maintained by the Go team with the same compatibility promise as the language itself. Code written against it in 2014 still compiles today.</p>
+  <p>That has real consequences at work:</p>
+  <ul>
+    <li><strong>Fewer dependencies</strong> means fewer security advisories, fewer breaking upgrades, and faster builds.</li>
+    <li><strong>Shared vocabulary.</strong> Every Go developer knows <code>io.Reader</code>, <code>http.Handler</code> and <code>context.Context</code>. Libraries plug into these, so they plug into each other.</li>
+    <li><strong>High-quality reference code.</strong> The stdlib source is very readable. When you wonder "how should I design this?", reading how <code>bufio</code> or <code>encoding/csv</code> does it is a great education.</li>
+  </ul>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Before adding a dependency, ask "does the stdlib already do 90% of this?" It usually does. A tiny helper function you own is often cheaper over five years than a library you don't. Reach for third-party packages when they bring real value (a database driver, a mature router with features you actually need), not for convenience wrappers.</p></div>
+
+  <p>We'll go roughly from the lowest-level building blocks (bytes flowing through readers and writers) up to higher-level packages (JSON, time, logging), and finish with a complete tool.</p>
+
+  <h2>io.Reader and io.Writer: Go's universal plugs</h2>
+  <p>Almost every piece of data in Go flows through two tiny interfaces:</p>
+  <div class="code" data-file="io package (simplified)"><pre><code class="language-go">type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+type Writer interface {
+	Write(p []byte) (n int, err error)
+}</code></pre></div>
+  <p>A <strong>Reader</strong> is anything you can pull bytes <em>out of</em>: a file, a network connection, an HTTP request body, a string in memory, a gzip stream. A <strong>Writer</strong> is anything you can push bytes <em>into</em>: a file, stdout, a hash, a network connection, a buffer.</p>
+  <p>The contract of <code>Read</code> is worth learning precisely, because you'll implement it one day:</p>
+  <ul>
+    <li>The caller hands you a buffer <code>p</code>. You fill up to <code>len(p)</code> bytes and return how many you filled, <code>n</code>.</li>
+    <li>You may return fewer bytes than asked for. That's normal, not an error.</li>
+    <li>When there is no more data, you return <code>io.EOF</code> ("end of file"). You may return the last bytes and <code>io.EOF</code> in the same call, so callers must <strong>process the <code>n</code> bytes before looking at <code>err</code></strong>.</li>
+  </ul>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of Readers and Writers as garden hoses with standard connectors. Because every hose uses the same fitting, you can connect a tap (a file) to a filter (gzip) to a splitter (MultiWriter) to a sprinkler (a network socket). None of them needs to know what's on the other end.</p></div>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="220" fill="#262624"/>
+      <defs><marker id="a16" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <rect x="20" y="80" width="120" height="56" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="80" y="104" fill="#ece9e1" font-size="13" text-anchor="middle">strings.Reader</text>
+      <text x="80" y="122" fill="#a8a49a" font-size="11" text-anchor="middle">source</text>
+      <rect x="175" y="80" width="120" height="56" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="235" y="104" fill="#ece9e1" font-size="13" text-anchor="middle">LimitReader</text>
+      <text x="235" y="122" fill="#a8a49a" font-size="11" text-anchor="middle">first 14 bytes</text>
+      <rect x="330" y="80" width="120" height="56" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="390" y="104" fill="#ece9e1" font-size="13" text-anchor="middle">TeeReader</text>
+      <text x="390" y="122" fill="#a8a49a" font-size="11" text-anchor="middle">copy as it reads</text>
+      <rect x="330" y="166" width="120" height="40" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="390" y="191" fill="#e0b45c" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">audit buffer</text>
+      <rect x="485" y="80" width="80" height="56" rx="8" fill="#2e2d2a" stroke="#d97757"/>
+      <text x="525" y="104" fill="#ece9e1" font-size="13" text-anchor="middle">io.Copy</text>
+      <text x="525" y="122" fill="#a8a49a" font-size="11" text-anchor="middle">the pump</text>
+      <rect x="600" y="80" width="105" height="56" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/>
+      <text x="652" y="104" fill="#ece9e1" font-size="13" text-anchor="middle">MultiWriter</text>
+      <text x="652" y="122" fill="#a8a49a" font-size="11" text-anchor="middle">fan out</text>
+      <rect x="560" y="166" width="70" height="40" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="595" y="191" fill="#e0b45c" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">stdout</text>
+      <rect x="640" y="166" width="70" height="40" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="675" y="191" fill="#e0b45c" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">saved</text>
+      <line x1="140" y1="108" x2="172" y2="108" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="295" y1="108" x2="327" y2="108" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="450" y1="108" x2="482" y2="108" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="565" y1="108" x2="597" y2="108" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="390" y1="136" x2="390" y2="163" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="630" y1="136" x2="600" y2="163" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <line x1="670" y1="136" x2="675" y2="163" stroke="#d97757" stroke-width="2" marker-end="url(#a16)"/>
+      <text x="360" y="36" fill="#ece9e1" font-size="15" text-anchor="middle" font-weight="600">Readers wrap Readers, Writers wrap Writers</text>
+      <text x="360" y="58" fill="#a8a49a" font-size="12" text-anchor="middle">data is pulled from the left by io.Copy and pushed to the right</text>
+    </svg>
+    <figcaption>Each box only knows "I have a Reader" or "I have a Writer". That's why they compose.</figcaption>
+  </figure>
+
+  <p>Here is that exact pipeline as a program. Four helpers from the <code>io</code> package do all the work:</p>
+  <ul>
+    <li><code>io.LimitReader(r, n)</code> stops after <code>n</code> bytes. Great for protecting yourself from huge inputs.</li>
+    <li><code>io.TeeReader(r, w)</code> returns a Reader that, as you read from it, also writes the same bytes into <code>w</code> (like the Unix <code>tee</code> command).</li>
+    <li><code>io.MultiWriter(w1, w2, ...)</code> duplicates every write to all of its writers.</li>
+    <li><code>io.Copy(dst, src)</code> reads from <code>src</code> and writes to <code>dst</code> until EOF, using a 32 KB buffer internally. It returns the byte count.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+func main() {
+	src := strings.NewReader("Hello, Gopher! This is a long message.")
+
+	// 1. LimitReader: only let the first 14 bytes through.
+	limited := io.LimitReader(src, 14)
+
+	// 2. TeeReader: everything read from `limited` is also copied into `audit`.
+	var audit bytes.Buffer
+	tee := io.TeeReader(limited, &amp;audit)
+
+	// 3. MultiWriter: one write goes to stdout AND to `saved`.
+	var saved bytes.Buffer
+	out := io.MultiWriter(os.Stdout, &amp;saved)
+
+	// 4. io.Copy pumps data from a Reader into a Writer until EOF.
+	n, err := io.Copy(out, tee)
+	fmt.Println()
+	fmt.Println("copied:", n, "err:", err)
+	fmt.Printf("audit: %q\n", audit.String())
+	fmt.Printf("saved: %q\n", saved.String())
+
+	// What is left in the original reader?
+	rest, _ := io.ReadAll(src)
+	fmt.Printf("rest:  %q\n", rest)
+}</code></pre></div>
+  <div class="output"><pre>Hello, Gopher!
+copied: 14 err: &lt;nil&gt;
+audit: "Hello, Gopher!"
+saved: "Hello, Gopher!"
+rest:  " This is a long message."</pre></div>
+
+  <div class="live" data-title="Trace the reader pipeline">
+    <pre><code class="language-go">src := strings.NewReader("Hello, Gopher! This is a long message.")
+limited := io.LimitReader(src, 14)
+var audit bytes.Buffer
+tee := io.TeeReader(limited, &amp;audit)
+var saved bytes.Buffer
+out := io.MultiWriter(os.Stdout, &amp;saved)
+n, err := io.Copy(out, tee)
+fmt.Println()
+fmt.Println("copied:", n, "err:", err)
+rest, _ := io.ReadAll(src)
+fmt.Printf("rest:  %q\n", rest)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="src=38 bytes unread">We wrap a plain string in a <code>strings.Reader</code>. Nothing has been read yet; it just remembers a position (0).</li>
+      <li data-lines="2" data-state="src=38 unread; limited.N=14">The <code>LimitReader</code> wraps <code>src</code> and keeps a counter <code>N=14</code>. Each read decreases it; at 0 it reports <code>io.EOF</code>.</li>
+      <li data-lines="3-4" data-state="audit=&quot;&quot;">The <code>TeeReader</code> wraps <code>limited</code>. Still nothing has moved. Building pipelines is lazy: no data flows until someone reads.</li>
+      <li data-lines="5-6" data-state="saved=&quot;&quot;">On the writing side, <code>MultiWriter</code> will send every write to both stdout and <code>saved</code>.</li>
+      <li data-lines="7" data-state="n=14; limited.N=0; audit=&quot;Hello, Gopher!&quot;; saved=&quot;Hello, Gopher!&quot;" data-out="Hello, Gopher!">Now <code>io.Copy</code> calls <code>tee.Read</code> repeatedly. Each read goes tee → limited → src, the bytes get copied into <code>audit</code>, and then written to both stdout and <code>saved</code>. After 14 bytes the limit hits 0, the next read returns EOF, and Copy stops. EOF is the normal end, so <code>err</code> is <code>nil</code>.</li>
+      <li data-lines="8-9" data-state="n=14; err=nil" data-out="copied: 14 err: &lt;nil&gt;">We finish the line and print the count.</li>
+      <li data-lines="10-11" data-state="rest=&quot; This is a long message.&quot;" data-out="rest:  &quot; This is a long message.&quot;">The original reader still holds the bytes that the limit kept out. Readers are stateful streams: what's been read is gone, the rest is still there.</li>
+    </ol>
+  </div>
+
+  <h3>Writing your own Reader and Writer</h3>
+  <p>Because the interfaces are tiny, writing your own is easy. Below, <code>upperReader</code> wraps another Reader and upper-cases letters as they pass, and <code>countingWriter</code> counts bytes on their way to stdout. Notice that <code>io.Copy</code> has no idea either of these types exists. It just sees a Reader and a Writer.</p>
+  <div class="live" data-title="Watch io.Copy call your own Reader and Writer">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// upperReader wraps another Reader and upper-cases ASCII letters.
+type upperReader struct {
+	r io.Reader
+}
+
+func (u upperReader) Read(p []byte) (int, error) {
+	n, err := u.r.Read(p) // read into the caller's buffer first
+	for i := 0; i &lt; n; i++ {
+		if 'a' &lt;= p[i] &amp;&amp; p[i] &lt;= 'z' {
+			p[i] -= 'a' - 'A'
+		}
+	}
+	return n, err // pass through n and err exactly
+}
+
+// countingWriter counts bytes that pass through it.
+type countingWriter struct {
+	w     io.Writer
+	total int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.total += n
+	return n, err
+}
+
+func main() {
+	cw := &amp;countingWriter{w: os.Stdout}
+	r := upperReader{strings.NewReader("readers compose like lego\n")}
+	if _, err := io.Copy(cw, r); err != nil {
+		fmt.Println("error:", err)
+	}
+	fmt.Println("bytes written:", cw.total)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="38" data-state="cw.total=0">We build the destination: a <code>*countingWriter</code> that forwards to stdout. It must be a pointer, because <code>Write</code> has a pointer receiver and mutates <code>total</code>.</li>
+      <li data-lines="39" data-state="cw.total=0; r=upperReader{strings.Reader(26 bytes)}">The source is an <code>upperReader</code> wrapping a 26-byte <code>strings.Reader</code>. Building it reads nothing.</li>
+      <li data-lines="40" data-state="cw.total=0">Inside <code>io.Copy</code>, the only things it knows are "something with <code>Read</code>" and "something with <code>Write</code>". It allocates a 32 KB buffer <code>p</code> and calls <code>r.Read(p)</code>.</li>
+      <li data-lines="15-16" data-state="n=26; err=nil">Dynamic dispatch lands in <strong>our</strong> <code>upperReader.Read</code>. It first lets the inner reader fill <code>p</code>: all 26 bytes arrive in one go, with <code>err=nil</code>.</li>
+      <li data-lines="17-21" data-state="n=26; p[:26]=&quot;READERS COMPOSE LIKE LEGO\n&quot;">We rewrite only <code>p[:n]</code>, in place. Each lowercase letter drops by 32 (<code>'a'-'A'</code>). Spaces and <code>\n</code> are left alone. Bytes past <code>n</code> are garbage and must not be touched.</li>
+      <li data-lines="22,40" data-state="n=26; err=nil">We return <code>26, nil</code> unchanged. Back in <code>io.Copy</code>, because n &gt; 0 it now calls <code>cw.Write(p[:26])</code>.</li>
+      <li data-lines="31-34" data-state="cw.total=26" data-out="READERS COMPOSE LIKE LEGO"><code>countingWriter.Write</code> forwards to stdout, so the line appears, and adds the 26 bytes written to <code>total</code>.</li>
+      <li data-lines="15-16,22" data-state="n=0; err=io.EOF; cw.total=26">Copy loops and calls <code>Read</code> again. The inner reader is empty, so it returns <code>0, io.EOF</code>, and we pass that through. The uppercase loop runs zero times.</li>
+      <li data-lines="40" data-state="copied=26; err=nil">Copy treats <code>io.EOF</code> as a normal end, not a failure, and returns <code>err == nil</code>. The error branch is skipped.</li>
+      <li data-lines="43" data-state="cw.total=26" data-out="bytes written: 26">We print the counter. 25 letters and spaces plus 1 newline makes 26.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>READERS COMPOSE LIKE LEGO
+bytes written: 26</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: only touch p[:n]</div><p>A Reader can return <code>n &lt; len(p)</code>. Everything after <code>p[n]</code> is garbage from a previous read. Always loop to <code>n</code>, never to <code>len(p)</code>. And when you see both data and an error, handle the data first. The <code>io.ReadFull</code>, <code>io.ReadAll</code> and <code>io.Copy</code> helpers already get this right, so prefer them over calling <code>Read</code> yourself.</p></div>
+
+  <table>
+    <thead><tr><th>Helper</th><th>What it does</th><th>Typical use</th></tr></thead>
+    <tbody>
+      <tr><td><code>io.Copy(dst, src)</code></td><td>Pump everything from src to dst</td><td>Stream a file into an HTTP response</td></tr>
+      <tr><td><code>io.CopyN(dst, src, n)</code></td><td>Copy exactly n bytes</td><td>Read a fixed-size header</td></tr>
+      <tr><td><code>io.ReadAll(r)</code></td><td>Read until EOF into a <code>[]byte</code></td><td>Small bodies only (it's unbounded!)</td></tr>
+      <tr><td><code>io.ReadFull(r, buf)</code></td><td>Fill buf completely or error</td><td>Binary protocols</td></tr>
+      <tr><td><code>io.LimitReader(r, n)</code></td><td>EOF after n bytes</td><td>Defend against huge input</td></tr>
+      <tr><td><code>io.TeeReader(r, w)</code></td><td>Copy everything read into w</td><td>Hash a file while saving it</td></tr>
+      <tr><td><code>io.MultiReader(r1, r2)</code></td><td>Read r1 then r2 as one stream</td><td>Concatenate inputs</td></tr>
+      <tr><td><code>io.MultiWriter(w1, w2)</code></td><td>Write to all of them</td><td>Log to file and stdout</td></tr>
+      <tr><td><code>io.Pipe()</code></td><td>Synchronous in-memory pipe</td><td>Connect a writer-goroutine to a reader</td></tr>
+      <tr><td><code>io.Discard</code></td><td>A Writer that throws data away</td><td>Drain a body, benchmarks</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Accept <code>io.Reader</code> / <code>io.Writer</code> in your function signatures instead of filenames or <code>*os.File</code>. A function <code>func Parse(r io.Reader)</code> works on files, HTTP bodies, gzip streams and <code>strings.NewReader</code> in tests, for free. This one habit makes code dramatically easier to test.</p></div>
+
+  <h2>bufio: buffering and line-by-line reading</h2>
+  <p>Every call to <code>Read</code> or <code>Write</code> on a file or socket is a <em>system call</em>, which means asking the operating system kernel to do something. System calls are slow compared to normal function calls. If you write a file one byte at a time, you make a million system calls for a megabyte. The <code>bufio</code> package fixes this by keeping a buffer (4096 bytes by default) in memory and talking to the OS in big chunks.</p>
+
+  <h3>bufio.Scanner: the right way to read lines</h3>
+  <p>A <code>Scanner</code> splits a stream into <em>tokens</em>. By default a token is a line (without the trailing newline). You can swap the split function to get words (<code>bufio.ScanWords</code>), runes or bytes.</p>
+  <div class="live" data-title="Scanner, word split and a deferred Flush">
+    <pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+)
+
+const text = `first line
+second line
+
+fourth line after a blank one`
+
+func main() {
+	// Line by line.
+	sc := bufio.NewScanner(strings.NewReader(text))
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		fmt.Printf("%d: %q\n", lineNo, sc.Text())
+	}
+	if err := sc.Err(); err != nil { // always check after the loop
+		fmt.Println("scan error:", err)
+	}
+
+	// Word by word: just swap the split function.
+	ws := bufio.NewScanner(strings.NewReader(text))
+	ws.Split(bufio.ScanWords)
+	words := 0
+	for ws.Scan() {
+		words++
+	}
+	fmt.Println("words:", words)
+
+	// Buffered writing: bytes sit in memory until Flush.
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush() // without this, nothing below is printed!
+	for i := range 3 {
+		fmt.Fprintf(w, "buffered row %d\n", i)
+	}
+	fmt.Fprintf(w, "buffered so far: %d bytes, available: %d\n", w.Buffered(), w.Available())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17-18" data-state="lineNo=0">A line Scanner wraps the text. Nothing is read yet.</li>
+      <li data-lines="19-21" data-state="lineNo=1; token=&quot;first line&quot;" data-out="1: &quot;first line&quot;">First <code>Scan()</code> finds the first <code>\n</code>. The token excludes the newline.</li>
+      <li data-lines="19-21" data-state="lineNo=2; token=&quot;second line&quot;" data-out="2: &quot;second line&quot;">Second line, same thing.</li>
+      <li data-lines="19-21" data-state="lineNo=3; token=&quot;&quot;" data-out="3: &quot;&quot;">The blank line gives an <strong>empty</strong> token. It is still a line, so the loop continues instead of stopping.</li>
+      <li data-lines="19-21" data-state="lineNo=4; token=&quot;fourth line after a blank one&quot;" data-out="4: &quot;fourth line after a blank one&quot;">The last line has no trailing <code>\n</code>, and Scanner still returns it at EOF.</li>
+      <li data-lines="19,23" data-state="lineNo=4; sc.Err()=nil"><code>Scan()</code> returns <code>false</code>. <code>Err()</code> is <code>nil</code> because a clean EOF is not an error, so nothing prints.</li>
+      <li data-lines="28-34" data-state="words=10" data-out="words: 10">A new Scanner with <code>ScanWords</code> splits on any whitespace, including newlines, and drops the empty line: 2 + 2 + 6 = <strong>10</strong> words.</li>
+      <li data-lines="37-38" data-state="w.Buffered()=0; deferred=[w.Flush]">We wrap stdout in a <code>bufio.Writer</code> (4096-byte buffer). <code>defer w.Flush()</code> is registered now but runs only when <code>main</code> returns.</li>
+      <li data-lines="39-41" data-state="i=2; w.Buffered()=45">Three <code>Fprintf</code> calls land in memory, not on the terminal. Each row is 15 bytes, so 45 bytes are buffered. <strong>Nothing has been printed yet.</strong></li>
+      <li data-lines="42" data-state="w.Buffered()=45; w.Available()=4051">The arguments are evaluated <em>before</em> this line's own bytes are added: 45 buffered and 4096 − 45 = 4051 free. The line itself goes into the buffer too.</li>
+      <li data-lines="38,43" data-state="w.Buffered()=0" data-out="buffered row 0\nbuffered row 1\nbuffered row 2\nbuffered so far: 45 bytes, available: 4051"><code>main</code> returns, and the deferred <code>Flush</code> fires. All four lines reach stdout in a single write. Without the defer they would be lost.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1: "first line"
+2: "second line"
+3: ""
+4: "fourth line after a blank one"
+words: 10
+buffered row 0
+buffered row 1
+buffered row 2
+buffered so far: 45 bytes, available: 4051</pre></div>
+
+  <div class="live" data-title="Watch Scanner loop over lines">
+    <pre><code class="language-go">sc := bufio.NewScanner(strings.NewReader("a b\n\nc"))
+lineNo := 0
+for sc.Scan() {
+	lineNo++
+	fmt.Printf("%d: %q\n", lineNo, sc.Text())
+}
+if err := sc.Err(); err != nil {
+	fmt.Println("scan error:", err)
+}
+fmt.Println("lines:", lineNo)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="lineNo=0">A Scanner wraps the reader. Nothing is read until the first <code>Scan()</code>.</li>
+      <li data-lines="3" data-state="token=&quot;a b&quot;">First <code>Scan()</code> reads a chunk into its buffer, finds the first <code>\n</code> and returns <code>true</code>. The token is <code>"a b"</code>; the newline is stripped.</li>
+      <li data-lines="4-5" data-state="lineNo=1" data-out="1: &quot;a b&quot;"><code>sc.Text()</code> gives us a string copy of the token.</li>
+      <li data-lines="3-5" data-state="lineNo=2; token=&quot;&quot;" data-out="2: &quot;&quot;">The next line is empty. That's still a line, so we get an empty token, not a stop.</li>
+      <li data-lines="3-5" data-state="lineNo=3; token=&quot;c&quot;" data-out="3: &quot;c&quot;">The last line has no trailing newline. Scanner still returns it at EOF.</li>
+      <li data-lines="3" data-state="Scan()=false">Now <code>Scan()</code> returns <code>false</code>: either EOF or an error. The loop ends.</li>
+      <li data-lines="7-10" data-state="sc.Err()=nil" data-out="lines: 3"><code>Err()</code> returns <code>nil</code> for a clean EOF, so no message. Always check it: the loop alone can't tell you <em>why</em> it stopped.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: the 64 KB line limit</div><p>By default a Scanner refuses tokens larger than 64 KB and stops with <code>bufio.Scanner: token too long</code>. Minified JSON logs hit this all the time. Raise the limit with <code>sc.Buffer</code>:</p></div>
+  <div class="live" data-title="Hit the 64 KB token limit, then raise it">
+    <pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"fmt"
+	"strings"
+)
+
+func main() {
+	long := strings.Repeat("x", 100_000) // one 100 KB line
+	sc := bufio.NewScanner(strings.NewReader(long))
+	for sc.Scan() {
+	}
+	fmt.Println("default:", sc.Err())
+
+	sc = bufio.NewScanner(strings.NewReader(long))
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow lines up to 1 MB
+	for sc.Scan() {
+		fmt.Println("line length:", len(sc.Text()))
+	}
+	fmt.Println("bigger buffer:", sc.Err())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-11" data-state="len(long)=100000">One line of 100,000 <code>x</code>s with no newline, wrapped in a default Scanner (max token 64 KB).</li>
+      <li data-lines="12-13" data-state="Scan()=false">The Scanner grows its buffer while looking for a newline. When the buffer reaches 64 KB with no token found, it gives up. The very first <code>Scan()</code> returns <code>false</code> and the loop body never runs.</li>
+      <li data-lines="14" data-state="sc.Err()=bufio.ErrTooLong" data-out="default: bufio.Scanner: token too long">This is why you check <code>Err()</code>. Without it the loop looks exactly like an empty file, and the data silently disappears.</li>
+      <li data-lines="16-17" data-state="initial cap=65536; max=1048576">A fresh Scanner, and <code>Buffer</code> gives it a 64 KB starting buffer that may grow up to 1 MB. Call it <em>before</em> the first <code>Scan</code>, or it panics.</li>
+      <li data-lines="18-19" data-state="len(token)=100000" data-out="line length: 100000">Now the buffer can grow past 100 KB, so the whole line comes back as one token at EOF.</li>
+      <li data-lines="18,21" data-state="sc.Err()=nil" data-out="bigger buffer: &lt;nil&gt;">The next <code>Scan()</code> hits clean EOF, so <code>Err()</code> is <code>nil</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>default: bufio.Scanner: token too long
+line length: 100000
+bigger buffer: &lt;nil&gt;</pre></div>
+  <p>Also: <code>sc.Bytes()</code> returns a slice that points into the Scanner's internal buffer, and it gets overwritten by the next <code>Scan()</code>. If you need to keep it, copy it (or use <code>sc.Text()</code>, which copies into a new string).</p>
+
+  <h3>bufio.Writer: remember to Flush</h3>
+  <p>A <code>bufio.Writer</code> collects writes in memory and only sends them to the underlying writer when the buffer is full or when you call <code>Flush()</code>. If your program ends without flushing, the tail of your output simply vanishes. Here's the bug in its smallest form:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+)
+
+func main() {
+	w := bufio.NewWriter(os.Stdout)
+	fmt.Fprintln(w, "will I be printed?")
+	fmt.Println("direct write: buffered bytes =", w.Buffered())
+	// forgot w.Flush()
+}</code></pre></div>
+  <div class="output" data-label="Output (the buffered line is lost)"><pre>direct write: buffered bytes = 19</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">w := bufio.NewWriter(f)
+for _, row := range rows {
+	fmt.Fprintln(w, row)
+}
+return nil // last few KB never reach the file</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">w := bufio.NewWriter(f)
+for _, row := range rows {
+	fmt.Fprintln(w, row)
+}
+return w.Flush() // returns the write error, if any</code></pre></div></div>
+  </div>
+
+  <div class="callout tip"><p><code>defer w.Flush()</code> is fine for stdout in small programs, but it throws away the error. For files that matter, call <code>Flush()</code> explicitly and return its error, then also check the error from <code>f.Close()</code>.</p></div>
+
+  <h2>os: files, environment, arguments and exit codes</h2>
+  <p>The <code>os</code> package is your window to the operating system. The most common file tasks look like this:</p>
+  <table>
+    <thead><tr><th>Task</th><th>Function</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Read a whole (small) file</td><td><code>os.ReadFile(name)</code></td><td>Returns <code>[]byte</code></td></tr>
+      <tr><td>Write a whole file</td><td><code>os.WriteFile(name, data, 0o644)</code></td><td>Creates or truncates</td></tr>
+      <tr><td>Open for reading</td><td><code>os.Open(name)</code></td><td>Read-only <code>*os.File</code></td></tr>
+      <tr><td>Create / truncate for writing</td><td><code>os.Create(name)</code></td><td>Mode 0666 before umask</td></tr>
+      <tr><td>Anything else (append, exclusive create)</td><td><code>os.OpenFile(name, flags, perm)</code></td><td><code>os.O_APPEND|os.O_CREATE|os.O_WRONLY</code></td></tr>
+      <tr><td>Metadata</td><td><code>os.Stat(name)</code></td><td>Size, mode, mod time, IsDir</td></tr>
+      <tr><td>Directories</td><td><code>os.MkdirAll</code>, <code>os.ReadDir</code>, <code>os.RemoveAll</code></td><td><code>MkdirAll</code> is like <code>mkdir -p</code></td></tr>
+      <tr><td>Temp files</td><td><code>os.MkdirTemp</code>, <code>os.CreateTemp</code></td><td>Use <code>t.TempDir()</code> in tests</td></tr>
+    </tbody>
+  </table>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	dir, err := os.MkdirTemp("", "files-demo")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir) // clean up the whole temp dir at the end
+
+	path := filepath.Join(dir, "notes.txt")
+
+	// 1. Create (truncates if it exists) and write.
+	f, err := os.Create(path)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Fprintln(f, "line one")
+	if err := f.Close(); err != nil { // Close can fail on write: check it!
+		panic(err)
+	}
+
+	// 2. Append with OpenFile and explicit flags.
+	f, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		panic(err)
+	}
+	f.WriteString("line two\n")
+	f.Close()
+
+	// 3. Read the whole thing in one go.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("contents:\n%s", data)
+
+	// 4. Write a whole file in one go, with permissions 0644 (rw-r--r--).
+	cfg := filepath.Join(dir, "config.ini")
+	if err := os.WriteFile(cfg, []byte("debug=true\n"), 0o644); err != nil {
+		panic(err)
+	}
+	info, _ := os.Stat(cfg)
+	fmt.Println("config:", info.Name(), info.Size(), "bytes", info.Mode())
+
+	// 5. A file that does not exist.
+	_, err = os.ReadFile(filepath.Join(dir, "missing.txt"))
+	fmt.Println("missing is ErrNotExist:", errors.Is(err, fs.ErrNotExist))
+	var pe *fs.PathError
+	if errors.As(err, &amp;pe) {
+		fmt.Println("op:", pe.Op, "| err:", pe.Err)
+	}
+}</code></pre></div>
+  <div class="output"><pre>contents:
+line one
+line two
+config: config.ini 11 bytes -rw-r--r--
+missing is ErrNotExist: true
+op: open | err: no such file or directory</pre></div>
+
+  <p>A few things to notice:</p>
+  <ul>
+    <li><strong>Permissions</strong> are Unix-style octal numbers. <code>0o644</code> means the owner can read and write (6 = 4+2), the group and others can only read (4). Directories usually want <code>0o755</code> (the 1 bit, "execute", lets people enter a directory). Your process's <em>umask</em> may remove bits from what you ask for.</li>
+    <li><strong>Errors are typed.</strong> A missing file returns a <code>*fs.PathError</code> that wraps <code>fs.ErrNotExist</code>. Check it with <code>errors.Is(err, fs.ErrNotExist)</code> (or the older <code>os.IsNotExist</code>).</li>
+    <li><strong>Close can fail.</strong> For files you wrote to, the OS may only report a disk-full error on close. <code>defer f.Close()</code> is fine for files you only read.</li>
+  </ul>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: atomic writes</div><p>If a crash happens halfway through <code>os.WriteFile("config.json", ...)</code>, you're left with a half-written config. For important files, write to a temp file in the <em>same directory</em> (<code>os.CreateTemp(dir, "config-*.tmp")</code>), <code>Sync()</code> and <code>Close()</code> it, then <code>os.Rename</code> it over the real name. Rename is atomic on the same file system, so readers see either the old file or the new one, never a mix.</p></div>
+
+  <h3>Environment variables, arguments and exit codes</h3>
+  <p><code>os.Args</code> is a slice of the command-line words; <code>os.Args[0]</code> is the program's own path. <code>os.Getenv</code> reads an environment variable, returning <code>""</code> if it isn't set. When you need to tell "unset" apart from "set to empty", use <code>os.LookupEnv</code>. <code>os.Exit(code)</code> ends the process immediately with a status code: 0 means success, anything else means failure (2 is the convention for "bad usage").</p>
+  <div class="live" data-title="Run 2: env vars, args and a defer that fires">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	defer fmt.Println("deferred: runs only on a normal return")
+
+	fmt.Println("program:", os.Args[0] != "")
+	fmt.Println("args:", os.Args[1:])
+
+	port := os.Getenv("PORT") // "" if unset: can't tell unset from empty
+	fmt.Printf("PORT=%q\n", port)
+
+	if v, ok := os.LookupEnv("APP_MODE"); ok {
+		fmt.Println("APP_MODE is set to", v)
+	} else {
+		fmt.Println("APP_MODE is not set")
+	}
+
+	if len(os.Args) &lt; 2 {
+		fmt.Fprintln(os.Stderr, "usage: env NAME")
+		os.Exit(2) // exits immediately; deferred calls do not run
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="deferred=[Println(&quot;deferred: ...&quot;)]">We trace the second run: <code>PORT=8080 APP_MODE=dev ./env alice bob</code>. The <code>defer</code> is registered first; it will run when <code>main</code> <em>returns normally</em>.</li>
+      <li data-lines="11" data-state="os.Args=[./env alice bob]" data-out="program: true"><code>os.Args[0]</code> is the program path, never empty, so this prints <code>true</code>.</li>
+      <li data-lines="12" data-state="os.Args[1:]=[alice bob]" data-out="args: [alice bob]">The real arguments start at index 1. The shell already split them on spaces.</li>
+      <li data-lines="14-15" data-state="port=&quot;8080&quot;" data-out="PORT=&quot;8080&quot;"><code>Getenv</code> returns the value. On run 1 it returned <code>""</code>, and you could not tell "unset" from "set to empty".</li>
+      <li data-lines="17-18" data-state="v=&quot;dev&quot;; ok=true" data-out="APP_MODE is set to dev"><code>LookupEnv</code> also returns <code>ok</code>, which tells those two cases apart.</li>
+      <li data-lines="23" data-state="len(os.Args)=3">3 is not less than 2, so we skip the usage branch. On run 1 (no args) this is where <code>os.Exit(2)</code> killed the process <strong>without running the defer</strong>.</li>
+      <li data-lines="27,9" data-state="exit status=0" data-out="deferred: runs only on a normal return"><code>main</code> reaches its closing brace and returns normally, so the deferred <code>Println</code> fires last. The exit status is 0.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Two runs"><pre>$ go build -o env . &amp;&amp; ./env
+program: true
+args: []
+PORT=""
+APP_MODE is not set
+usage: env NAME
+exit status 2
+
+$ PORT=8080 APP_MODE=dev ./env alice bob
+program: true
+args: [alice bob]
+PORT="8080"
+APP_MODE is set to dev
+deferred: runs only on a normal return
+exit status 0</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: os.Exit skips defers</div><p><code>os.Exit</code> does not run deferred functions. Files don't get flushed, temp dirs don't get removed, buffered logs are lost. That's why the first run above never printed the deferred line. The fix is a pattern you'll see in the CLI at the end: put all logic in a <code>run() error</code> function, and only call <code>os.Exit</code> in <code>main</code> after <code>run</code> has returned and its defers have finished.</p></div>
+
+  <h2>path/filepath: portable paths and walking trees</h2>
+  <p>Paths on Linux and macOS use <code>/</code>; Windows uses <code>\</code>. Never glue paths with <code>+ "/" +</code>. The <code>path/filepath</code> package uses the right separator for the current OS and also cleans up things like <code>..</code> and double slashes. (The separate <code>path</code> package is for forward-slash paths that are <em>not</em> OS file paths, like URL paths or paths inside an <code>embed.FS</code>.)</p>
+  <p>To visit every file under a directory, use <code>filepath.WalkDir</code>. It calls your function for each entry in lexical order. Returning <code>filepath.SkipDir</code> from a directory means "don't go inside"; returning any other error stops the walk.</p>
+  <div class="live" data-title="Clean a path, then walk a tree with SkipDir">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	p := filepath.Join("data", "2026", "..", "reports", "q3.csv")
+	fmt.Println("Join:", p) // Join also cleans ".." away
+	fmt.Println("Dir: ", filepath.Dir(p))
+	fmt.Println("Base:", filepath.Base(p))
+	fmt.Println("Ext: ", filepath.Ext(p))
+	fmt.Println("Stem:", strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)))
+	rel, _ := filepath.Rel("data", p)
+	fmt.Println("Rel: ", rel)
+
+	// Build a small tree to walk.
+	root, _ := os.MkdirTemp("", "walk")
+	defer os.RemoveAll(root)
+	for _, f := range []string{"a.go", "b.txt", "sub/c.go", "sub/deep/d.go", "vendor/x.go"} {
+		full := filepath.Join(root, f)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte("package x"), 0o644)
+	}
+
+	// WalkDir visits every entry in lexical order.
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err // could not read this entry
+		}
+		if d.IsDir() &amp;&amp; d.Name() == "vendor" {
+			return filepath.SkipDir // do not descend
+		}
+		if !d.IsDir() &amp;&amp; filepath.Ext(path) == ".go" {
+			r, _ := filepath.Rel(root, path)
+			fmt.Println("found", r)
+		}
+		return nil
+	})
+	fmt.Println("walk err:", err)
+
+	matches, _ := filepath.Glob(filepath.Join(root, "*.go"))
+	fmt.Println("glob matched:", len(matches))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-13" data-state="p=&quot;data/reports/q3.csv&quot;" data-out="Join: data/reports/q3.csv"><code>Join</code> glues the parts with the OS separator and then <strong>cleans</strong> the result: <code>2026/..</code> cancels out.</li>
+      <li data-lines="14-17" data-state="Dir=data/reports; Base=q3.csv; Ext=.csv" data-out="Dir:  data/reports\nBase: q3.csv\nExt:  .csv\nStem: q3">These are pure string operations. Nothing touches the disk. <code>Ext</code> includes the dot, so trimming it from <code>Base</code> gives the stem.</li>
+      <li data-lines="18-19" data-state="rel=&quot;reports/q3.csv&quot;" data-out="Rel:  reports/q3.csv"><code>Rel</code> answers "how do I get from <code>data</code> to <code>p</code>?"</li>
+      <li data-lines="22-28" data-state="tree=a.go b.txt sub/c.go sub/deep/d.go vendor/x.go">We create a temp tree. <code>defer os.RemoveAll(root)</code> cleans it up when <code>main</code> ends.</li>
+      <li data-lines="31-34,42" data-state="path=root; d.IsDir()=true">WalkDir calls our function for <strong>root itself</strong> first. It's a dir, not <code>vendor</code>, not a file, so we return <code>nil</code>, which means "keep going".</li>
+      <li data-lines="38-40" data-state="path=root/a.go" data-out="found a.go">Entries come in lexical order: <code>a.go</code> is first, and it's a <code>.go</code> file, so we print it relative to root.</li>
+      <li data-lines="38,42" data-state="path=root/b.txt"><code>b.txt</code> fails the extension check. Nothing printed.</li>
+      <li data-lines="38-40" data-state="path=root/sub/c.go" data-out="found sub/c.go">We visit the <code>sub</code> directory, then descend into it and find <code>c.go</code>.</li>
+      <li data-lines="38-40" data-state="path=root/sub/deep/d.go" data-out="found sub/deep/d.go">Then <code>sub/deep</code>, then <code>sub/deep/d.go</code>. The walk is depth-first.</li>
+      <li data-lines="35-36" data-state="path=root/vendor; return=SkipDir">At <code>vendor</code> we return the special sentinel <code>filepath.SkipDir</code>. WalkDir does not descend, so <code>vendor/x.go</code> is never visited.</li>
+      <li data-lines="44" data-state="err=nil" data-out="walk err: &lt;nil&gt;">SkipDir is a signal, not a failure, so WalkDir returns <code>nil</code>.</li>
+      <li data-lines="46-47" data-state="matches=[root/a.go]" data-out="glob matched: 1"><code>Glob</code> does not recurse: <code>*.go</code> only matches <code>a.go</code> at the top level.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Join: data/reports/q3.csv
+Dir:  data/reports
+Base: q3.csv
+Ext:  .csv
+Stem: q3
+Rel:  reports/q3.csv
+found a.go
+found sub/c.go
+found sub/deep/d.go
+walk err: &lt;nil&gt;
+glob matched: 1</pre></div>
+
+  <div class="callout tip"><p>Prefer <code>WalkDir</code> over the older <code>filepath.Walk</code>. <code>Walk</code> calls <code>os.Lstat</code> on every single file to build a <code>FileInfo</code>; <code>WalkDir</code> hands you a cheap <code>fs.DirEntry</code> and only stats when you ask (<code>d.Info()</code>). On big trees it is several times faster.</p></div>
+
+  <h2>encoding/json: the everyday workhorse</h2>
+  <p>JSON is how most services talk. <code>encoding/json</code> converts between Go values and JSON text:</p>
+  <ul>
+    <li><code>json.Marshal(v)</code> turns a Go value into JSON bytes ("encoding").</li>
+    <li><code>json.Unmarshal(data, &amp;v)</code> parses JSON bytes into a Go value ("decoding"). You must pass a pointer so it can fill your variable.</li>
+  </ul>
+  <p>Only <strong>exported</strong> fields (starting with a capital letter) are visible to the json package. <strong>Struct tags</strong>, the back-quoted strings after a field, control the JSON key and options:</p>
+  <table>
+    <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>`json:"name"`</code></td><td>Use <code>name</code> as the key</td></tr>
+      <tr><td><code>`json:"name,omitempty"`</code></td><td>Skip if the value is "empty": <code>false</code>, 0, <code>""</code>, nil pointer/interface, empty slice/map</td></tr>
+      <tr><td><code>`json:"name,omitzero"`</code></td><td>(Go 1.24+) Skip if the value is the zero value, or if its <code>IsZero()</code> method returns true. Works for structs and <code>time.Time</code></td></tr>
+      <tr><td><code>`json:"-"`</code></td><td>Never encode or decode this field</td></tr>
+      <tr><td><code>`json:"n,string"`</code></td><td>Encode a number or bool inside a JSON string (<code>"36"</code>)</td></tr>
+    </tbody>
+  </table>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+type Address struct {
+	City string `json:"city"`
+}
+
+type User struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Email     string    `json:"email,omitempty"` // dropped when ""
+	Password  string    `json:"-"`               // never serialized
+	Tags      []string  `json:"tags,omitempty"`  // dropped when nil or empty
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	Address   Address   `json:"address,omitzero"` // omitempty can't drop structs; omitzero can
+	Age       int       `json:"age,string"`       // encoded as a JSON string
+	internal  string    // unexported: invisible to encoding/json
+}
+
+func main() {
+	u := User{ID: 1, Name: "Ada", Password: "s3cret", Age: 36, internal: "x"}
+	b, err := json.Marshal(u)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(b))
+
+	u.Email = "ada@example.com"
+	u.Tags = []string{"admin"}
+	u.CreatedAt = time.Date(2026, 10, 16, 9, 30, 0, 0, time.UTC)
+	u.Address.City = "London"
+	pretty, _ := json.MarshalIndent(u, "", "  ")
+	fmt.Println(string(pretty))
+
+	// Decoding: keys match tags case-insensitively; unknown keys are ignored.
+	in := []byte(`{"ID": 7, "name": "Linus", "age": "54", "extra": true}`)
+	var got User
+	if err := json.Unmarshal(in, &amp;got); err != nil {
+		panic(err)
+	}
+	fmt.Printf("%+v\n", got)
+
+	// Type mismatch errors are descriptive.
+	err = json.Unmarshal([]byte(`{"id": "seven"}`), &amp;got)
+	fmt.Println("error:", err)
+}</code></pre></div>
+  <div class="output"><pre>{"id":1,"name":"Ada","age":"36"}
+{
+  "id": 1,
+  "name": "Ada",
+  "email": "ada@example.com",
+  "tags": [
+    "admin"
+  ],
+  "created_at": "2026-10-16T09:30:00Z",
+  "address": {
+    "city": "London"
+  },
+  "age": "36"
+}
+{ID:7 Name:Linus Email: Password: Tags:[] CreatedAt:0001-01-01 00:00:00 +0000 UTC Address:{City:} Age:54 internal:}
+error: json: cannot unmarshal string into Go struct field User.id of type int</pre></div>
+
+  <p>Look carefully at the first line of output. <code>Email</code> and <code>Tags</code> vanished because of <code>omitempty</code>; <code>CreatedAt</code> and <code>Address</code> vanished because of <code>omitzero</code>. Before Go 1.24 you couldn't omit a zero <code>time.Time</code> or an empty struct at all: <code>omitempty</code> never treats structs as empty, so you'd get <code>"created_at":"0001-01-01T00:00:00Z"</code>. That's one of the most common JSON surprises in older code.</p>
+  <p>On the decoding side, note that <code>"ID"</code> matched the <code>id</code> tag (matching is case-insensitive), the unknown key <code>"extra"</code> was silently ignored, and a type mismatch produced a clear error naming the field.</p>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A struct has <code>Deleted time.Time `json:"deleted,omitempty"`</code>. You marshal a value where <code>Deleted</code> is never set. What appears in the JSON?</div>
+    <div class="quiz-opts"><button>Nothing, the key is omitted</button><button><code>"deleted":null</code></button><button><code>"deleted":"0001-01-01T00:00:00Z"</code></button><button>A compile error</button></div>
+    <div class="quiz-explain"><code>time.Time</code> is a struct, and <code>omitempty</code> never considers a struct empty. You get the zero time as a string. Use <code>omitzero</code> (Go 1.24+), which calls <code>Time.IsZero()</code>, or use a <code>*time.Time</code> with <code>omitempty</code>.</div>
+  </div>
+
+  <h3>Decoding JSON whose shape you don't know</h3>
+  <p>Sometimes you get JSON with no fixed schema, like webhook payloads or config blobs. Decode it into <code>map[string]any</code> (<code>any</code> is just an alias for <code>interface{}</code>, "a value of any type"). The package then uses these Go types:</p>
+  <table>
+    <thead><tr><th>JSON</th><th>Go type in an <code>any</code></th></tr></thead>
+    <tbody>
+      <tr><td>object</td><td><code>map[string]any</code></td></tr>
+      <tr><td>array</td><td><code>[]any</code></td></tr>
+      <tr><td>string</td><td><code>string</code></td></tr>
+      <tr><td>number</td><td><code>float64</code> (always!)</td></tr>
+      <tr><td>true / false</td><td><code>bool</code></td></tr>
+      <tr><td>null</td><td><code>nil</code></td></tr>
+    </tbody>
+  </table>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+func main() {
+	data := []byte(`{
+		"event": "deploy",
+		"ok": true,
+		"duration_ms": 1520,
+		"id": 9007199254740993,
+		"tags": ["prod", "eu"],
+		"meta": {"region": "eu-west-1", "retries": 2},
+		"note": null
+	}`)
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &amp;m); err != nil {
+		panic(err)
+	}
+
+	for _, k := range []string{"event", "ok", "duration_ms", "id", "tags", "meta", "note"} {
+		describe(k, m[k])
+	}
+
+	// Digging into nested values requires type assertions at each level.
+	if meta, ok := m["meta"].(map[string]any); ok {
+		fmt.Println("region:", meta["region"])
+	}
+
+	// UseNumber keeps numbers as text, so huge integers survive.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var m2 map[string]any
+	dec.Decode(&amp;m2)
+	id := m2["id"].(json.Number)
+	n, _ := id.Int64()
+	fmt.Println("id as float64:", int64(m["id"].(float64)), "| as json.Number:", n)
+}
+
+func describe(key string, v any) {
+	switch x := v.(type) {
+	case string:
+		fmt.Printf("%-12s string  %q\n", key, x)
+	case bool:
+		fmt.Printf("%-12s bool    %v\n", key, x)
+	case float64: // ALL JSON numbers become float64
+		fmt.Printf("%-12s float64 %v\n", key, x)
+	case []any:
+		fmt.Printf("%-12s []any   len=%d\n", key, len(x))
+	case map[string]any:
+		fmt.Printf("%-12s object  keys=%d\n", key, len(x))
+	case nil:
+		fmt.Printf("%-12s null\n", key)
+	}
+}</code></pre></div>
+  <div class="output"><pre>event        string  "deploy"
+ok           bool    true
+duration_ms  float64 1520
+id           float64 9.007199254740992e+15
+tags         []any   len=2
+meta         object  keys=2
+note         null
+region: eu-west-1
+id as float64: 9007199254740992 | as json.Number: 9007199254740993</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: big integers lose precision</div><p>A <code>float64</code> can only represent integers exactly up to 2<sup>53</sup>. The id <code>9007199254740993</code> came back as <code>...992</code>. Twitter-style 64-bit IDs and database bigints get silently corrupted this way. Use <code>dec.UseNumber()</code>, decode into a struct with an <code>int64</code> field, or send IDs as strings.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p><code>map[string]any</code> is an escape hatch, not a design. Once you know even part of the shape, define a struct with just the fields you need. Unknown fields are ignored, so a partial struct is perfectly valid and far safer than a chain of type assertions. For "mostly known, partly dynamic" payloads, use a <code>json.RawMessage</code> field to delay decoding of the dynamic part.</p></div>
+
+  <h3>Streaming with json.Decoder and json.Encoder</h3>
+  <p><code>json.Unmarshal</code> needs the whole document in memory. <code>json.NewDecoder(r)</code> reads from any <code>io.Reader</code> instead, one value at a time. Use it for HTTP request bodies, newline-delimited JSON (NDJSON) log files, and huge arrays. Its mirror image, <code>json.NewEncoder(w)</code>, writes straight to an <code>io.Writer</code>.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+type Event struct {
+	Level string `json:"level"`
+	Msg   string `json:"msg"`
+}
+
+func main() {
+	// 1. NDJSON: one JSON value per line. Decoder reads them one at a time.
+	ndjson := `{"level":"info","msg":"started"}
+{"level":"warn","msg":"disk 91%"}
+{"level":"error","msg":"db timeout"}`
+	dec := json.NewDecoder(strings.NewReader(ndjson))
+	for {
+		var e Event
+		err := dec.Decode(&amp;e)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			fmt.Println("bad line:", err)
+			break
+		}
+		fmt.Printf("[%s] %s\n", e.Level, e.Msg)
+	}
+
+	// 2. A huge JSON array: stream elements without loading them all.
+	arr := `[{"level":"info","msg":"a"},{"level":"info","msg":"b"}]`
+	dec = json.NewDecoder(strings.NewReader(arr))
+	tok, _ := dec.Token() // consume the opening '['
+	fmt.Println("opening token:", tok)
+	count := 0
+	for dec.More() {
+		var e Event
+		dec.Decode(&amp;e)
+		count++
+	}
+	dec.Token() // consume the closing ']'
+	fmt.Println("streamed elements:", count)
+
+	// 3. Strict decoding for API input: reject unknown fields.
+	strict := json.NewDecoder(strings.NewReader(`{"level":"info","mesage":"typo"}`))
+	strict.DisallowUnknownFields()
+	var e Event
+	fmt.Println("strict:", strict.Decode(&amp;e))
+
+	// 4. Encoder writes straight to any io.Writer (here: stdout).
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", " ")
+	enc.Encode(Event{Level: "debug", Msg: "&lt;html&gt; &amp; stuff"})
+}</code></pre></div>
+  <div class="output"><pre>[info] started
+[warn] disk 91%
+[error] db timeout
+opening token: [
+streamed elements: 2
+strict: json: unknown field "mesage"
+{
+ "level": "debug",
+ "msg": "\u003chtml\u003e \u0026 stuff"
+}</pre></div>
+  <p>Two details from that output. <code>DisallowUnknownFields</code> caught a typo (<code>mesage</code>) that plain decoding would silently ignore: very useful for API inputs and config files. And the Encoder escaped <code>&lt;</code>, <code>&gt;</code> and <code>&amp;</code> as <code>\u003c</code> etc. so the JSON is safe to embed in HTML. Call <code>enc.SetEscapeHTML(false)</code> if you don't want that.</p>
+
+  <h3>Custom MarshalJSON and UnmarshalJSON</h3>
+  <p>If a type has a <code>MarshalJSON() ([]byte, error)</code> method, the json package calls it instead of using the default encoding. Likewise for <code>UnmarshalJSON([]byte) error</code>. This is how you make an integer enum appear as a readable word, or a <code>time.Duration</code> appear as <code>"1m30s"</code> instead of <code>90000000000</code>.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// Status is stored as an int but should look like a word in JSON.
+type Status int
+
+const (
+	Todo Status = iota
+	Doing
+	Done
+)
+
+var statusNames = []string{"todo", "doing", "done"}
+
+func (s Status) MarshalJSON() ([]byte, error) {
+	if int(s) &gt;= len(statusNames) {
+		return nil, fmt.Errorf("invalid status %d", s)
+	}
+	return json.Marshal(statusNames[s]) // reuse Marshal to get quoting right
+}
+
+func (s *Status) UnmarshalJSON(b []byte) error { // pointer receiver: we modify s
+	var name string
+	if err := json.Unmarshal(b, &amp;name); err != nil {
+		return fmt.Errorf("status must be a string: %w", err)
+	}
+	for i, n := range statusNames {
+		if strings.EqualFold(n, name) {
+			*s = Status(i)
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown status %q", name)
+}
+
+// Duration wraps time.Duration so JSON shows "1m30s" instead of nanoseconds.
+type Duration struct{ time.Duration }
+
+func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &amp;s); err != nil {
+		return err
+	}
+	v, err := time.ParseDuration(s)
+	d.Duration = v
+	return err
+}
+
+type Task struct {
+	Title    string   `json:"title"`
+	Status   Status   `json:"status"`
+	Estimate Duration `json:"estimate"`
+}
+
+func main() {
+	t := Task{Title: "write docs", Status: Doing, Estimate: Duration{90 * time.Second}}
+	b, _ := json.Marshal(t)
+	fmt.Println(string(b))
+
+	var back Task
+	err := json.Unmarshal([]byte(`{"title":"ship","status":"DONE","estimate":"2h15m"}`), &amp;back)
+	fmt.Printf("%+v err=%v\n", back, err)
+	fmt.Println("minutes:", back.Estimate.Minutes())
+
+	err = json.Unmarshal([]byte(`{"status":"blocked"}`), &amp;back)
+	fmt.Println("error:", err)
+}</code></pre></div>
+  <div class="output"><pre>{"title":"write docs","status":"doing","estimate":"1m30s"}
+{Title:ship Status:2 Estimate:2h15m0s} err=&lt;nil&gt;
+minutes: 135
+error: unknown status "blocked"</pre></div>
+
+  <div class="live" data-title="Trace a custom UnmarshalJSON">
+    <pre><code class="language-go">func (s *Status) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &amp;name); err != nil {
+		return fmt.Errorf("status must be a string: %w", err)
+	}
+	for i, n := range statusNames {
+		if strings.EqualFold(n, name) {
+			*s = Status(i)
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown status %q", name)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="b=`&quot;DONE&quot;`; *s=0 (todo)">While decoding the task, the json package reaches the <code>"status"</code> key, sees that <code>*Status</code> has an <code>UnmarshalJSON</code> method, and calls it with the <strong>raw</strong> JSON bytes, quotes included: <code>"DONE"</code>.</li>
+      <li data-lines="2-5" data-state="name=&quot;DONE&quot;">We reuse <code>json.Unmarshal</code> to turn the raw bytes into a Go string. This handles quotes and escape sequences for us. A number like <code>2</code> would fail here with a helpful wrapped error.</li>
+      <li data-lines="6-7" data-state="i=0; n=&quot;todo&quot;; match=false">Compare case-insensitively with <code>"todo"</code>. No match.</li>
+      <li data-lines="6-7" data-state="i=1; n=&quot;doing&quot;; match=false">No match with <code>"doing"</code>.</li>
+      <li data-lines="6-9" data-state="i=2; n=&quot;done&quot;; *s=2 (done)">Match. We write through the pointer: <code>*s = Status(2)</code>. That's why the method needs a <strong>pointer receiver</strong>: with a value receiver we'd only change a copy.</li>
+      <li data-lines="12" data-state="name=&quot;blocked&quot;; err=unknown status">For <code>"blocked"</code>, the loop finds nothing and we return an error. <code>json.Unmarshal</code> passes it straight back to the caller.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: infinite recursion</div><p>Inside <code>func (t Task) MarshalJSON()</code>, calling <code>json.Marshal(t)</code> calls your method again, forever, until the stack overflows. The trick is a local alias type with the same fields but no methods: <code>type plain Task; return json.Marshal(plain(t))</code>.</p></div>
+
+  <h2>encoding/csv</h2>
+  <p>CSV looks trivial until a field contains a comma, a quote or a newline. <code>encoding/csv</code> handles all the quoting rules (RFC 4180) so you don't have to. Every field comes back as a <code>string</code>; converting to numbers is up to you with <code>strconv</code>.</p>
+  <div class="live" data-title="Read CSV records until io.EOF, then write with quoting">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+)
+
+const input = `name,city,score
+Ada,London,91
+"Hopper, Grace",New York,88
+Linus,Helsinki,79
+`
+
+func main() {
+	r := csv.NewReader(strings.NewReader(input))
+	header, err := r.Read() // first row
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("header:", header)
+
+	total := 0
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		score, _ := strconv.Atoi(rec[2]) // CSV fields are always strings
+		total += score
+		fmt.Printf("%-14s %-9s %d\n", rec[0], rec[1], score)
+	}
+	fmt.Println("total:", total)
+
+	// Writing: quoting is handled for you.
+	w := csv.NewWriter(os.Stdout)
+	w.Write([]string{"id", "comment"})
+	w.Write([]string{"1", `she said "hi", then left`})
+	w.Flush()                         // csv.Writer is buffered too
+	if err := w.Error(); err != nil { // errors surface after Flush
+		panic(err)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20-25" data-state="header=[name city score]" data-out="header: [name city score]">The first <code>Read</code> returns the header row as a <code>[]string</code>. <code>csv.Reader</code> doesn't treat headers specially. It's just row 1.</li>
+      <li data-lines="27-29" data-state="total=0; rec=[Ada London 91]">We enter the loop. Every <code>Read</code> returns one record, with every field as a string.</li>
+      <li data-lines="36-38" data-state="score=91; total=91" data-out="Ada            London    91"><code>Atoi</code> turns <code>"91"</code> into a number. <code>%-14s</code> left-aligns in 14 columns.</li>
+      <li data-lines="29,36-38" data-state="rec=[Hopper, Grace|New York|88]; score=88; total=179" data-out="Hopper, Grace  New York  88">The quoted field <code>"Hopper, Grace"</code> comes back as <strong>one</strong> field with the comma inside and the quotes removed. Splitting on commas by hand would get this wrong.</li>
+      <li data-lines="29,36-38" data-state="rec=[Linus Helsinki 79]; score=79; total=258" data-out="Linus          Helsinki  79">Third record.</li>
+      <li data-lines="29-31" data-state="err=io.EOF; total=258">No more rows: <code>Read</code> returns <code>io.EOF</code>, our signal to <code>break</code>. Check it <em>before</em> the generic <code>err != nil</code>, or you would panic on a normal end.</li>
+      <li data-lines="40" data-state="total=258" data-out="total: 258">91 + 88 + 79.</li>
+      <li data-lines="43-45" data-state="buffered=2 rows">Both rows go into the writer's buffer. The comment contains a comma and double quotes, so the writer will quote it.</li>
+      <li data-lines="46-49" data-state="w.Error()=nil" data-out="id,comment\n1,&quot;she said &quot;&quot;hi&quot;&quot;, then left&quot;"><code>Flush</code> sends the rows out. Inner quotes are doubled (<code>""hi""</code>) and the field is wrapped in quotes. Write errors only show up through <code>w.Error()</code> after <code>Flush</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>header: [name city score]
+Ada            London    91
+Hopper, Grace  New York  88
+Linus          Helsinki  79
+total: 258
+id,comment
+1,"she said ""hi"", then left"</pre></div>
+  <p>Like <code>bufio.Writer</code>, <code>csv.Writer</code> buffers, so call <code>Flush()</code> and then check <code>w.Error()</code>. Useful reader settings: <code>r.Comma = ';'</code> for European spreadsheets, <code>r.FieldsPerRecord = -1</code> to allow ragged rows, and <code>r.ReuseRecord = true</code> to avoid an allocation per row on big files.</p>
+
+  <h2>time: instants, durations, formats and zones</h2>
+  <p>The <code>time</code> package has two core types:</p>
+  <ul>
+    <li><code>time.Time</code> is an <strong>instant</strong>: a specific moment, plus a location (time zone) used for display.</li>
+    <li><code>time.Duration</code> is a <strong>length</strong> of time, stored as an <code>int64</code> count of nanoseconds. Constants like <code>time.Second</code> and <code>time.Millisecond</code> make it readable: <code>90 * time.Second</code>.</li>
+  </ul>
+
+  <h3>The reference date: 2006-01-02 15:04:05</h3>
+  <p>Most languages format dates with codes like <code>%Y-%m-%d</code>. Go instead asks you to write <em>what one specific date would look like</em>. That date is:</p>
+  <div class="output" data-label="The reference time"><pre>Mon Jan 2 15:04:05 MST 2006</pre></div>
+  <p>It is easy to remember as the sequence <strong>1 2 3 4 5 6 7</strong>: month 1 (Jan), day 2, hour 3 (15 in 24-hour), minute 4, second 5, year 6 (2006), zone -7 (MST is UTC-7). To format as "day/month/year", you literally write <code>"02/01/2006"</code>.</p>
+  <table>
+    <thead><tr><th>Element</th><th>Layout token</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td>Year</td><td><code>2006</code> / <code>06</code></td><td>2026 / 26</td></tr>
+      <tr><td>Month</td><td><code>01</code> / <code>1</code> / <code>Jan</code> / <code>January</code></td><td>03 / 3 / Mar / March</td></tr>
+      <tr><td>Day</td><td><code>02</code> / <code>2</code> / <code>_2</code></td><td>07 / 7 / " 7"</td></tr>
+      <tr><td>Weekday</td><td><code>Mon</code> / <code>Monday</code></td><td>Sat / Saturday</td></tr>
+      <tr><td>Hour</td><td><code>15</code> (24h) / <code>03</code> / <code>3</code> (12h)</td><td>14 / 02 / 2</td></tr>
+      <tr><td>Minute / second</td><td><code>04</code> / <code>05</code></td><td>05 / 09</td></tr>
+      <tr><td>AM/PM</td><td><code>PM</code> / <code>pm</code></td><td>PM / pm</td></tr>
+      <tr><td>Fraction</td><td><code>.000</code> / <code>.999999</code></td><td>milliseconds / trimmed micros</td></tr>
+      <tr><td>Zone</td><td><code>MST</code> / <code>-0700</code> / <code>Z07:00</code></td><td>EST / -0500 / Z</td></tr>
+    </tbody>
+  </table>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	// A fixed instant so the output is reproducible.
+	t := time.Date(2026, time.March, 7, 14, 5, 9, 0, time.UTC)
+
+	// Layouts are written using the reference time: Mon Jan 2 15:04:05 MST 2006.
+	fmt.Println(t.Format(time.RFC3339))            // 2006-01-02T15:04:05Z07:00
+	fmt.Println(t.Format("2006-01-02"))            // ISO date
+	fmt.Println(t.Format("02/01/2006 15:04"))      // European style
+	fmt.Println(t.Format("Jan 2, 2006 at 3:04pm")) // 12-hour clock
+	fmt.Println(t.Format("Monday, 02-Jan-06"))
+	fmt.Println(t.Format(time.Kitchen), "|", t.Format(time.DateTime))
+
+	// Parsing uses the same layout language.
+	p, err := time.Parse("2006-01-02 15:04", "2026-12-25 08:30")
+	fmt.Println("parsed:", p, err)
+	_, err = time.Parse("2006-01-02", "2026-13-01")
+	fmt.Println("bad month:", err)
+
+	// Durations are int64 nanoseconds with nice helpers.
+	d := 90*time.Minute + 30*time.Second
+	fmt.Println("duration:", d, "| hours:", d.Hours())
+	dd, _ := time.ParseDuration("1h15m30.5s")
+	fmt.Println("parsed duration:", dd)
+
+	// Arithmetic.
+	later := t.Add(36 * time.Hour)
+	fmt.Println("later:", later.Format(time.DateTime))
+	fmt.Println("diff: ", later.Sub(t))
+	fmt.Println("next month:", t.AddDate(0, 1, 0).Format(time.DateOnly))
+	fmt.Println("before?", t.Before(later), "| equal?", t.Equal(later.Add(-36*time.Hour)))
+	fmt.Println("truncate to hour:", t.Truncate(time.Hour).Format(time.TimeOnly))
+
+	// Time zones.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		panic(err)
+	}
+	tokyo, _ := time.LoadLocation("Asia/Tokyo")
+	fmt.Println("New York:", t.In(ny).Format("2006-01-02 15:04 MST"))
+	fmt.Println("Tokyo:   ", t.In(tokyo).Format("2006-01-02 15:04 MST"))
+	local, _ := time.ParseInLocation(time.DateTime, "2026-03-07 09:05:09", ny)
+	fmt.Println("same instant?", local.Equal(t))
+
+	// Unix timestamps.
+	fmt.Println("unix:", t.Unix(), "| back:", time.Unix(t.Unix(), 0).UTC())
+}</code></pre></div>
+  <div class="output"><pre>2026-03-07T14:05:09Z
+2026-03-07
+07/03/2026 14:05
+Mar 7, 2026 at 2:05pm
+Saturday, 07-Mar-26
+2:05PM | 2026-03-07 14:05:09
+parsed: 2026-12-25 08:30:00 +0000 UTC &lt;nil&gt;
+bad month: parsing time "2026-13-01": month out of range
+duration: 1h30m30s | hours: 1.5083333333333333
+parsed duration: 1h15m30.5s
+later: 2026-03-09 02:05:09
+diff:  36h0m0s
+next month: 2026-04-07
+before? true | equal? true
+truncate to hour: 14:00:00
+New York: 2026-03-07 09:05 EST
+Tokyo:    2026-03-07 23:05 JST
+same instant? true
+unix: 1772892309 | back: 2026-03-07 14:05:09 +0000 UTC</pre></div>
+
+  <div class="live" data-title="Format and arithmetic, step by step">
+    <pre><code class="language-go">t := time.Date(2026, time.March, 7, 14, 5, 9, 0, time.UTC)
+fmt.Println(t.Format("2006-01-02"))
+fmt.Println(t.Format("02/01/2006 15:04"))
+fmt.Println(t.Format("Jan 2, 2006 at 3:04pm"))
+later := t.Add(36 * time.Hour)
+fmt.Println(later.Sub(t))</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="t=2026-03-07 14:05:09 UTC">Build a fixed instant. <code>time.Date</code> takes year, month, day, hour, minute, second, nanosecond and a location.</li>
+      <li data-lines="2" data-state="layout=2006-01-02" data-out="2026-03-07"><code>Format</code> scans the layout: "2006" → year, "01" → two-digit month, "02" → two-digit day. The dashes are copied as-is.</li>
+      <li data-lines="3" data-state="layout=02/01/2006 15:04" data-out="07/03/2026 14:05">Same tokens, different order. "15" is the 24-hour clock.</li>
+      <li data-lines="4" data-state="layout=Jan 2, 2006 at 3:04pm" data-out="Mar 7, 2026 at 2:05pm">"Jan" → short month name, "2" → day without padding, "3" → 12-hour hour, "pm" → lower-case am/pm. The words "at" are not tokens, so they're copied.</li>
+      <li data-lines="5" data-state="later=2026-03-09 02:05:09 UTC">Add a <code>Duration</code> to a <code>Time</code> to get a new <code>Time</code>. Times are values; <code>t</code> itself is unchanged.</li>
+      <li data-lines="6" data-state="later.Sub(t)=36h" data-out="36h0m0s">Subtracting two Times gives a Duration. Its <code>String()</code> method prints <code>36h0m0s</code>.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotchas with time</div><p>Compare instants with <code>t1.Equal(t2)</code>, not <code>==</code>: <code>==</code> also compares the location and the monotonic reading, so two equal moments can be "not equal". <code>time.Parse</code> without zone info assumes <strong>UTC</strong>; use <code>time.ParseInLocation</code> for local times. <code>AddDate(0, 1, 0)</code> on January 31 gives March 3 (it normalizes February 31). And <code>time.LoadLocation</code> needs the tz database: in a minimal <code>scratch</code> Docker image, add <code>import _ "time/tzdata"</code> to embed it.</p></div>
+
+  <h3>The monotonic clock</h3>
+  <p>Your computer's wall clock can jump: NTP corrects it, someone changes it, daylight saving shifts it. If you measured elapsed time with wall clock readings, you could get negative durations. So <code>time.Now()</code> records <em>two</em> readings: the wall clock (for telling time) and a <strong>monotonic</strong> clock that only ever moves forward (for measuring time). <code>time.Since</code> and <code>t.Sub</code> use the monotonic reading when both values have one. You can see it in the printed value as <code>m=+...</code>:</p>
+  <div class="code" data-file="mono.go"><pre><code class="language-go">//go:build ignore
+
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+	fmt.Println(start) // note the "m=+0.000..." suffix: the monotonic reading
+
+	time.Sleep(25 * time.Millisecond)
+	elapsed := time.Since(start) // uses the monotonic clock: safe from clock jumps
+	fmt.Println("elapsed &gt;= 25ms:", elapsed &gt;= 25*time.Millisecond)
+	fmt.Println("rounded:", elapsed.Round(time.Millisecond))
+
+	wall := start.Round(0) // Round(0) strips the monotonic reading
+	fmt.Println(wall)
+}</code></pre></div>
+  <div class="output" data-label="Output (your times will differ)"><pre>2026-10-16 23:25:41.756585 +0530 IST m=+0.000140584
+elapsed &gt;= 25ms: true
+rounded: 26ms
+2026-10-16 23:25:41.756585 +0530 IST</pre></div>
+  <p>The rule of thumb: <strong>use <code>time.Now()</code> + <code>time.Since()</code> to measure</strong>, and it just works. Values that went through serialization (JSON, a database) lose the monotonic part, which is fine since they're for telling time anyway.</p>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">You want to print <code>16 Oct 2026, 9:30 AM</code>. Which layout?</div>
+    <div class="quiz-opts"><button><code>"DD Mon YYYY, H:MM AM"</code></button><button><code>"2 Jan 2006, 3:04 PM"</code></button><button><code>"02 Jan 2006, 15:04 PM"</code></button><button><code>"2 Oct 2026, 9:30 AM"</code></button></div>
+    <div class="quiz-explain">Write the reference date in the shape you want: day <code>2</code> (no padding), <code>Jan</code>, <code>2006</code>, 12-hour <code>3</code>, minutes <code>04</code>, and <code>PM</code> for the AM/PM marker. Option C uses <code>15</code> (24-hour) and would print "09:30 AM".</div>
+  </div>
+
+  <h2>flag: command-line interfaces</h2>
+  <p>The <code>flag</code> package parses arguments like <code>-name=Ada -n 3 -verbose</code>. Each definition gives a name, a default value and a help string. You get back a <em>pointer</em> that is filled in when you call <code>flag.Parse()</code>. Whatever is left over (positional arguments) is in <code>flag.Args()</code>. You get <code>-h</code>/<code>-help</code> output for free.</p>
+  <div class="live" data-title="Run 2: parse flags, then the positional args">
+    <pre><code class="language-go">package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
+
+func main() {
+	// Each flag function returns a POINTER to the value.
+	name := flag.String("name", "world", "who to greet")
+	times := flag.Int("n", 1, "how many times")
+	shout := flag.Bool("shout", false, "upper-case the greeting")
+	wait := flag.Duration("wait", 0, "pause between greetings (e.g. 200ms)")
+
+	// Or bind to an existing variable with the *Var form.
+	var sep string
+	flag.StringVar(&amp;sep, "sep", "!", "punctuation to end with")
+
+	flag.Usage = func() { // custom help text
+		fmt.Fprintf(os.Stderr, "usage: greet [flags] [extra words...]\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse() // must be called before reading values
+
+	msg := fmt.Sprintf("hello, %s%s", *name, sep)
+	if *shout {
+		msg = strings.ToUpper(msg)
+	}
+	for i := range *times {
+		if i &gt; 0 {
+			time.Sleep(*wait)
+		}
+		fmt.Println(msg)
+	}
+	fmt.Println("positional args:", flag.Args())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13-16" data-state="*name=&quot;world&quot;; *times=1; *shout=false; *wait=0s">We trace <code>greet -name=Gopher -n 2 -shout extra words</code>. Each <code>flag.X</code> call registers a flag and returns a <strong>pointer</strong> holding the default for now.</li>
+      <li data-lines="19-20" data-state="sep=&quot;!&quot;"><code>StringVar</code> binds the flag to an existing variable instead. It is set to the default right away.</li>
+      <li data-lines="22-25" data-state="flag.Usage=custom">We replace the help printer. It only runs on <code>-h</code> or a parse error.</li>
+      <li data-lines="26" data-state="*name=&quot;Gopher&quot;; *times=2; *shout=true; sep=&quot;!&quot;; flag.Args()=[extra words]"><code>Parse</code> walks <code>os.Args[1:]</code>, writes through the pointers, and <strong>stops at the first non-flag</strong> (<code>extra</code>). Everything after that is positional. A bool flag takes no separate value.</li>
+      <li data-lines="28-31" data-state="msg=&quot;HELLO, GOPHER!&quot;">We dereference to read the values: <code>"hello, Gopher!"</code>, then <code>*shout</code> upper-cases it. Reading before <code>Parse</code> would have given the defaults.</li>
+      <li data-lines="32-33,36" data-state="i=0" data-out="HELLO, GOPHER!"><code>range *times</code> counts 0 and 1. On the first pass there is no sleep.</li>
+      <li data-lines="32-36" data-state="i=1" data-out="HELLO, GOPHER!">Second pass: sleep for <code>*wait</code> (0 here, so instant), then print again.</li>
+      <li data-lines="38" data-state="flag.Args()=[extra words]" data-out="positional args: [extra words]"><code>flag.Args()</code> returns what <code>Parse</code> left over.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Several runs"><pre>$ greet
+hello, world!
+positional args: []
+
+$ greet -name=Gopher -n 2 -shout extra words
+HELLO, GOPHER!
+HELLO, GOPHER!
+positional args: [extra words]
+
+$ greet --sep=? -name Ada
+hello, Ada?
+positional args: []
+
+$ greet -h
+usage: greet [flags] [extra words...]
+  -n int
+    	how many times (default 1)
+  -name string
+    	who to greet (default "world")
+  -sep string
+    	punctuation to end with (default "!")
+  -shout
+    	upper-case the greeting
+  -wait duration
+    	pause between greetings (e.g. 200ms)
+exit status 0
+
+$ greet -n=abc
+invalid value "abc" for flag -n: parse error
+usage: greet [flags] [extra words...]</pre></div>
+  <p>Both <code>-flag</code> and <code>--flag</code> work, and so do <code>-n 2</code> and <code>-n=2</code>. Boolean flags must use <code>=</code> to pass false (<code>-shout=false</code>), because <code>-shout false</code> would treat "false" as a positional argument. Parsing stops at the first non-flag argument.</p>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>In anything bigger than a script, don't use the global <code>flag.CommandLine</code>. Create a <code>flag.NewFlagSet(name, flag.ContinueOnError)</code> inside a <code>run(args []string, ...)</code> function. Now your CLI is testable (pass args from a test), supports subcommands (one FlagSet per command, like <code>git commit</code> / <code>git push</code>), and never calls <code>os.Exit</code> behind your back. The tool at the end of this chapter does exactly this. Reach for a library like cobra only when you really need nested commands, shell completion and the like.</p></div>
+
+  <h2>log/slog: structured logging</h2>
+  <p>Classic logging produces sentences: <code>"user 7 logged in from 10.0.0.1"</code>. That's fine for humans, but hard for machines to search ("show me all logins for user 7"). <strong>Structured logging</strong> logs a message plus key/value <em>attributes</em>, and a <em>handler</em> renders them as text or JSON. Log systems like Loki, Datadog or CloudWatch can then filter on fields.</p>
+  <p><code>log/slog</code> (Go 1.21+) is the standard way to do this. The main ideas:</p>
+  <ul>
+    <li><strong>Levels:</strong> <code>Debug</code>, <code>Info</code>, <code>Warn</code>, <code>Error</code>. A handler drops records below its minimum level.</li>
+    <li><strong>Attributes:</strong> alternating key/value pairs (<code>"port", 8080</code>) or typed helpers (<code>slog.Int("port", 8080)</code>) which avoid mistakes and allocations.</li>
+    <li><strong>Handlers:</strong> <code>TextHandler</code> (<code>key=value</code>) and <code>JSONHandler</code>. You can write your own.</li>
+    <li><strong><code>logger.With(...)</code></strong> returns a child logger that adds fields to every line, like a request ID.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"time"
+)
+
+// User implements slog.LogValuer so secrets never reach the logs.
+type User struct {
+	ID       int
+	Email    string
+	Password string
+}
+
+func (u User) LogValue() slog.Value {
+	return slog.GroupValue(slog.Int("id", u.ID), slog.String("email", u.Email))
+}
+
+func main() {
+	// Text handler: human friendly, good for local development.
+	// ReplaceAttr drops the time key so this demo's output is stable.
+	noTime := func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey &amp;&amp; len(groups) == 0 {
+			return slog.Attr{}
+		}
+		return a
+	}
+	text := slog.New(slog.NewTextHandler(os.Stdout, &amp;slog.HandlerOptions{ReplaceAttr: noTime}))
+	text.Info("server starting", "port", 8080, "env", "dev")
+
+	// JSON handler: machine friendly, what you ship to production.
+	level := new(slog.LevelVar) // can be changed at runtime
+	level.Set(slog.LevelDebug)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &amp;slog.HandlerOptions{
+		Level:       level,
+		ReplaceAttr: noTime,
+	}))
+	slog.SetDefault(logger) // package-level slog.Info etc. now use it
+
+	slog.Debug("cache warmed", "entries", 1200)
+	slog.Info("request done",
+		slog.String("method", "GET"),
+		slog.Int("status", 200),
+		slog.Duration("took", 42*time.Millisecond),
+	)
+
+	// With: attach fields once, they appear on every line.
+	reqLog := logger.With("request_id", "req-7f3a")
+	reqLog.Warn("slow query", "table", "orders", "ms", 950)
+
+	// Groups nest attributes under a key.
+	reqLog.Error("payment failed", slog.Group("card", "brand", "visa", "last4", "4242"))
+
+	// LogValuer in action: the password is never printed.
+	slog.Info("login", "user", User{ID: 7, Email: "ada@example.com", Password: "hunter2"})
+
+	// Raise the level at runtime: Debug lines now disappear.
+	level.Set(slog.LevelWarn)
+	slog.Info("you will not see this")
+	slog.LogAttrs(context.Background(), slog.LevelWarn, "still visible", slog.Bool("fast_path", true))
+}</code></pre></div>
+  <div class="output"><pre>level=INFO msg="server starting" port=8080 env=dev
+{"level":"DEBUG","msg":"cache warmed","entries":1200}
+{"level":"INFO","msg":"request done","method":"GET","status":200,"took":42000000}
+{"level":"WARN","msg":"slow query","request_id":"req-7f3a","table":"orders","ms":950}
+{"level":"ERROR","msg":"payment failed","request_id":"req-7f3a","card":{"brand":"visa","last4":"4242"}}
+{"level":"INFO","msg":"login","user":{"id":7,"email":"ada@example.com"}}
+{"level":"WARN","msg":"still visible","fast_path":true}</pre></div>
+  <p>Real output includes a <code>"time"</code> field on each line; we removed it with <code>ReplaceAttr</code> so this page shows stable output. Notice how <code>LogValue</code> on <code>User</code> kept the password out of the logs, and how the Info line disappeared after we raised the level at runtime with a <code>LevelVar</code>.</p>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Pick key names once and stick to them across services (<code>request_id</code>, <code>user_id</code>, <code>duration_ms</code>): dashboards and alerts depend on them. Pass a <code>*slog.Logger</code> into your components (or use <code>logger.With</code> per request) instead of building messages with <code>fmt.Sprintf</code>. And never log secrets: implement <code>LogValuer</code> on types that hold them.</p></div>
+  <div class="callout tip"><p>Mismatched pairs like <code>slog.Info("x", "key")</code> produce a <code>!BADKEY</code> attribute. <code>go vet</code> has a checker for this that runs by default, so keep vet in CI.</p></div>
+
+  <h2>A grab-bag of useful packages</h2>
+
+  <h3>math/rand/v2</h3>
+  <p>For non-cryptographic randomness (shuffling, jitter, sampling, simulations), use <code>math/rand/v2</code>. The top-level functions are automatically seeded and safe to call from many goroutines. Names follow a clear pattern: <code>IntN(n)</code> returns a value in <code>[0, n)</code>. The generic <code>rand.N</code> works with any integer type, including <code>time.Duration</code>. For reproducible sequences, create your own generator with a fixed seed.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math/rand/v2"
+	"time"
+)
+
+func main() {
+	// Top-level functions are auto-seeded and safe for concurrent use.
+	fmt.Println("die roll 1-6:", rand.IntN(6)+1)
+	fmt.Println("float in [0,1):", rand.Float64() &lt; 1)
+	fmt.Println("jitter:", rand.N(100*time.Millisecond) &lt; 100*time.Millisecond) // generic N works with Duration
+
+	// For reproducible results (tests, simulations) build your own seeded source.
+	r := rand.New(rand.NewPCG(42, 1024))
+	fmt.Println("seeded:", r.IntN(100), r.IntN(100), r.IntN(100))
+	r2 := rand.New(rand.NewPCG(42, 1024))
+	fmt.Println("same seed:", r2.IntN(100), r2.IntN(100), r2.IntN(100))
+
+	deck := []string{"A", "K", "Q", "J", "10"}
+	r.Shuffle(len(deck), func(i, j int) { deck[i], deck[j] = deck[j], deck[i] })
+	fmt.Println("shuffled:", deck)
+	fmt.Println("perm:", r.Perm(5))
+}</code></pre></div>
+  <div class="output" data-label="Output (first three lines vary per run)"><pre>die roll 1-6: 1
+float in [0,1): true
+jitter: true
+seeded: 94 49 90
+same seed: 94 49 90
+shuffled: [10 K A J Q]
+perm: [2 1 0 4 3]</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: not for secrets</div><p><code>math/rand</code> is predictable by design. For tokens, passwords, session IDs or keys, use <code>crypto/rand</code> (for example <code>crypto/rand.Text()</code> in Go 1.24+ for a random string). If you see the old <code>rand.Seed(time.Now().UnixNano())</code>, you can delete it: v1's global source has been auto-seeded since Go 1.20.</p></div>
+
+  <h3>Sorting: slices vs sort</h3>
+  <p>Since Go 1.21, the <code>slices</code> package is the preferred way to sort. <code>slices.Sort</code> works on ordered types; <code>slices.SortFunc</code> takes a comparison function that returns negative, zero or positive. <code>cmp.Compare</code> builds those for you and <code>cmp.Or</code> chains "sort by this, then by that". The older <code>sort</code> package still works and you'll see it in existing code.</p>
+  <div class="live" data-title="Watch three sorts and two searches">
+    <pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+)
+
+type Player struct {
+	Name  string
+	Score int
+}
+
+func main() {
+	ps := []Player{{"ana", 70}, {"bo", 90}, {"cy", 70}, {"di", 85}}
+
+	// Modern way: slices.SortFunc with cmp.Compare. Sort by score desc, then name.
+	slices.SortFunc(ps, func(a, b Player) int {
+		return cmp.Or(
+			cmp.Compare(b.Score, a.Score), // descending
+			strings.Compare(a.Name, b.Name),
+		)
+	})
+	fmt.Println(ps)
+
+	// Stable sort keeps the original order of equal elements.
+	words := []string{"go", "is", "fun", "to", "write"}
+	slices.SortStableFunc(words, func(a, b string) int { return cmp.Compare(len(a), len(b)) })
+	fmt.Println(words)
+
+	// Older but still common: sort.Slice with a less function.
+	nums := []int{5, 2, 8, 1}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] &lt; nums[j] })
+	fmt.Println(nums, sort.IntsAreSorted(nums))
+
+	// Binary search on sorted data.
+	idx, found := slices.BinarySearch(nums, 5)
+	fmt.Println("5 at", idx, found)
+	i := sort.SearchInts(nums, 6) // insertion point
+	fmt.Println("6 would go at", i)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17" data-state="ps=[{ana 70} {bo 90} {cy 70} {di 85}]">Four players. Two of them tie on 70.</li>
+      <li data-lines="20-24" data-state="cmp(ana,bo)=+1 (bo first)">The comparator returns negative / zero / positive. <code>cmp.Compare(b.Score, a.Score)</code> has its arguments swapped, so higher scores sort first. <code>cmp.Or</code> returns the first non-zero result.</li>
+      <li data-lines="21-23" data-state="cmp(ana,cy)=0 then -1">For <code>ana</code> vs <code>cy</code> the scores tie (0), so <code>cmp.Or</code> falls through to the name comparison: <code>"ana" &lt; "cy"</code> gives −1.</li>
+      <li data-lines="26" data-state="ps=[{bo 90} {di 85} {ana 70} {cy 70}]" data-out="[{bo 90} {di 85} {ana 70} {cy 70}]">Sorted in place: score descending, then name ascending.</li>
+      <li data-lines="29-31" data-state="words=[go is to fun write]" data-out="[go is to fun write]">We sort by length only. The three 2-letter words are "equal", and the <strong>stable</strong> sort keeps their original order: go, is, to.</li>
+      <li data-lines="34-36" data-state="nums=[1 2 5 8]" data-out="[1 2 5 8] true"><code>sort.Slice</code> takes a <em>less</em> function over <strong>indices</strong>, and the closure reads <code>nums</code> directly.</li>
+      <li data-lines="39-40" data-state="idx=2; found=true" data-out="5 at 2 true">Binary search needs sorted input. It halves the range each step and finds 5 at index 2.</li>
+      <li data-lines="41-42" data-state="i=3" data-out="6 would go at 3">6 is missing, so <code>SearchInts</code> returns the <strong>insertion point</strong>: the index of the first element ≥ 6, which is 8 at index 3.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[{bo 90} {di 85} {ana 70} {cy 70}]
+[go is to fun write]
+[1 2 5 8] true
+5 at 2 true
+6 would go at 3</pre></div>
+
+  <h3>os/exec: running other programs</h3>
+  <p><code>exec.Command(name, args...)</code> runs another program. Arguments are passed straight to the program, <strong>not through a shell</strong>, so there's no shell injection and no glob expansion: the "dangerous" string below is printed literally. Use <code>exec.CommandContext</code> so a hung child process gets killed when your timeout fires.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+func main() {
+	// Output runs the command and returns stdout.
+	out, err := exec.Command("echo", "hello", "from", "a", "child").Output()
+	fmt.Printf("out=%q err=%v\n", out, err)
+
+	// Arguments are passed directly, NOT through a shell: no injection, no globbing.
+	out, _ = exec.Command("echo", "$HOME; rm -rf /").Output()
+	fmt.Printf("literal: %s", out)
+
+	// Feed stdin and capture stdout/stderr separately.
+	cmd := exec.Command("tr", "a-z", "A-Z")
+	cmd.Stdin = strings.NewReader("shout please\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &amp;stdout, &amp;stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Println("run failed:", err)
+	}
+	fmt.Print("tr: ", stdout.String())
+
+	// Non-zero exit codes come back as *exec.ExitError.
+	err = exec.Command("ls", "/definitely/not/here").Run()
+	var ee *exec.ExitError
+	if errors.As(err, &amp;ee) {
+		fmt.Println("exit code:", ee.ExitCode())
+	}
+
+	// CommandContext kills the process when the context is done.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = exec.CommandContext(ctx, "sleep", "5").Run()
+	fmt.Println("sleep:", err, "| ctx:", ctx.Err())
+
+	// LookPath finds a binary on $PATH.
+	_, err = exec.LookPath("no-such-binary-xyz")
+	fmt.Println("lookpath:", err)
+}</code></pre></div>
+  <div class="output"><pre>out="hello from a child\n" err=&lt;nil&gt;
+literal: $HOME; rm -rf /
+tr: SHOUT PLEASE
+exit code: 1
+sleep: signal: killed | ctx: context deadline exceeded
+lookpath: exec: "no-such-binary-xyz": executable file not found in $PATH</pre></div>
+  <div class="callout danger"><div class="callout-title">Danger</div><p>Never do <code>exec.Command("sh", "-c", "convert " + userInput)</code>. That re-introduces shell injection. Pass each argument separately. If you truly need a shell pipeline, build it in Go with <code>cmd.StdoutPipe()</code> instead.</p></div>
+
+  <h3>embed: ship files inside your binary</h3>
+  <p>A Go program compiles to a single binary. With <code>//go:embed</code> you can bake static files (HTML templates, SQL migrations, default configs, a web UI) into that binary at build time, so deployment stays "copy one file". The directive goes right above a package-level variable of type <code>string</code>, <code>[]byte</code> or <code>embed.FS</code>.</p>
+  <div class="code" data-file="project layout"><pre><code class="language-bash">embed/
+├── main.go
+├── version.txt
+├── static/
+│   ├── app.css
+│   └── index.html
+└── templates/
+    └── welcome.tmpl</code></pre></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"embed"
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+	"text/template"
+)
+
+//go:embed version.txt
+var version string // a single file as a string
+
+//go:embed static
+var static embed.FS // a whole directory as a read-only file system
+
+//go:embed templates/*.tmpl
+var tmplFS embed.FS
+
+func main() {
+	fmt.Println("version:", strings.TrimSpace(version))
+
+	fs.WalkDir(static, ".", func(path string, d fs.DirEntry, err error) error {
+		if !d.IsDir() {
+			b, _ := static.ReadFile(path)
+			fmt.Printf("%-18s %d bytes\n", path, len(b))
+		}
+		return nil
+	})
+
+	t := template.Must(template.ParseFS(tmplFS, "templates/*.tmpl"))
+	t.ExecuteTemplate(os.Stdout, "welcome.tmpl", "Gopher")
+}</code></pre></div>
+  <div class="output"><pre>version: v1.4.2
+static/app.css     25 bytes
+static/index.html  37 bytes
+Hi Gopher, welcome!</pre></div>
+  <p>An <code>embed.FS</code> implements <code>fs.FS</code>, so it works with <code>fs.WalkDir</code>, <code>template.ParseFS</code> and <code>http.FileServerFS</code>. Paths inside it always use forward slashes. Files starting with <code>.</code> or <code>_</code> are excluded from directory embeds unless you use the <code>all:</code> prefix (<code>//go:embed all:static</code>).</p>
+
+  <h2>Putting it together: a real CLI tool</h2>
+  <p>Let's build <code>logq</code>, a small tool that reads newline-delimited JSON logs (like the ones slog produces) and prints a summary. It uses most of this chapter: <code>flag</code> for options, <code>os</code> for files and exit codes, <code>io.MultiReader</code> to treat several files as one stream, <code>bufio.Scanner</code> for lines, <code>encoding/json</code> for parsing, <code>time</code> for filtering, <code>slog</code> for its own warnings on stderr, <code>slices</code>/<code>maps</code> for sorting, and a buffered writer for output.</p>
+  <p>Design goals that make it production-shaped:</p>
+  <ul>
+    <li><strong>Data to stdout, diagnostics to stderr.</strong> So <code>logq app.log &gt; report.txt</code> doesn't mix warnings into the report.</li>
+    <li><strong>A <code>run</code> function with injected I/O.</strong> <code>main</code> is three lines. Everything else takes <code>args</code>, <code>stdin</code>, <code>stdout</code>, <code>stderr</code> as parameters, so tests can drive it.</li>
+    <li><strong>Exit codes.</strong> 0 on success, 1 on error, so it composes in shell scripts.</li>
+    <li><strong>Tolerant input.</strong> Bad lines are counted and reported, not fatal.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">// logq summarizes newline-delimited JSON logs.
+//
+//	usage: logq [-level warn] [-after 2026-10-16T09:00:00Z] [-json] [file ...]
+package main
+
+import (
+	"bufio"
+	"cmp"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"os"
+	"slices"
+	"strings"
+	"time"
+)
+
+type entry struct {
+	Time  time.Time `json:"time"`
+	Level string    `json:"level"`
+	Msg   string    `json:"msg"`
+}
+
+type summary struct {
+	Lines    int            `json:"lines"`
+	Matched  int            `json:"matched"`
+	Skipped  int            `json:"skipped"`
+	ByLevel  map[string]int `json:"by_level"`
+	TopMsgs  []msgCount     `json:"top_messages"`
+	First    time.Time      `json:"first,omitzero"`
+	Last     time.Time      `json:"last,omitzero"`
+	Duration string         `json:"span,omitempty"`
+}
+
+type msgCount struct {
+	Msg   string `json:"msg"`
+	Count int    `json:"count"`
+}
+
+var rank = map[string]int{"debug": 0, "info": 1, "warn": 2, "error": 3}
+
+func main() {
+	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "logq:", err)
+		os.Exit(1)
+	}
+}
+
+// run holds all the logic so it is testable: no globals, no os.Exit.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("logq", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	minLevel := fs.String("level", "debug", "minimum level: debug|info|warn|error")
+	after := fs.String("after", "", "only entries after this RFC3339 time")
+	asJSON := fs.Bool("json", false, "print the summary as JSON")
+	top := fs.Int("top", 3, "how many top messages to show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	minRank, ok := rank[strings.ToLower(*minLevel)]
+	if !ok {
+		return fmt.Errorf("unknown level %q", *minLevel)
+	}
+	var cutoff time.Time
+	if *after != "" {
+		t, err := time.Parse(time.RFC3339, *after)
+		if err != nil {
+			return fmt.Errorf("bad -after: %w", err)
+		}
+		cutoff = t
+	}
+
+	log := slog.New(slog.NewTextHandler(stderr, &amp;slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	// Inputs: named files, or stdin when none are given.
+	var readers []io.Reader
+	for _, name := range fs.Args() {
+		f, err := os.Open(name)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		readers = append(readers, f)
+	}
+	if len(readers) == 0 {
+		readers = append(readers, stdin)
+	}
+
+	s := summary{ByLevel: map[string]int{}}
+	counts := map[string]int{}
+	sc := bufio.NewScanner(io.MultiReader(readers...))
+	for sc.Scan() {
+		s.Lines++
+		var e entry
+		if err := json.Unmarshal(sc.Bytes(), &amp;e); err != nil {
+			s.Skipped++
+			log.Warn("skipping bad line", "line", s.Lines, "err", err)
+			continue
+		}
+		if rank[e.Level] &lt; minRank || (!cutoff.IsZero() &amp;&amp; !e.Time.After(cutoff)) {
+			continue
+		}
+		s.Matched++
+		s.ByLevel[e.Level]++
+		counts[e.Msg]++
+		if s.First.IsZero() || e.Time.Before(s.First) {
+			s.First = e.Time
+		}
+		if e.Time.After(s.Last) {
+			s.Last = e.Time
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("reading input: %w", err)
+	}
+	if s.Matched == 0 {
+		return errors.New("no entries matched")
+	}
+
+	for _, m := range slices.Sorted(maps.Keys(counts)) {
+		s.TopMsgs = append(s.TopMsgs, msgCount{m, counts[m]})
+	}
+	slices.SortStableFunc(s.TopMsgs, func(a, b msgCount) int { return cmp.Compare(b.Count, a.Count) })
+	s.TopMsgs = s.TopMsgs[:min(*top, len(s.TopMsgs))]
+	s.Duration = s.Last.Sub(s.First).String()
+
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(s)
+	}
+	w := bufio.NewWriter(stdout)
+	defer w.Flush()
+	fmt.Fprintf(w, "lines=%d matched=%d skipped=%d span=%s\n", s.Lines, s.Matched, s.Skipped, s.Duration)
+	for _, lvl := range []string{"debug", "info", "warn", "error"} {
+		if n := s.ByLevel[lvl]; n &gt; 0 {
+			fmt.Fprintf(w, "  %-6s %3d %s\n", lvl, n, strings.Repeat("#", n))
+		}
+	}
+	fmt.Fprintln(w, "top messages:")
+	for _, mc := range s.TopMsgs {
+		fmt.Fprintf(w, "  %3d  %s\n", mc.Count, mc.Msg)
+	}
+	return nil
+}</code></pre></div>
+  <p>A sample input file, including one broken line:</p>
+  <div class="code" data-file="app.log"><pre><code class="language-json">{"time":"2026-10-16T09:00:01Z","level":"info","msg":"server started"}
+{"time":"2026-10-16T09:00:05Z","level":"debug","msg":"cache warm"}
+{"time":"2026-10-16T09:01:10Z","level":"info","msg":"GET /tasks"}
+{"time":"2026-10-16T09:01:12Z","level":"warn","msg":"slow query"}
+{"time":"2026-10-16T09:02:00Z","level":"info","msg":"GET /tasks"}
+this line is not json
+{"time":"2026-10-16T09:03:30Z","level":"error","msg":"db timeout"}
+{"time":"2026-10-16T09:04:00Z","level":"warn","msg":"slow query"}
+{"time":"2026-10-16T09:05:45Z","level":"info","msg":"GET /tasks"}</code></pre></div>
+  <p>And some real runs:</p>
+  <div class="output" data-label="Terminal"><pre>$ go build -o logq . &amp;&amp; ./logq app.log
+level=WARN msg="skipping bad line" line=6 err="invalid character 'h' in literal true (expecting 'r')"
+lines=9 matched=8 skipped=1 span=5m44s
+  debug    1 #
+  info     4 ####
+  warn     2 ##
+  error    1 #
+top messages:
+    3  GET /tasks
+    2  slow query
+    1  cache warm
+
+$ ./logq -level warn -json app.log 2&gt;/dev/null
+{
+  "lines": 9,
+  "matched": 3,
+  "skipped": 1,
+  "by_level": {
+    "error": 1,
+    "warn": 2
+  },
+  "top_messages": [
+    {
+      "msg": "slow query",
+      "count": 2
+    },
+    {
+      "msg": "db timeout",
+      "count": 1
+    }
+  ],
+  "first": "2026-10-16T09:01:12Z",
+  "last": "2026-10-16T09:04:00Z",
+  "span": "2m48s"
+}
+
+$ cat app.log | ./logq -after 2026-10-16T09:02:00Z -top 1 2&gt;/dev/null
+lines=9 matched=3 skipped=1 span=2m15s
+  info     1 #
+  warn     1 #
+  error    1 #
+top messages:
+    1  GET /tasks
+
+$ ./logq -level fatal app.log; echo "exit=$?"
+logq: unknown level "fatal"
+exit=1</pre></div>
+  <p>Because all the logic lives in <code>run</code>, testing is simple. No subprocesses, no temp files:</p>
+  <div class="code" data-file="main_test.go"><pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestRunCountsLevels(t *testing.T) {
+	in := strings.NewReader(`{"time":"2026-01-01T00:00:00Z","level":"info","msg":"a"}
+{"time":"2026-01-01T00:00:01Z","level":"error","msg":"b"}
+`)
+	var out, errOut bytes.Buffer
+	if err := run([]string{"-level", "info"}, in, &amp;out, &amp;errOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "matched=2") {
+		t.Errorf("unexpected output:\n%s", out.String())
+	}
+}
+
+func TestRunRejectsBadLevel(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := run([]string{"-level", "loud"}, strings.NewReader(""), &amp;out, &amp;errOut)
+	if err == nil || !strings.Contains(err.Error(), "unknown level") {
+		t.Fatalf("want unknown level error, got %v", err)
+	}
+}</code></pre></div>
+  <div class="output" data-label="go test -v"><pre>=== RUN   TestRunCountsLevels
+--- PASS: TestRunCountsLevels (0.00s)
+=== RUN   TestRunRejectsBadLevel
+--- PASS: TestRunRejectsBadLevel (0.00s)
+PASS
+ok  	example.com/ch16/tool	1.381s</pre></div>
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of <code>main</code> as the power plug and <code>run</code> as the appliance. The plug touches the real world (<code>os.Args</code>, <code>os.Stdout</code>, <code>os.Exit</code>). The appliance only knows about the interfaces it's handed. You can test an appliance on the bench without wiring it into the house.</p></div>
+
+  <h3>Practice</h3>
+  <details class="exercise">
+    <summary>Exercise 1: a word-frequency counter</summary>
+    <p>Write a program that reads text from stdin and prints the 3 most common words (lower-cased) with their counts, most common first, breaking ties alphabetically. Hint: <code>bufio.Scanner</code> with <code>bufio.ScanWords</code>, a <code>map[string]int</code>, and <code>slices.SortFunc</code> with <code>cmp.Or</code>.</p>
+    <div class="solution-label">Solution</div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"cmp"
+	"fmt"
+	"os"
+	"slices"
+	"strings"
+)
+
+type wc struct {
+	word  string
+	count int
+}
+
+func main() {
+	counts := map[string]int{}
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Split(bufio.ScanWords)
+	for sc.Scan() {
+		counts[strings.ToLower(sc.Text())]++
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	list := make([]wc, 0, len(counts))
+	for w, c := range counts {
+		list = append(list, wc{w, c})
+	}
+	slices.SortFunc(list, func(a, b wc) int {
+		return cmp.Or(cmp.Compare(b.count, a.count), strings.Compare(a.word, b.word))
+	})
+	for _, x := range list[:min(3, len(list))] {
+		fmt.Printf("%-5s %d\n", x.word, x.count)
+	}
+}</code></pre></div>
+  <div class="output" data-label="$ echo &quot;the cat and the hat and the bat&quot;"><pre>the   3
+and   2
+bat   1</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: CSV to JSON converter</summary>
+    <p>Read a CSV with a header row and print it as a JSON array of objects, using the header names as keys. Numbers should stay strings (CSV has no types). Make it a <code>func convert(r io.Reader, w io.Writer) error</code> so it is testable. Hint: <code>csv.NewReader</code>, a <code>[]map[string]string</code>, and <code>json.NewEncoder(w)</code>.</p>
+    <div class="solution-label">Solution</div>
+  <div class="live" data-title="Convert CSV to JSON through io.Reader and io.Writer">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/csv"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+func convert(r io.Reader, w io.Writer) error {
+	cr := csv.NewReader(r)
+	header, err := cr.Read()
+	if err != nil {
+		return fmt.Errorf("reading header: %w", err)
+	}
+	var rows []map[string]string
+	for {
+		rec, err := cr.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		row := make(map[string]string, len(header))
+		for i, h := range header {
+			row[h] = rec[i]
+		}
+		rows = append(rows, row)
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
+}
+
+func main() {
+	in := "name,lang\nAda,Go\nGrace,COBOL\n"
+	if err := convert(strings.NewReader(in), os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="40-41" data-state="in=&quot;name,lang\nAda,Go\nGrace,COBOL\n&quot;"><code>main</code> hands <code>convert</code> a <code>strings.Reader</code> and <code>os.Stdout</code>. <code>convert</code> only sees the interfaces, so a test could pass a <code>bytes.Buffer</code> instead.</li>
+      <li data-lines="13-18" data-state="header=[name lang]">Inside <code>convert</code>, the header row gives us the keys. If that fails, we wrap the error with context using <code>%w</code>.</li>
+      <li data-lines="19" data-state="rows=nil">A nil slice. <code>append</code> will allocate it as needed.</li>
+      <li data-lines="21,28-32" data-state="rec=[Ada Go]; row=map[lang:Go name:Ada]; len(rows)=1">First record. We zip header[i] with rec[i] into a fresh map and append it.</li>
+      <li data-lines="21,28-32" data-state="rec=[Grace COBOL]; row=map[lang:COBOL name:Grace]; len(rows)=2">Second record. Each row is a <strong>new</strong> map. Reusing one map would make every element point to the same data.</li>
+      <li data-lines="21-23" data-state="err=io.EOF; len(rows)=2"><code>io.EOF</code> breaks the loop.</li>
+      <li data-lines="34-36" data-state="indent=&quot;  &quot;" data-out="[\n  {\n    &quot;lang&quot;: &quot;Go&quot;,\n    &quot;name&quot;: &quot;Ada&quot;\n  },\n  {\n    &quot;lang&quot;: &quot;COBOL&quot;,\n    &quot;name&quot;: &quot;Grace&quot;\n  }\n]">The encoder streams straight to <code>w</code>. Notice <code>"lang"</code> comes before <code>"name"</code>: <code>encoding/json</code> <strong>sorts map keys</strong>, so the output is deterministic even though map iteration order isn't.</li>
+      <li data-lines="36,41" data-state="err=nil"><code>Encode</code> returns <code>nil</code>, and so does <code>convert</code>. <code>main</code> skips the error branch and exits 0.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[
+  {
+    "lang": "Go",
+    "name": "Ada"
+  },
+  {
+    "lang": "COBOL",
+    "name": "Grace"
+  }
+]</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: add a -since flag to logq</summary>
+    <p>Add a <code>-since</code> flag of type <code>time.Duration</code> (e.g. <code>-since 15m</code>) that keeps only entries newer than "now minus that duration". Make "now" injectable so tests are deterministic. Hint: <code>fs.Duration</code>, and pass a <code>now func() time.Time</code> into <code>run</code> (use <code>time.Now</code> in <code>main</code>).</p>
+    <div class="solution-label">Solution sketch</div>
+  <div class="code" data-file="changes to logq"><pre><code class="language-go">// signature
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now func() time.Time) error
+
+// flag
+since := fs.Duration("since", 0, "only entries newer than this (e.g. 15m)")
+
+// after parsing
+if *since &gt; 0 {
+	cutoff = now().Add(-*since)
+}
+
+// main
+if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, time.Now); err != nil { ... }
+
+// test
+fixed := func() time.Time { return time.Date(2026, 10, 16, 9, 3, 0, 0, time.UTC) }
+err := run([]string{"-since", "2m"}, in, &amp;out, &amp;errOut, fixed)</code></pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li><code>io.Reader</code> / <code>io.Writer</code> are the universal plugs. Accept them in your APIs and compose them with <code>Copy</code>, <code>TeeReader</code>, <code>MultiWriter</code>, <code>LimitReader</code>.</li>
+      <li>Use <code>bufio.Scanner</code> for lines (check <code>Err()</code>, raise <code>Buffer</code> for long lines) and always <code>Flush()</code> a <code>bufio.Writer</code> or <code>csv.Writer</code>.</li>
+      <li>File errors are typed: check with <code>errors.Is(err, fs.ErrNotExist)</code>. Check the error from <code>Close</code> on files you write. Use temp-file-plus-rename for atomic writes.</li>
+      <li><code>os.Exit</code> skips defers: keep logic in <code>run() error</code> and exit only in <code>main</code>.</li>
+      <li>Use <code>filepath.Join</code> and <code>WalkDir</code>; never concatenate paths with slashes.</li>
+      <li>JSON: tags control keys; <code>omitzero</code> (1.24+) fixes zero structs and times; unknown JSON numbers are <code>float64</code>; stream with <code>json.Decoder</code>; reject typos with <code>DisallowUnknownFields</code>.</li>
+      <li>Time layouts are written with the reference date <code>2006-01-02 15:04:05</code>. Compare with <code>Equal</code>, measure with <code>time.Since</code> (monotonic).</li>
+      <li>Use <code>log/slog</code> with a JSON handler in production, consistent keys, <code>With</code> for request context, and <code>LogValuer</code> to hide secrets.</li>
+      <li><code>math/rand/v2</code> for simulations, <code>crypto/rand</code> for secrets; <code>slices.SortFunc</code> + <code>cmp</code> for sorting; <code>exec.CommandContext</code> without a shell; <code>embed</code> to ship assets in the binary.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

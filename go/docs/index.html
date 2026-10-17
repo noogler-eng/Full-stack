@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="assets/app.js" defer></script>
+</head>
+<body data-root="">
+<article class="content">
+
+  <section class="hero">
+    <div class="ch apter-eyebrow">A complete, end-to-end guide · Go 1.2x</div>
+    <h1>Learn Go the way a <em>senior engineer</em> would teach it.</h1>
+    <p class="lead">21 chapters in plain English — from your very first <code>fmt.Println</code> to concurrent, tested, production-ready services. Every concept comes with runnable code, real output, step-by-step live walkthroughs, and the hard-won tips you usually only get in code review.</p>
+    <div class="cta">
+      <a class="btn primary" id="continue-link" href="chapters/01-introduction.html">Start reading → Chapter 01</a>
+      <a class="btn" href="chapters/19-senior-playbook.html">Jump to the Senior Playbook</a>
+    </div>
+    <div class="meta" style="margin-top:22px">
+      <span class="pill">✓ Progress: <span id="done-count">0 / 21</span></span>
+      <span class="pill">▶ Interactive walkthroughs</span>
+      <span class="pill">✎ Exercises with solutions</span>
+      <span class="pill">⌘ Every example verified with <code>go run</code></span>
+    </div>
+  </section>
+
+  <h2 style="margin-top:36px">How to use this handbook</h2>
+  <p>Read in order if you're new to Go — each chapter builds on the last. Already writing Go? Skim the callouts and jump straight to Parts IV–VI. Keep a terminal open and type the examples yourself: Go is a language you learn with your fingers.</p>
+
+  <div class="code" data-file="terminal"><pre><code class="language-bash">mkdir hello &amp;&amp; cd hello
+go mod init example.com/hello
+# paste any example into main.go, then:
+go run .</code></pre></div>
+
+  <p>You'll see these boxes throughout:</p>
+  <div class="legend">
+    <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>What experienced Go devs actually do at work.</p></div>
+    <div class="callout warn"><div class="callout-title">Gotcha</div><p>Mistakes that bite almost everyone once.</p></div>
+    <div class="callout mental"><div class="callout-title">Mental model</div><p>A simple picture to make an idea stick.</p></div>
+    <div class="callout tip"><div class="callout-title">Tip</div><p>Small shortcuts and handy tricks.</p></div>
+  </div>
+
+  <div class="live" data-title="Try it: a live walkthrough">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	name := "Gopher"
+	greeting := "Hello, " + name
+	fmt.Println(greeting)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1">Every Go file starts by naming its <strong>package</strong>. <code>main</code> is special: it means “this builds into a program you can run”.</li>
+      <li data-lines="3">We <strong>import</strong> the standard-library package <code>fmt</code> (short for “format”) so we can print.</li>
+      <li data-lines="5">Execution begins at <code>func main()</code>. No arguments, no return value.</li>
+      <li data-lines="6" data-state="name=&quot;Gopher&quot;"><code>:=</code> declares a variable and lets Go infer its type — here a <code>string</code>.</li>
+      <li data-lines="7" data-state="name=&quot;Gopher&quot;; greeting=&quot;Hello, Gopher&quot;"><code>+</code> joins strings into a brand-new string.</li>
+      <li data-lines="8" data-state="name=&quot;Gopher&quot;; greeting=&quot;Hello, Gopher&quot;" data-out="Hello, Gopher"><code>fmt.Println</code> writes the value plus a newline to standard output. Done! Click through any walkthrough like this one.</li>
+    </ol>
+  </div>
+
+  <div id="chapter-grid"></div>
+
+</article>
+</body>
+</html>

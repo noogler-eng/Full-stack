@@ -1,0 +1,2471 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 21 · Capstone: Build a Task API — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="21">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part VI · Chapter 21</div>
+  <h1>Capstone: Build a Task API</h1>
+  <p class="lead">Time to put the whole handbook to work. We'll build a complete Task Manager REST API from an empty folder: a clean layered design, a concurrency-safe store, validation and typed errors, Go 1.22 routing, middleware, structured logs, a background worker, graceful shutdown, real tests, a real curl session and a Dockerfile. Every file is shown in full, and every output on this page came from actually running it.</p>
+  <div class="meta">
+    <span class="pill">⏱ 75 min read</span>
+    <span class="pill">◆ Advanced · Project</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll build and learn</h4>
+    <ul>
+      <li>A production-shaped project layout: <code>cmd/api</code> plus <code>internal/</code> packages with dependencies pointing inward</li>
+      <li>A domain package with types, rules, sentinel and typed errors, and a <code>Store</code> interface</li>
+      <li>An in-memory store guarded by <code>sync.RWMutex</code>, and a service layer with validation</li>
+      <li>HTTP handlers on the Go 1.22+ <code>ServeMux</code> with method and path patterns, JSON in and out, and error translation</li>
+      <li>Middleware for panic recovery, request IDs and <code>slog</code> request logs</li>
+      <li>A background worker driven by a ticker and a context, plus graceful shutdown that stops everything in order</li>
+      <li>Table-driven service tests, <code>httptest</code> handler tests, a race test and a <code>testing/synctest</code> worker test</li>
+      <li>How a single request travels through middleware → handler → service → store</li>
+    </ul>
+  </div>
+
+  <h2>What we're building</h2>
+  <p>A small but real JSON API for to-do items. Think of the backend for a Trello-style board. Here's the full contract:</p>
+  <table>
+    <thead><tr><th>Method &amp; path</th><th>Does</th><th>Success</th><th>Errors</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /healthz</code></td><td>Liveness check</td><td>200</td><td></td></tr>
+      <tr><td><code>POST /tasks</code></td><td>Create a task from <code>{"title", "description", "due"}</code></td><td>201 + <code>Location</code></td><td>400 bad JSON, 422 invalid fields</td></tr>
+      <tr><td><code>GET /tasks</code></td><td>List tasks, optional <code>?status=todo|doing|done</code></td><td>200 <code>{"tasks":[...],"count":n}</code></td><td>422 unknown status</td></tr>
+      <tr><td><code>GET /tasks/{id}</code></td><td>Fetch one task</td><td>200</td><td>404</td></tr>
+      <tr><td><code>PATCH /tasks/{id}</code></td><td>Partial update of any field</td><td>200</td><td>400, 404, 422</td></tr>
+      <tr><td><code>DELETE /tasks/{id}</code></td><td>Remove a task</td><td>204</td><td>404</td></tr>
+    </tbody>
+  </table>
+  <p>Plus two behaviours that make it more than CRUD (Create, Read, Update, Delete):</p>
+  <ul>
+    <li>A <strong>background worker</strong> wakes up on a timer and flags tasks whose due time has passed as <code>"overdue": true</code>.</li>
+    <li><strong>Graceful shutdown</strong>: on Ctrl-C or <code>SIGTERM</code>, the server finishes in-flight requests and the worker stops cleanly before the process exits.</li>
+  </ul>
+  <p>We'll use <strong>only the standard library</strong>. No web framework, no router library, no logging library. Go 1.22's <code>ServeMux</code> and <code>log/slog</code> cover everything a service like this needs.</p>
+
+  <h2>Project layout and architecture</h2>
+  <p>Here's the finished project. This listing is from the real project folder (<code>find</code> output, tidied into a tree with comments):</p>
+  <div class="code" data-file="taskapi/"><pre><code class="language-bash">taskapi/
+├── go.mod                      # module example.com/taskapi
+├── Makefile                    # run / test / build / docker shortcuts
+├── Dockerfile                  # multi-stage, distroless
+├── .dockerignore
+├── cmd/
+│   └── api/
+│       └── main.go             # config, wiring, worker, server, shutdown
+└── internal/                   # importable only from inside this module
+    ├── task/                   # THE DOMAIN: imports nothing of ours
+    │   ├── task.go             # Task, Status, errors
+    │   ├── store.go            # Store interface + Filter
+    │   ├── service.go          # business rules + validation
+    │   ├── export_test.go      # test-only hook to inject a clock
+    │   └── service_test.go     # table-driven tests
+    ├── memstore/               # a task.Store kept in memory
+    │   ├── memstore.go
+    │   └── memstore_test.go    # concurrency (-race) and not-found tests
+    ├── httpapi/                # HTTP + JSON adapter
+    │   ├── handlers.go         # routes, handlers, JSON helpers, error mapping
+    │   ├── middleware.go       # recover, request ID, logging
+    │   └── handlers_test.go    # httptest end-to-end tests
+    └── worker/
+        ├── overdue.go          # ticker + context background job
+        └── overdue_test.go     # synctest: fake time, no sleeps</code></pre></div>
+
+  <p>The rules behind this shape come straight from Chapter 19:</p>
+  <ul>
+    <li><strong><code>cmd/api</code></strong> holds the <code>main</code> package. It's thin: read config, build the pieces, connect them, start, stop. If you later add a CLI tool, it goes in <code>cmd/taskctl</code> and reuses the same <code>internal</code> packages.</li>
+    <li><strong><code>internal/</code></strong> is enforced by the Go toolchain: code outside this module can't import it. You're free to refactor without breaking anybody.</li>
+    <li><strong>Packages by domain role</strong>, not by technical type. There's no <code>models</code> or <code>utils</code>.</li>
+    <li><strong>Dependencies point inward.</strong> <code>task</code> imports nothing from our module. <code>memstore</code>, <code>httpapi</code> and <code>worker</code> import <code>task</code>. Only <code>main</code> imports all of them.</li>
+  </ul>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 330" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <defs><marker id="a21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker>
+      <marker id="b21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7fa6d9"/></marker></defs>
+      <rect x="0" y="0" width="720" height="330" rx="10" fill="#262624"/>
+      <text x="20" y="28" fill="#a8a49a" font-size="12">One request: POST /tasks</text>
+      <g font-size="12" fill="#ece9e1" text-anchor="middle">
+        <rect x="20" y="44" width="110" height="50" rx="8" fill="#2e2d2a" stroke="#3a3936"/><text x="75" y="66" font-weight="600">client</text><text x="75" y="83" fill="#a8a49a" font-size="10">curl / browser</text>
+        <rect x="150" y="44" width="110" height="50" rx="8" fill="#2e2d2a" stroke="#e0b45c"/><text x="205" y="66" font-weight="600">recoverPanics</text><text x="205" y="83" fill="#a8a49a" font-size="10">panic → 500</text>
+        <rect x="270" y="44" width="110" height="50" rx="8" fill="#2e2d2a" stroke="#e0b45c"/><text x="325" y="66" font-weight="600">requestID</text><text x="325" y="83" fill="#a8a49a" font-size="10">ctx + header</text>
+        <rect x="390" y="44" width="110" height="50" rx="8" fill="#2e2d2a" stroke="#e0b45c"/><text x="445" y="66" font-weight="600">logRequests</text><text x="445" y="83" fill="#a8a49a" font-size="10">slog line</text>
+        <rect x="520" y="44" width="180" height="50" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/><text x="610" y="66" font-weight="600">ServeMux</text><text x="610" y="83" fill="#a8a49a" font-size="10">"POST /tasks" → createTask</text>
+        <rect x="520" y="136" width="180" height="50" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/><text x="610" y="158" font-weight="600">httpapi.createTask</text><text x="610" y="175" fill="#a8a49a" font-size="10">decode JSON, call service</text>
+        <rect x="270" y="136" width="200" height="50" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/><text x="370" y="158" font-weight="600">task.Service.Create</text><text x="370" y="175" fill="#a8a49a" font-size="10">validate, build Task, IDs, clock</text>
+        <rect x="20" y="136" width="200" height="50" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/><text x="120" y="158" font-weight="600">memstore.Store.Create</text><text x="120" y="175" fill="#a8a49a" font-size="10">Lock, map write, Unlock</text>
+        <rect x="20" y="236" width="200" height="60" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/><text x="120" y="260" font-weight="600">worker.Overdue</text><text x="120" y="278" fill="#a8a49a" font-size="10">ticker → Service.MarkOverdue</text>
+        <rect x="270" y="236" width="200" height="60" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/><text x="370" y="260" font-weight="600">cmd/api main</text><text x="370" y="278" fill="#a8a49a" font-size="10">wires all, owns ctx &amp; shutdown</text>
+      </g>
+      <g stroke="#d97757" stroke-width="1.6" fill="none" marker-end="url(#a21)">
+        <line x1="130" y1="69" x2="148" y2="69"/><line x1="260" y1="69" x2="268" y2="69"/><line x1="380" y1="69" x2="388" y2="69"/><line x1="500" y1="69" x2="518" y2="69"/>
+        <line x1="610" y1="94" x2="610" y2="134"/><line x1="520" y1="161" x2="472" y2="161"/><line x1="270" y1="161" x2="222" y2="161"/>
+      </g>
+      <g stroke="#7fa6d9" stroke-width="1.4" fill="none" stroke-dasharray="5 4" marker-end="url(#b21)">
+        <line x1="220" y1="250" x2="300" y2="190"/>
+      </g>
+      <text x="560" y="250" fill="#a8a49a" font-size="11" text-anchor="middle">Response travels back the same way:</text>
+      <text x="560" y="268" fill="#a8a49a" font-size="11" text-anchor="middle">Task → JSON 201 → log line → client</text>
+    </svg>
+    <figcaption>The path of one request through the layers, plus the background worker that calls into the same service.</figcaption>
+  </figure>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of a restaurant. The <strong>HTTP layer</strong> is the waiter: takes the order in the customer's language (JSON), checks it's legible, and brings back the plate. The <strong>service</strong> is the head chef: knows the recipes and rules ("we don't serve tasks without a title"). The <strong>store</strong> is the pantry: just keeps things safely. The waiter never cooks, and the chef never talks to customers. That's why we can swap the pantry (memory → Postgres) or add a second waiter (gRPC) without retraining the chef.</p></div>
+
+  <p>Let's start. Create the folder and the module:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">mkdir taskapi &amp;&amp; cd taskapi
+go mod init example.com/taskapi
+mkdir -p cmd/api internal/task internal/memstore internal/httpapi internal/worker</code></pre></div>
+<div class="code" data-file="go.mod"><pre><code class="language-bash">module example.com/taskapi
+
+go 1.27</code></pre></div>
+
+  <h2>The domain: types, errors and the Store contract</h2>
+  <p>We start from the inside, with the package that describes the <em>problem</em> rather than the technology. It knows what a task is and what errors can happen, and it says what it needs from storage. It knows nothing about HTTP, JSON transport or databases.</p>
+<div class="code" data-file="internal/task/task.go"><pre><code class="language-go">// Package task is the domain core of the Task API: what a task is,
+// the rules about it, and the storage contract. It imports nothing
+// else from this module.
+package task
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// Status is where a task is in its life cycle.
+type Status string
+
+const (
+	StatusTodo  Status = "todo"
+	StatusDoing Status = "doing"
+	StatusDone  Status = "done"
+)
+
+// Valid reports whether s is a known status.
+func (s Status) Valid() bool {
+	switch s {
+	case StatusTodo, StatusDoing, StatusDone:
+		return true
+	}
+	return false
+}
+
+// Task is a single to-do item.
+type Task struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Status      Status     `json:"status"`
+	Due         *time.Time `json:"due,omitempty"`
+	Overdue     bool       `json:"overdue"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// ErrNotFound is returned when a task does not exist.
+var ErrNotFound = errors.New("task not found")
+
+// ErrValidation is the category of every *ValidationError,
+// so callers can test errors.Is(err, ErrValidation).
+var ErrValidation = errors.New("validation failed")
+
+// ValidationError describes one invalid input field.
+type ValidationError struct {
+	Field string
+	Msg   string
+}
+
+func (e *ValidationError) Error() string { return fmt.Sprintf("%s: %s", e.Field, e.Msg) }
+
+// Unwrap makes errors.Is(err, ErrValidation) true for every ValidationError.
+func (e *ValidationError) Unwrap() error { return ErrValidation }</code></pre></div>
+  <p>Design decisions worth pointing out:</p>
+  <ul>
+    <li><code>Status</code> is a named string type with constants, an "enum" in Go style, plus a <code>Valid</code> method so validation lives next to the type.</li>
+    <li><code>Due</code> is a <code>*time.Time</code> because "no due date" is a real state, and a nil pointer models it honestly (and <code>omitempty</code> drops it from JSON).</li>
+    <li>Two kinds of errors: a <strong>sentinel</strong> <code>ErrNotFound</code> for "this thing doesn't exist", and a <strong>typed</strong> <code>*ValidationError</code> that carries the field name. Its <code>Unwrap</code> method returns <code>ErrValidation</code>, so callers can choose: <code>errors.Is(err, ErrValidation)</code> for the category, or <code>errors.As(err, &amp;ve)</code> for the details.</li>
+  </ul>
+  <p>Next, the contract any storage must fulfil. The interface lives here, in the package that <em>uses</em> it ("accept interfaces"), not in the store package:</p>
+<div class="code" data-file="internal/task/store.go"><pre><code class="language-go">package task
+
+import "context"
+
+// Filter narrows a List call. The zero Filter matches every task.
+type Filter struct {
+	Status Status // "" means any status
+}
+
+// Store persists tasks. Implementations must be safe for concurrent use
+// and must return ErrNotFound for unknown IDs.
+type Store interface {
+	Create(ctx context.Context, t Task) error
+	Get(ctx context.Context, id string) (Task, error)
+	List(ctx context.Context, f Filter) ([]Task, error)
+	Update(ctx context.Context, t Task) error
+	Delete(ctx context.Context, id string) error
+}</code></pre></div>
+  <div class="callout tip"><p>Every method takes <code>context.Context</code> first, even though our memory store barely needs it. A real database driver uses it to cancel queries when the client disconnects or a deadline passes. Putting it in the interface from day one means switching to Postgres later changes no signatures.</p></div>
+
+  <h2>The service layer: business rules and validation</h2>
+  <p>The service is where the rules live: titles are required and trimmed, due dates must be in the future, finished tasks are never overdue, new tasks start as <code>todo</code>. It depends only on the <code>Store</code> interface. Two small seams make it testable: <code>now</code> (the clock) and <code>newID</code> (ID generation) are function fields, so tests can control time.</p>
+<div class="code" data-file="internal/task/service.go"><pre><code class="language-go">package task
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+const maxTitleLen = 200
+
+// Service holds the business rules. It is safe for concurrent use
+// as long as its Store is.
+type Service struct {
+	store Store
+	now   func() time.Time // swapped in tests for a fixed clock
+	newID func() string
+}
+
+// NewService returns a Service backed by store.
+func NewService(store Store) *Service {
+	return &amp;Service{store: store, now: time.Now, newID: randomID}
+}
+
+func randomID() string {
+	b := make([]byte, 6)
+	rand.Read(b) // crypto/rand.Read never returns an error since Go 1.24
+	return hex.EncodeToString(b)
+}
+
+// CreateInput is what a caller may set when creating a task.
+type CreateInput struct {
+	Title       string
+	Description string
+	Due         *time.Time
+}
+
+// Create validates in and stores a new task with status "todo".
+func (s *Service) Create(ctx context.Context, in CreateInput) (Task, error) {
+	title, err := validTitle(in.Title)
+	if err != nil {
+		return Task{}, err
+	}
+	now := s.now().UTC()
+	if in.Due != nil &amp;&amp; in.Due.Before(now) {
+		return Task{}, &amp;ValidationError{Field: "due", Msg: "must be in the future"}
+	}
+	t := Task{
+		ID:          s.newID(),
+		Title:       title,
+		Description: strings.TrimSpace(in.Description),
+		Status:      StatusTodo,
+		Due:         utcPtr(in.Due),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.store.Create(ctx, t); err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
+	}
+	return t, nil
+}
+
+// Get returns one task by ID.
+func (s *Service) Get(ctx context.Context, id string) (Task, error) {
+	t, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// List returns tasks matching f, oldest first.
+func (s *Service) List(ctx context.Context, f Filter) ([]Task, error) {
+	if f.Status != "" &amp;&amp; !f.Status.Valid() {
+		return nil, &amp;ValidationError{Field: "status", Msg: "must be todo, doing or done"}
+	}
+	ts, err := s.store.List(ctx, f)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	return ts, nil
+}
+
+// UpdateInput is a partial update: nil fields are left unchanged.
+type UpdateInput struct {
+	Title       *string
+	Description *string
+	Status      *Status
+	Due         *time.Time
+}
+
+// Update applies in to the task with the given ID.
+func (s *Service) Update(ctx context.Context, id string, in UpdateInput) (Task, error) {
+	t, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task %s: %w", id, err)
+	}
+	if in.Title != nil {
+		if t.Title, err = validTitle(*in.Title); err != nil {
+			return Task{}, err
+		}
+	}
+	if in.Description != nil {
+		t.Description = strings.TrimSpace(*in.Description)
+	}
+	if in.Status != nil {
+		if !in.Status.Valid() {
+			return Task{}, &amp;ValidationError{Field: "status", Msg: "must be todo, doing or done"}
+		}
+		t.Status = *in.Status
+	}
+	if in.Due != nil {
+		t.Due = utcPtr(in.Due)
+		t.Overdue = false // a new deadline resets the flag
+	}
+	if t.Status == StatusDone {
+		t.Overdue = false // finished work is never overdue
+	}
+	t.UpdatedAt = s.now().UTC()
+	if err := s.store.Update(ctx, t); err != nil {
+		return Task{}, fmt.Errorf("update task %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// Delete removes a task.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	if err := s.store.Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete task %s: %w", id, err)
+	}
+	return nil
+}
+
+// MarkOverdue flags every unfinished task whose due time has passed.
+// It returns how many tasks it changed.
+func (s *Service) MarkOverdue(ctx context.Context) (int, error) {
+	ts, err := s.store.List(ctx, Filter{})
+	if err != nil {
+		return 0, fmt.Errorf("mark overdue: %w", err)
+	}
+	now := s.now().UTC()
+	changed := 0
+	for _, t := range ts {
+		if t.Status == StatusDone || t.Overdue || t.Due == nil || !t.Due.Before(now) {
+			continue
+		}
+		t.Overdue = true
+		t.UpdatedAt = now
+		if err := s.store.Update(ctx, t); err != nil {
+			return changed, fmt.Errorf("mark overdue %s: %w", t.ID, err)
+		}
+		changed++
+	}
+	return changed, nil
+}
+
+func validTitle(title string) (string, error) {
+	title = strings.TrimSpace(title)
+	switch {
+	case title == "":
+		return "", &amp;ValidationError{Field: "title", Msg: "is required"}
+	case utf8.RuneCountInString(title) &gt; maxTitleLen:
+		return "", &amp;ValidationError{Field: "title", Msg: fmt.Sprintf("must be at most %d characters", maxTitleLen)}
+	}
+	return title, nil
+}
+
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &amp;u
+}</code></pre></div>
+
+  <div class="live" data-title="Service.Create rejecting a blank title">
+    <pre><code class="language-go">func (s *Service) Create(ctx context.Context, in CreateInput) (Task, error) {
+	title, err := validTitle(in.Title)
+	if err != nil {
+		return Task{}, err
+	}
+	now := s.now().UTC()
+	if in.Due != nil &amp;&amp; in.Due.Before(now) {
+		return Task{}, &amp;ValidationError{Field: "due", Msg: "must be in the future"}
+	}
+	t := Task{
+		ID:          s.newID(),
+		Title:       title,
+		Description: strings.TrimSpace(in.Description),
+		Status:      StatusTodo,
+		Due:         utcPtr(in.Due),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.store.Create(ctx, t); err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
+	}
+	return t, nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="in.Title=&quot;   &quot;; in.Due=nil">The handler calls <code>Create</code> with a title of three spaces, like our curl request below does.</li>
+      <li data-lines="2" data-state="validTitle(&quot;   &quot;)">First rule: <code>validTitle</code> trims the spaces. The result is empty, so it returns <code>&amp;ValidationError{Field: "title", Msg: "is required"}</code>.</li>
+      <li data-lines="3-5" data-state="err=title: is required">We return immediately with the zero <code>Task{}</code> and that error, unwrapped. Validation errors are already self-explanatory, so no extra context is added. Nothing touched the store.</li>
+      <li data-lines="6-9" data-state="(skipped)">On a valid request, we'd read the clock once (so <code>CreatedAt</code> and <code>UpdatedAt</code> are identical) and check that the due date isn't in the past.</li>
+      <li data-lines="10-18" data-state="(skipped)">Then build the <code>Task</code>: a fresh random ID, trimmed fields, status <code>todo</code>, due date normalised to UTC.</li>
+      <li data-lines="19-21" data-state="(skipped)">Then save it. A store failure gets wrapped with <code>%w</code> and context ("create task: ..."), so <code>errors.Is</code> still works upstream.</li>
+      <li data-lines="3" data-state="HTTP status=422; body field=title" data-out="HTTP/1.1 422 Unprocessable Entity\n{&quot;error&quot;:&quot;title: is required&quot;,&quot;field&quot;:&quot;title&quot;}">Back in the HTTP layer, <code>fail</code> sees <code>errors.As(err, &amp;ve)</code> succeed and responds 422 with the field name, exactly as the curl session shows.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><p>Notice what the service <em>doesn't</em> do: it never mentions HTTP status codes. "Not found" and "invalid title" are domain facts; 404 and 422 are HTTP's way of saying them. Keeping that translation in exactly one place (<code>httpapi.fail</code>) means a future gRPC adapter can map the same errors to <code>codes.NotFound</code> and <code>codes.InvalidArgument</code> without touching the service.</p></div>
+
+  <p><code>UpdateInput</code> uses pointer fields so the service can tell "not sent" (nil) from "sent as empty". Here is <code>PATCH /tasks/5940c30b6c1d</code> with body <code>{"status":"doing"}</code>, stepping through the real <code>Service.Update</code>:</p>
+  <div class="live" data-title="PATCH {&quot;status&quot;:&quot;doing&quot;} through Update">
+    <pre><code class="language-go">// internal/task/service.go
+func (s *Service) Update(ctx context.Context, id string, in UpdateInput) (Task, error) {
+	t, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task %s: %w", id, err)
+	}
+	if in.Title != nil {
+		if t.Title, err = validTitle(*in.Title); err != nil {
+			return Task{}, err
+		}
+	}
+	if in.Description != nil {
+		t.Description = strings.TrimSpace(*in.Description)
+	}
+	if in.Status != nil {
+		if !in.Status.Valid() {
+			return Task{}, &amp;ValidationError{Field: "status", Msg: "must be todo, doing or done"}
+		}
+		t.Status = *in.Status
+	}
+	if in.Due != nil {
+		t.Due = utcPtr(in.Due)
+		t.Overdue = false // a new deadline resets the flag
+	}
+	if t.Status == StatusDone {
+		t.Overdue = false // finished work is never overdue
+	}
+	t.UpdatedAt = s.now().UTC()
+	if err := s.store.Update(ctx, t); err != nil {
+		return Task{}, fmt.Errorf("update task %s: %w", id, err)
+	}
+	return t, nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-3" data-state="in={Title:nil Description:nil Status:&amp;doing Due:nil}" data-out="$ curl -s -X PATCH localhost:8080/tasks/5940c30b6c1d -d '{&quot;status&quot;:&quot;doing&quot;}' | jq '{id, status, updated_at}'">The handler decoded the body into pointers; only <code>Status</code> is non-nil. Update first loads the current task from the store.</li>
+      <li data-lines="3-6" data-state="t={Title:Write the capstone Status:todo}">It exists, so no error. <code>t</code> is a <strong>copy</strong> of the stored struct: changing it doesn't touch the store yet.</li>
+      <li data-lines="7-14" data-state="t={Title:Write the capstone Status:todo}"><code>Title</code> and <code>Description</code> are nil: the client didn't send them, so they are left alone. With plain strings we could not tell "absent" from "empty".</li>
+      <li data-lines="15-19" data-state="t.Status=doing">The status was sent. We validate it (<code>doing</code> is known) and apply it.</li>
+      <li data-lines="21-27" data-state="t.Status=doing; t.Overdue=false">No new due date, and the status isn't <code>done</code>, so the overdue rules don't fire.</li>
+      <li data-lines="28" data-state="t.UpdatedAt=2026-10-16T18:17:44.082321Z">Timestamp from <code>s.now()</code>, which tests replace with a fixed clock.</li>
+      <li data-lines="29-32" data-state="store=updated" data-out="{\n  &quot;id&quot;: &quot;5940c30b6c1d&quot;,\n  &quot;status&quot;: &quot;doing&quot;,\n  &quot;updated_at&quot;: &quot;2026-10-16T18:17:44.082321Z&quot;\n}">Only now is the whole modified copy written back with <code>store.Update</code>. The handler returns it as JSON with 200.</li>
+    </ol>
+  </div>
+<div class="output" data-label="curl session"><pre>$ curl -s -X PATCH localhost:8080/tasks/5940c30b6c1d -d '{"status":"doing"}' | jq '{id, status, updated_at}'
+{
+  "id": "5940c30b6c1d",
+  "status": "doing",
+  "updated_at": "2026-10-16T18:17:44.082321Z"
+}</pre></div>
+  <h3>A test-only door for the clock</h3>
+  <p>Our tests live in package <code>task_test</code> (an "external" test package) so they use the API exactly like real callers do. But they need to inject a fixed clock, and <code>now</code> is unexported. The idiomatic trick is an <code>export_test.go</code> file: it's in package <code>task</code>, so it can touch private fields, but because its name ends in <code>_test.go</code> it is only compiled during <code>go test</code>. It never ships.</p>
+<div class="code" data-file="internal/task/export_test.go"><pre><code class="language-go">package task
+
+import "time"
+
+// NewServiceForTest lets external tests (package task_test) inject a clock.
+// Files ending in _test.go are only compiled by `go test`, so this
+// helper never ships in the real binary.
+func NewServiceForTest(store Store, now func() time.Time) *Service {
+	s := NewService(store)
+	s.now = now
+	return s
+}</code></pre></div>
+
+  <h2>The memory store: a map behind an RWMutex</h2>
+  <p>Now the outer layer that holds data. Many HTTP requests run at the same time, each in its own goroutine, so the map must be protected. A <code>sync.RWMutex</code> allows <strong>many readers at once</strong> (<code>RLock</code>) or <strong>one writer alone</strong> (<code>Lock</code>). That suits an API where reads (list, get) are far more common than writes.</p>
+<div class="code" data-file="internal/memstore/memstore.go"><pre><code class="language-go">// Package memstore is an in-memory task.Store, safe for concurrent use.
+// It is perfect for tests and demos; swap in a database for production.
+package memstore
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
+	"sync"
+
+	"example.com/taskapi/internal/task"
+)
+
+// Store keeps tasks in a map guarded by a read/write mutex.
+// The zero value is not usable; call New.
+type Store struct {
+	mu    sync.RWMutex // guards tasks
+	tasks map[string]task.Task
+}
+
+// New returns an empty Store.
+func New() *Store {
+	return &amp;Store{tasks: make(map[string]task.Task)}
+}
+
+// Compile-time proof that *Store satisfies task.Store.
+var _ task.Store = (*Store)(nil)
+
+func (s *Store) Create(ctx context.Context, t task.Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.tasks[t.ID]; exists {
+		return fmt.Errorf("memstore: duplicate id %q", t.ID)
+	}
+	s.tasks[t.ID] = t
+	return nil
+}
+
+func (s *Store) Get(ctx context.Context, id string) (task.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return task.Task{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return task.Task{}, task.ErrNotFound
+	}
+	return t, nil
+}
+
+func (s *Store) List(ctx context.Context, f task.Filter) ([]task.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	out := make([]task.Task, 0, len(s.tasks)) // never nil: JSON gets [] not null
+	for _, t := range s.tasks {
+		if f.Status == "" || t.Status == f.Status {
+			out = append(out, t)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Map order is random; sort for a stable API (oldest first, then by ID).
+	slices.SortFunc(out, func(a, b task.Task) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	return out, nil
+}
+
+func (s *Store) Update(ctx context.Context, t task.Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[t.ID]; !ok {
+		return task.ErrNotFound
+	}
+	s.tasks[t.ID] = t
+	return nil
+}
+
+func (s *Store) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[id]; !ok {
+		return task.ErrNotFound
+	}
+	delete(s.tasks, id)
+	return nil
+}</code></pre></div>
+  <ul>
+    <li><code>var _ task.Store = (*Store)(nil)</code> is a <strong>compile-time assertion</strong>: if we ever break the interface, the build fails right here with a clear message, instead of somewhere in <code>main</code>.</li>
+    <li>The map stores <code>task.Task</code> <em>values</em>, not pointers. <code>Get</code> returns a copy, so a caller modifying its task can't change the stored one behind the lock's back. (The <code>Due</code> pointer is shared, but nobody mutates a <code>time.Time</code> through it; we always replace the pointer.)</li>
+    <li><code>List</code> releases the read lock <em>before</em> sorting. Hold locks for the shortest time possible: copy out, unlock, then do the slow work.</li>
+    <li><code>make([]task.Task, 0, n)</code> rather than <code>var out []task.Task</code>, so an empty list encodes as <code>[]</code> instead of <code>null</code> (gotcha #18).</li>
+    <li>Sorting with <code>cmp.Or</code> gives a stable order: by creation time, and by ID as a tie-breaker. Without it, map iteration order would make every list response random (gotcha #10).</li>
+  </ul>
+
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p><code>defer s.mu.RUnlock()</code> is the safe default and is used everywhere else. In <code>List</code> we unlock manually to release the lock early. That's fine for a short block with no early returns, but if you add a <code>return</code> inside that block later, you'll leak the lock and the whole API will freeze on the next write. If in doubt, move the locked part into its own small function with a <code>defer</code>.</p></div>
+
+  <p><code>List</code> is where the memstore earns its keep: a filtered copy under a read lock, then a sort, because map order is random. The store holds two tasks at this point: "Write the capstone" (doing) and "Pay invoice" (todo).</p>
+  <div class="live" data-title="GET /tasks?status=doing inside the store">
+    <pre><code class="language-go">// internal/memstore/memstore.go
+func (s *Store) List(ctx context.Context, f task.Filter) ([]task.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	out := make([]task.Task, 0, len(s.tasks)) // never nil: JSON gets [] not null
+	for _, t := range s.tasks {
+		if f.Status == "" || t.Status == f.Status {
+			out = append(out, t)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Map order is random; sort for a stable API (oldest first, then by ID).
+	slices.SortFunc(out, func(a, b task.Task) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	return out, nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-5" data-state="f.Status=doing; ctx.Err()=nil" data-out="$ curl -s 'localhost:8080/tasks?status=doing' | jq '{count, titles: [.tasks[].title]}'">The service already validated <code>status=doing</code>. The store checks for a cancelled context first.</li>
+      <li data-lines="6-7" data-state="lock=read; out=[]; len=0; cap=2">Read-lock, then allocate the result with capacity for every task. <code>make(..., 0, n)</code> is never nil, so an empty result encodes as <code>[]</code>, not <code>null</code>.</li>
+      <li data-lines="8-11" data-state="t=Write the capstone (doing); out=[Write the capstone]">The range visits tasks in random order. The doing task matches the filter and is appended. Appending a struct copies it, so callers can't modify the store's data.</li>
+      <li data-lines="8-11" data-state="t=Pay invoice (todo); out=[Write the capstone]">The todo task does not match and is skipped.</li>
+      <li data-lines="13" data-state="lock=released">Unlock <em>before</em> sorting: the sort only touches our private copy, so there's no reason to keep writers waiting.</li>
+      <li data-lines="16-19" data-state="out=[Write the capstone]; len=1" data-out="{\n  &quot;count&quot;: 1,\n  &quot;titles&quot;: [\n    &quot;Write the capstone&quot;\n  ]\n}">Sort oldest first; <code>cmp.Or</code> uses the ID as a tie-breaker so the order is fully deterministic. The handler wraps it as <code>{tasks, count}</code>.</li>
+    </ol>
+  </div>
+<div class="output" data-label="curl session"><pre>$ curl -s 'localhost:8080/tasks?status=doing' | jq '{count, titles: [.tasks[].title]}'
+{
+  "count": 1,
+  "titles": [
+    "Write the capstone"
+  ]
+}</pre></div>
+  <h2>The HTTP layer: routing, JSON and error mapping</h2>
+  <p>This package turns HTTP requests into service calls and service results into HTTP responses. It uses the Go 1.22+ <code>ServeMux</code> patterns: <code>"GET /tasks/{id}"</code> matches only GET (and HEAD), and <code>r.PathValue("id")</code> reads the wildcard. Wrong methods get an automatic <code>405 Method Not Allowed</code> with an <code>Allow</code> header.</p>
+<div class="code" data-file="internal/httpapi/handlers.go"><pre><code class="language-go">// Package httpapi exposes the task service over HTTP and JSON.
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"example.com/taskapi/internal/task"
+)
+
+const maxBodyBytes = 1 &lt;&lt; 20 // 1 MiB
+
+// API holds the dependencies every handler needs.
+type API struct {
+	svc *task.Service
+	log *slog.Logger
+}
+
+// New returns the fully wired HTTP handler: routes plus middleware.
+func New(svc *task.Service, log *slog.Logger) http.Handler {
+	a := &amp;API{svc: svc, log: log}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("POST /tasks", a.createTask)
+	mux.HandleFunc("GET /tasks", a.listTasks)
+	mux.HandleFunc("GET /tasks/{id}", a.getTask)
+	mux.HandleFunc("PATCH /tasks/{id}", a.updateTask)
+	mux.HandleFunc("DELETE /tasks/{id}", a.deleteTask)
+
+	// Outermost first: recover wraps everything, then request IDs, then logging.
+	return chain(mux, a.recoverPanics, requestID, a.logRequests)
+}
+
+func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type createRequest struct {
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Due         *time.Time `json:"due"`
+}
+
+func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if err := decodeJSON(w, r, &amp;req); err != nil {
+		a.badRequest(w, r, err)
+		return
+	}
+	t, err := a.svc.Create(r.Context(), task.CreateInput{
+		Title:       req.Title,
+		Description: req.Description,
+		Due:         req.Due,
+	})
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Location", "/tasks/"+t.ID)
+	writeJSON(w, http.StatusCreated, t)
+}
+
+type listResponse struct {
+	Tasks []task.Task `json:"tasks"`
+	Count int         `json:"count"`
+}
+
+func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
+	f := task.Filter{Status: task.Status(r.URL.Query().Get("status"))}
+	ts, err := a.svc.List(r.Context(), f)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse{Tasks: ts, Count: len(ts)})
+}
+
+func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
+	t, err := a.svc.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+type updateRequest struct {
+	Title       *string      `json:"title"`
+	Description *string      `json:"description"`
+	Status      *task.Status `json:"status"`
+	Due         *time.Time   `json:"due"`
+}
+
+func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
+	var req updateRequest
+	if err := decodeJSON(w, r, &amp;req); err != nil {
+		a.badRequest(w, r, err)
+		return
+	}
+	t, err := a.svc.Update(r.Context(), r.PathValue("id"), task.UpdateInput{
+		Title:       req.Title,
+		Description: req.Description,
+		Status:      req.Status,
+		Due:         req.Due,
+	})
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
+	if err := a.svc.Delete(r.Context(), r.PathValue("id")); err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- JSON helpers ---------------------------------------------------------
+
+type errorBody struct {
+	Error string `json:"error"`
+	Field string `json:"field,omitempty"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v) // headers are sent; nothing useful to do on error
+}
+
+// decodeJSON reads exactly one JSON object, rejecting unknown fields and huge bodies.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if dec.More() {
+		return errors.New("invalid JSON body: multiple values")
+	}
+	return nil
+}
+
+func (a *API) badRequest(w http.ResponseWriter, r *http.Request, err error) {
+	writeJSON(w, http.StatusBadRequest, errorBody{Error: err.Error()})
+}
+
+// fail translates domain errors into HTTP responses: the one place that
+// knows both about task errors and about status codes.
+func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var ve *task.ValidationError
+	switch {
+	case errors.As(err, &amp;ve):
+		writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: ve.Error(), Field: ve.Field})
+	case errors.Is(err, task.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "task not found"})
+	default:
+		// Unexpected: log the details, but never leak internals to the client.
+		a.log.ErrorContext(r.Context(), "request failed", "err", err, "request_id", RequestIDFrom(r.Context()))
+		writeJSON(w, http.StatusInternalServerError, errorBody{Error: "internal error"})
+	}
+}</code></pre></div>
+
+  <p>The JSON decoding helper is more careful than a plain <code>json.Unmarshal</code>, and each line prevents a real problem:</p>
+  <table>
+    <thead><tr><th>Line</th><th>Protects against</th></tr></thead>
+    <tbody>
+      <tr><td><code>http.MaxBytesReader(w, r.Body, 1&lt;&lt;20)</code></td><td>A client sending a 5 GB body and exhausting memory</td></tr>
+      <tr><td><code>dec.DisallowUnknownFields()</code></td><td>Typos like <code>"titel"</code> being silently ignored</td></tr>
+      <tr><td><code>dec.More()</code> check</td><td>Two JSON objects glued together in one body</td></tr>
+      <tr><td>Pointer fields in <code>updateRequest</code></td><td>Telling "field not sent" (nil) apart from "set to empty" (<code>""</code>) for PATCH</td></tr>
+    </tbody>
+  </table>
+
+  <p>Let's trace the happy path of <code>POST /tasks</code> through the handler:</p>
+  <div class="live" data-title="POST /tasks inside createTask">
+    <pre><code class="language-go">func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if err := decodeJSON(w, r, &amp;req); err != nil {
+		a.badRequest(w, r, err)
+		return
+	}
+	t, err := a.svc.Create(r.Context(), task.CreateInput{
+		Title:       req.Title,
+		Description: req.Description,
+		Due:         req.Due,
+	})
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Location", "/tasks/"+t.ID)
+	writeJSON(w, http.StatusCreated, t)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="ctx.request_id=9b51753bed510cdd; body={&quot;title&quot;:&quot;Write the capstone&quot;,...}">By the time we get here, the three middlewares have run: panic protection is armed, a request ID is in the context and the response header, and the logger has started its timer. The mux matched <code>POST /tasks</code>.</li>
+      <li data-lines="2-3" data-state="req.Title=Write the capstone; req.Description=chapter 21; req.Due=nil"><code>decodeJSON</code> limits the body size, rejects unknown fields, and fills <code>req</code>.</li>
+      <li data-lines="7-11" data-state="CreateInput={Write the capstone, chapter 21, nil}">We translate the transport type (<code>createRequest</code>, with JSON tags) into the domain type (<code>task.CreateInput</code>, no tags). The request context goes down with it, carrying the request ID and the client's cancellation.</li>
+      <li data-lines="7" data-state="Service.Create → validTitle ✓ → Task{ID:5940c30b6c1d} → store.Lock → map write → Unlock">Inside the service: validate, build the task, call <code>memstore.Create</code>, which takes the write lock, checks for a duplicate ID, writes into the map, and unlocks.</li>
+      <li data-lines="12-15" data-state="err=nil">No error, so we skip <code>fail</code>.</li>
+      <li data-lines="16" data-state="header Location=/tasks/5940c30b6c1d">REST convention: a 201 response says where the new resource lives.</li>
+      <li data-lines="17" data-state="status=201" data-out="HTTP/1.1 201 Created\nLocation: /tasks/5940c30b6c1d\n{&quot;id&quot;:&quot;5940c30b6c1d&quot;,&quot;title&quot;:&quot;Write the capstone&quot;,&quot;status&quot;:&quot;todo&quot;,...}"><code>writeJSON</code> sets the content type, writes the 201 (which <code>statusRecorder</code> notes), then encodes the task. On the way back out, <code>logRequests</code> writes its log line with status 201.</li>
+    </ol>
+  </div>
+
+  <p>Errors travel <em>up</em> through the layers, gaining context on the way, and only the HTTP layer turns them into a status code. Let's follow <code>GET /tasks/5940c30b6c1d</code> after that task was deleted, through the real code of three files:</p>
+  <div class="live" data-title="GET a deleted task: from map miss to 404">
+    <pre><code class="language-go">// internal/httpapi/handlers.go
+func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
+	t, err := a.svc.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+// internal/task/service.go
+func (s *Service) Get(ctx context.Context, id string) (Task, error) {
+	t, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// internal/memstore/memstore.go
+func (s *Store) Get(ctx context.Context, id string) (task.Task, error) {
+	if err := ctx.Err(); err != nil {
+		return task.Task{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return task.Task{}, task.ErrNotFound
+	}
+	return t, nil
+}
+
+// internal/httpapi/handlers.go
+func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var ve *task.ValidationError
+	switch {
+	case errors.As(err, &amp;ve):
+		writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: ve.Error(), Field: ve.Field})
+	case errors.Is(err, task.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "task not found"})
+	default:
+		// Unexpected: log the details, but never leak internals to the client.
+		a.log.ErrorContext(r.Context(), "request failed", "err", err, "request_id", RequestIDFrom(r.Context()))
+		writeJSON(w, http.StatusInternalServerError, errorBody{Error: "internal error"})
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-3" data-state="id=5940c30b6c1d" data-out="$ curl -s localhost:8080/tasks/5940c30b6c1d">The mux matched <code>GET /tasks/{id}</code>, so <code>r.PathValue("id")</code> returns the ID. The handler passes the request's context down so a disconnected client cancels the work.</li>
+      <li data-lines="12-13" data-state="id=5940c30b6c1d">The service does not know about HTTP. It just asks the <code>Store</code> interface; at runtime that is the memstore.</li>
+      <li data-lines="21-24" data-state="ctx.Err()=nil">First, the store checks whether the context was already cancelled. It isn't.</li>
+      <li data-lines="25-27" data-state="lock=read; ok=false">A <strong>read</strong> lock lets many <code>Get</code>s run in parallel. The map lookup misses: the task was deleted a moment ago.</li>
+      <li data-lines="28-29" data-state="err=task.ErrNotFound">The store returns the domain sentinel <code>task.ErrNotFound</code>, not a database-specific error. The deferred <code>RUnlock</code> fires on the way out.</li>
+      <li data-lines="14-15" data-state="err=&quot;get task 5940c30b6c1d: task not found&quot;">The service wraps it with <code>%w</code>, adding which ID failed. The sentinel is still inside the chain.</li>
+      <li data-lines="4-5,35-37" data-state="err=wrapped(ErrNotFound)">Back in the handler, <code>err != nil</code>, so it calls <code>fail</code>: the one function that maps domain errors to HTTP.</li>
+      <li data-lines="38" data-state="ve=nil"><code>errors.As</code> looks for a <code>*task.ValidationError</code> in the chain. There isn't one.</li>
+      <li data-lines="40-41" data-state="status=404" data-out="{&quot;error&quot;:&quot;task not found&quot;}"><code>errors.Is</code> unwraps and finds <code>ErrNotFound</code>, so the client gets a <strong>404</strong> with a clean message. Note the client does <em>not</em> see the wrapped text with the ID.</li>
+      <li data-lines="42-45">Any other error would land here: logged in full with the request ID, but the client only sees "internal error". Internals never leak.</li>
+    </ol>
+  </div>
+<div class="output" data-label="curl session (after the DELETE)"><pre>$ curl -s localhost:8080/tasks/5940c30b6c1d
+{"error":"task not found"}</pre></div>
+  <p>Before any business rule runs, the HTTP layer must make sure the body is exactly one well-formed JSON object with only known fields. Here are the two rejected requests from the curl session, traced through the real helper:</p>
+  <div class="live" data-title="Two bad bodies meet decodeJSON">
+    <pre><code class="language-go">// internal/httpapi/handlers.go
+func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if err := decodeJSON(w, r, &amp;req); err != nil {
+		a.badRequest(w, r, err)
+		return
+	}
+	// ... on success: svc.Create, then 201 Created
+
+// decodeJSON reads exactly one JSON object, rejecting unknown fields and huge bodies.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if dec.More() {
+		return errors.New("invalid JSON body: multiple values")
+	}
+	return nil
+}
+
+func (a *API) badRequest(w http.ResponseWriter, r *http.Request, err error) {
+	writeJSON(w, http.StatusBadRequest, errorBody{Error: err.Error()})
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-4,10" data-state="body={&quot;title&quot;:&quot;oops&quot;" data-out="$ curl -s -X POST localhost:8080/tasks -d '{&quot;title&quot;:&quot;oops&quot;'">Request 1 has a truncated body. <code>createTask</code> calls <code>decodeJSON</code> straight away.</li>
+      <li data-lines="11" data-state="limit=1 MiB"><code>MaxBytesReader</code> caps the body at 1 MiB. A client sending a 5 GB body gets an error instead of exhausting memory.</li>
+      <li data-lines="12-13">A streaming decoder, told to reject fields that are not in <code>createRequest</code>.</li>
+      <li data-lines="14-15" data-state="err=invalid JSON body: unexpected EOF">The object never closes, so <code>Decode</code> returns <code>unexpected EOF</code>. We wrap it with a prefix the client can understand.</li>
+      <li data-lines="4-5,23-24" data-state="status=400" data-out="{&quot;error&quot;:&quot;invalid JSON body: unexpected EOF&quot;}"><code>badRequest</code> sends <strong>400</strong>: the request itself is malformed, so the service is never called.</li>
+      <li data-lines="2-4,10-13" data-state="body={&quot;title&quot;:&quot;x&quot;,&quot;priority&quot;:1}" data-out="$ curl -s -X POST localhost:8080/tasks -d '{&quot;title&quot;:&quot;x&quot;,&quot;priority&quot;:1}'">Request 2 is valid JSON, but has a field our API doesn't have.</li>
+      <li data-lines="14-15" data-state="err=json: unknown field &quot;priority&quot;">Because of <code>DisallowUnknownFields</code>, decoding fails at <code>priority</code>. Without it, the typo'd or unsupported field would be silently ignored and the client would think it worked.</li>
+      <li data-lines="4-5,23-24" data-state="status=400" data-out="{&quot;error&quot;:&quot;invalid JSON body: json: unknown field \&quot;priority\&quot;&quot;}">Another 400. (Had both checks passed, <code>dec.More()</code> on line 17 would still reject a body like <code>{}{}</code>.)</li>
+    </ol>
+  </div>
+<div class="output" data-label="curl session"><pre>$ curl -s -X POST localhost:8080/tasks -d '{"title":"oops"'
+{"error":"invalid JSON body: unexpected EOF"}
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"x","priority":1}'
+{"error":"invalid JSON body: json: unknown field \"priority\""}</pre></div>
+  <h3>Middleware: recover, request IDs, logging</h3>
+  <p>Middleware is a function that takes a handler and returns a new handler that does something before and/or after calling the original. It's how we add cross-cutting behaviour to every route without touching any handler.</p>
+<div class="code" data-file="internal/httpapi/middleware.go"><pre><code class="language-go">package httpapi
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net/http"
+	"runtime/debug"
+	"time"
+)
+
+// middleware wraps a handler with extra behaviour.
+type middleware func(http.Handler) http.Handler
+
+// chain applies mws so that the first one listed is the outermost.
+func chain(h http.Handler, mws ...middleware) http.Handler {
+	for i := len(mws) - 1; i &gt;= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+
+type ctxKey struct{} // unexported type: no other package can collide with it
+
+// RequestIDFrom returns the request ID stored by the requestID middleware.
+func RequestIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(ctxKey{}).(string)
+	return id
+}
+
+// requestID reuses an incoming X-Request-ID or creates one, stores it in
+// the context, and echoes it in the response.
+func requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" || len(id) &gt; 64 {
+			b := make([]byte, 8)
+			rand.Read(b)
+			id = hex.EncodeToString(b)
+		}
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), ctxKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// statusRecorder captures the status code written by the handler.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests writes one structured log line per request.
+func (a *API) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &amp;statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		a.log.InfoContext(r.Context(), "request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"route", r.Pattern, // e.g. "GET /tasks/{id}"; set by the mux
+			"status", rec.status,
+			"dur", time.Since(start).Round(time.Microsecond).String(),
+			"request_id", RequestIDFrom(r.Context()),
+		)
+	})
+}
+
+// recoverPanics turns a panicking handler into a 500 instead of a dropped connection.
+func (a *API) recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				if v == http.ErrAbortHandler { // deliberate abort: let net/http handle it
+					panic(v)
+				}
+				a.log.ErrorContext(r.Context(), "panic", "value", v, "stack", string(debug.Stack()))
+				writeJSON(w, http.StatusInternalServerError, errorBody{Error: "internal error"})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}</code></pre></div>
+
+  <div class="live" data-title="How chain() builds the onion">
+    <pre><code class="language-go">// chain applies mws so that the first one listed is the outermost.
+func chain(h http.Handler, mws ...middleware) http.Handler {
+	for i := len(mws) - 1; i &gt;= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="h=mux; mws=[recoverPanics requestID logRequests]"><code>New</code> calls <code>chain(mux, a.recoverPanics, requestID, a.logRequests)</code>. We want the first one listed to be the outermost layer.</li>
+      <li data-lines="3-4" data-state="i=2; h=logRequests(mux)">So we loop <em>backwards</em>. First we wrap the mux in the logger, the innermost layer.</li>
+      <li data-lines="3-4" data-state="i=1; h=requestID(logRequests(mux))">Then wrap that in <code>requestID</code>. Because it's outside the logger, the ID is already in the context when the log line is written.</li>
+      <li data-lines="3-4" data-state="i=0; h=recoverPanics(requestID(logRequests(mux)))">Finally <code>recoverPanics</code> wraps everything, so a panic anywhere inside, even in another middleware, becomes a 500.</li>
+      <li data-lines="6" data-state="request path: recover → requestID → log → mux → handler">We return the onion. A request enters from the outside in, and the response unwinds from the inside out.</li>
+    </ol>
+  </div>
+
+  <div class="callout tip"><p>Why is <code>ctxKey</code> an empty struct type and not a string like <code>"request_id"</code>? Context keys are compared by type <em>and</em> value. A private type means no other package can accidentally read or overwrite our value, even if it also uses the string "request_id". This is the standard Go pattern.</p></div>
+
+  <p><code>chain</code> wraps the mux as recover → requestID → logRequests → mux. Here is the last request of the curl session, which sends its own <code>X-Request-ID: demo-42</code>, traced through the real middleware (recoverPanics just calls <code>next</code> when nothing panics):</p>
+  <div class="live" data-title="One request through requestID and logRequests">
+    <pre><code class="language-go">// internal/httpapi/middleware.go
+func requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" || len(id) &gt; 64 {
+			b := make([]byte, 8)
+			rand.Read(b)
+			id = hex.EncodeToString(b)
+		}
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), ctxKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// statusRecorder captures the status code written by the handler.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests writes one structured log line per request.
+func (a *API) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &amp;statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		a.log.InfoContext(r.Context(), "request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"route", r.Pattern, // e.g. "GET /tasks/{id}"; set by the mux
+			"status", rec.status,
+			"dur", time.Since(start).Round(time.Microsecond).String(),
+			"request_id", RequestIDFrom(r.Context()),
+		)
+	})
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="3-4" data-state="id=demo-42" data-out="$ curl -s -D - -o /dev/null -H 'X-Request-ID: demo-42' localhost:8080/healthz | grep -i request-id"><code>requestID</code> runs first. The client supplied an ID, so we reuse it. That lets one ID follow a request across several services.</li>
+      <li data-lines="5-9" data-state="id=demo-42">The ID is non-empty and at most 64 bytes, so we skip generating a random one. (The length limit stops a client stuffing megabytes into our logs.)</li>
+      <li data-lines="10-12" data-state="ctx[ctxKey{}]=demo-42">Echo the ID in the response header, store it in a <strong>new</strong> context (contexts are immutable), and call the next layer with <code>r.WithContext(ctx)</code>.</li>
+      <li data-lines="29-31" data-state="start=t0; rec.status=200"><code>logRequests</code> notes the start time and wraps <code>w</code> in a <code>statusRecorder</code>. The default is 200, because a handler that never calls <code>WriteHeader</code> implicitly sends 200.</li>
+      <li data-lines="32,22-24" data-state="rec.status=200" data-out="X-Request-Id: demo-42">The mux runs <code>health</code>, whose <code>writeJSON</code> calls <code>WriteHeader(200)</code>. Our embedded-struct override records the code, then forwards it. Headers go out, including the request ID.</li>
+      <li data-lines="33-37" data-state="route=GET /healthz; status=200">Back in <code>logRequests</code> after the handler returned. <code>r.Pattern</code> is the route the mux matched, which groups <code>/tasks/abc</code> and <code>/tasks/xyz</code> under one label.</li>
+      <li data-lines="38-40" data-state="dur=17µs; request_id=demo-42" data-out="{&quot;time&quot;:&quot;2026-10-16T23:47:47.192887+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;request&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;,&quot;method&quot;:&quot;GET&quot;,&quot;path&quot;:&quot;/healthz&quot;,&quot;route&quot;:&quot;GET /healthz&quot;,&quot;status&quot;:200,&quot;dur&quot;:&quot;17µs&quot;,&quot;request_id&quot;:&quot;demo-42&quot;}"><code>RequestIDFrom</code> reads the ID back from the context. One log line per request, and it carries the same ID the client saw.</li>
+    </ol>
+  </div>
+<div class="output" data-label="curl + the server's log line"><pre>$ curl -s -D - -o /dev/null -H 'X-Request-ID: demo-42' localhost:8080/healthz | grep -i request-id
+X-Request-Id: demo-42
+{"time":"2026-10-16T23:47:47.192887+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/healthz","route":"GET /healthz","status":200,"dur":"17µs","request_id":"demo-42"}</pre></div>
+  <h2>The background worker and <code>main</code></h2>
+  <h3>A ticker plus a context</h3>
+  <p>The worker is a loop that waits for one of two things: a tick (do the work) or a cancelled context (stop). It accepts a one-method interface, <code>Marker</code>, instead of <code>*task.Service</code>, which makes it trivially testable with a fake.</p>
+<div class="code" data-file="internal/worker/overdue.go"><pre><code class="language-go">// Package worker runs background jobs for the Task API.
+package worker
+
+import (
+	"context"
+	"log/slog"
+	"time"
+)
+
+// Marker is the one behaviour the worker needs. *task.Service satisfies it,
+// and tests can pass a tiny fake instead.
+type Marker interface {
+	MarkOverdue(ctx context.Context) (int, error)
+}
+
+// Overdue periodically flags tasks whose due time has passed.
+type Overdue struct {
+	Marker   Marker
+	Interval time.Duration
+	Log      *slog.Logger
+}
+
+// Run blocks, ticking every Interval, until ctx is cancelled.
+func (w *Overdue) Run(ctx context.Context) {
+	w.Log.Info("overdue worker started", "interval", w.Interval.String())
+	t := time.NewTicker(w.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case &lt;-ctx.Done():
+			w.Log.Info("overdue worker stopped")
+			return
+		case &lt;-t.C:
+			w.tick(ctx)
+		}
+	}
+}
+
+func (w *Overdue) tick(ctx context.Context) {
+	// Bound each run so a slow store can't stall the loop forever.
+	ctx, cancel := context.WithTimeout(ctx, w.Interval)
+	defer cancel()
+	n, err := w.Marker.MarkOverdue(ctx)
+	switch {
+	case err != nil:
+		w.Log.Error("mark overdue failed", "err", err)
+	case n &gt; 0:
+		w.Log.Info("marked tasks overdue", "count", n)
+	}
+}</code></pre></div>
+
+  <div class="live" data-title="The worker loop from start to stop">
+    <pre><code class="language-go">func (w *Overdue) Run(ctx context.Context) {
+	w.Log.Info("overdue worker started", "interval", w.Interval.String())
+	t := time.NewTicker(w.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case &lt;-ctx.Done():
+			w.Log.Info("overdue worker stopped")
+			return
+		case &lt;-t.C:
+			w.tick(ctx)
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="interval=1s" data-out="{&quot;msg&quot;:&quot;overdue worker started&quot;,&quot;interval&quot;:&quot;1s&quot;}">main starts <code>Run</code> in its own goroutine with <code>OVERDUE_INTERVAL=1s</code>.</li>
+      <li data-lines="3-4" data-state="ticker=every 1s">A <code>Ticker</code> delivers a value on <code>t.C</code> every interval. <code>defer t.Stop()</code> releases it when we return.</li>
+      <li data-lines="5-6" data-state="waiting">The <code>for</code>/<code>select</code> blocks until one of its cases is ready. While blocked, the goroutine costs no CPU.</li>
+      <li data-lines="10-11" data-state="tick #1, #2: changed=0">Ticks 1 and 2: <code>tick</code> calls <code>MarkOverdue</code> with a per-run timeout. "Pay invoice" isn't due yet, so nothing changes and nothing is logged.</li>
+      <li data-lines="10-11" data-state="tick #3: changed=1" data-out="{&quot;msg&quot;:&quot;marked tasks overdue&quot;,&quot;count&quot;:1}">Tick 3 happens after the due time. One task gets flagged, and we log it.</li>
+      <li data-lines="7-9" data-state="ctx=cancelled (SIGTERM)" data-out="{&quot;msg&quot;:&quot;overdue worker stopped&quot;}">SIGTERM cancels the root context. The <code>ctx.Done()</code> case fires, we log and return. The deferred <code>Stop</code> runs, and main's <code>wg.Wait()</code> unblocks.</li>
+    </ol>
+  </div>
+
+  <p>In the curl session the worker ticks every second. "Pay invoice" is due at 18:17:46Z. The ticks at :44 and :45 find nothing to do and log nothing. Here is the tick at 18:17:46.895Z, through the real <code>tick</code> and <code>Service.MarkOverdue</code>:</p>
+  <div class="live" data-title="The tick that marks &quot;Pay invoice&quot; overdue">
+    <pre><code class="language-go">// internal/worker/overdue.go
+func (w *Overdue) tick(ctx context.Context) {
+	// Bound each run so a slow store can't stall the loop forever.
+	ctx, cancel := context.WithTimeout(ctx, w.Interval)
+	defer cancel()
+	n, err := w.Marker.MarkOverdue(ctx)
+	switch {
+	case err != nil:
+		w.Log.Error("mark overdue failed", "err", err)
+	case n &gt; 0:
+		w.Log.Info("marked tasks overdue", "count", n)
+	}
+}
+
+// internal/task/service.go
+func (s *Service) MarkOverdue(ctx context.Context) (int, error) {
+	ts, err := s.store.List(ctx, Filter{})
+	if err != nil {
+		return 0, fmt.Errorf("mark overdue: %w", err)
+	}
+	now := s.now().UTC()
+	changed := 0
+	for _, t := range ts {
+		if t.Status == StatusDone || t.Overdue || t.Due == nil || !t.Due.Before(now) {
+			continue
+		}
+		t.Overdue = true
+		t.UpdatedAt = now
+		if err := s.store.Update(ctx, t); err != nil {
+			return changed, fmt.Errorf("mark overdue %s: %w", t.ID, err)
+		}
+		changed++
+	}
+	return changed, nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-5" data-state="ctx deadline=now+1s"><code>tick</code> gives this run its own timeout, equal to the interval. A slow store can never make ticks pile up behind each other.</li>
+      <li data-lines="6,16-17" data-state="ts=[Write the capstone, Pay invoice]">The worker only knows the <code>Marker</code> interface; at runtime it is the <code>*task.Service</code>. It lists all tasks.</li>
+      <li data-lines="21-22" data-state="now=18:17:46.895Z; changed=0">One timestamp for the whole run, so every task is judged against the same instant.</li>
+      <li data-lines="23-25" data-state="t=Write the capstone; Due=nil">The capstone task has no due date: <code>t.Due == nil</code>, so we <code>continue</code>. (The order of checks matters: <code>t.Due.Before</code> would panic on nil.)</li>
+      <li data-lines="23-24" data-state="t=Pay invoice; Due=18:17:46Z; Overdue=false">Status todo, not yet overdue, has a due date, and 18:17:46 is before now. All checks pass.</li>
+      <li data-lines="27-29" data-state="t.Overdue=true">Set the flag on our copy and write it back with <code>store.Update</code>.</li>
+      <li data-lines="32-34" data-state="changed=1">Count it and return 1. A task already flagged is skipped next time, so the job is idempotent.</li>
+      <li data-lines="7-11" data-state="n=1; err=nil" data-out="{&quot;time&quot;:&quot;2026-10-16T23:47:46.895246+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;marked tasks overdue&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;,&quot;count&quot;:1}">Back in <code>tick</code>: no error and <code>n &gt; 0</code>, so we log once. Ticks that change nothing stay silent; that keeps the logs useful.</li>
+      <li data-lines="5" data-state="ctx=cancelled (timeout released)"><code>defer cancel()</code> frees the timeout's timer. The next <code>GET</code> of the task shows <code>"overdue": true</code>.</li>
+    </ol>
+  </div>
+<div class="output" data-label="server log"><pre>{"time":"2026-10-16T23:47:46.895246+05:30","level":"INFO","msg":"marked tasks overdue","app":"taskapi","version":"v1.0.0","count":1}</pre></div>
+  <h3>main: config, wiring, startup and shutdown</h3>
+  <p><code>main</code> is the only place that knows every concrete type. It reads config from the environment, builds the store → service → handler chain, starts the worker and the server, and then waits for a signal. Notice how small <code>main</code> itself is: it just calls <code>run</code> and turns an error into exit code 1. That makes <code>run</code> easy to read top to bottom, and its <code>defer</code>s actually run (they wouldn't if we called <code>os.Exit</code> inside it).</p>
+<div class="code" data-file="cmd/api/main.go"><pre><code class="language-go">// Command api runs the Task API HTTP server.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"example.com/taskapi/internal/httpapi"
+	"example.com/taskapi/internal/memstore"
+	"example.com/taskapi/internal/task"
+	"example.com/taskapi/internal/worker"
+)
+
+var version = "dev" // set with -ldflags "-X main.version=..."
+
+type config struct {
+	addr            string
+	overdueInterval time.Duration
+	shutdownTimeout time.Duration
+	logLevel        slog.Level
+}
+
+func loadConfig() (config, error) {
+	c := config{
+		addr:            ":8080",
+		overdueInterval: time.Minute,
+		shutdownTimeout: 10 * time.Second,
+	}
+	if v := os.Getenv("ADDR"); v != "" {
+		c.addr = v
+	}
+	if v := os.Getenv("OVERDUE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d &lt;= 0 {
+			return c, fmt.Errorf("OVERDUE_INTERVAL: invalid duration %q", v)
+		}
+		c.overdueInterval = d
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		if err := c.logLevel.UnmarshalText([]byte(v)); err != nil {
+			return c, fmt.Errorf("LOG_LEVEL: %w", err)
+		}
+	}
+	return c, nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &amp;slog.HandlerOptions{Level: cfg.logLevel}))
+	log = log.With("app", "taskapi", "version", version)
+
+	// ctx is cancelled on Ctrl-C or SIGTERM: the single "time to stop" signal.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Wiring: the only place that knows every concrete type.
+	store := memstore.New()
+	svc := task.NewService(store)
+	handler := httpapi.New(svc, log)
+
+	var wg sync.WaitGroup
+	overdue := &amp;worker.Overdue{Marker: svc, Interval: cfg.overdueInterval, Log: log}
+	wg.Go(func() { overdue.Run(ctx) })
+
+	srv := &amp;http.Server{
+		Addr:              cfg.addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", cfg.addr)
+		serveErr &lt;- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := &lt;-serveErr:
+		return fmt.Errorf("server: %w", err) // e.g. port already in use
+	case &lt;-ctx.Done():
+		log.Info("shutting down")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil &amp;&amp; !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	wg.Wait() // the worker saw ctx.Done() too; wait for it to return
+	log.Info("stopped cleanly")
+	return nil
+}</code></pre></div>
+
+  <p>The shutdown order is deliberate:</p>
+  <ol>
+    <li>The signal cancels <code>ctx</code>. The worker notices and begins stopping.</li>
+    <li><code>srv.Shutdown</code> stops accepting connections and waits (up to 10s) for in-flight requests to finish. Request contexts are <em>not</em> derived from <code>ctx</code> (the server's default base context is <code>context.Background()</code>), so in-flight requests aren't cancelled mid-way. They're allowed to finish, which is the whole point of draining.</li>
+    <li><code>wg.Wait()</code> makes sure the worker has fully returned.</li>
+    <li>Only then does <code>run</code> return, and the process exits 0.</li>
+  </ol>
+
+  <div class="callout senior"><p>The <code>serveErr</code> channel has a buffer of 1. That's not an accident: after a normal shutdown, <code>ListenAndServe</code> returns <code>ErrServerClosed</code> and the goroutine sends it, but nobody is receiving any more. With an unbuffered channel that goroutine would block forever, a small goroutine leak (gotcha #17). The buffer gives it somewhere to put the value and exit.</p></div>
+
+  <p>The capstone's config is smaller than Chapter 20's: environment variables only, no flags. Here is the real <code>loadConfig</code> from <code>cmd/api/main.go</code>, called four times with different environments:</p>
+  <div class="live" data-title="loadConfig: defaults, overrides, rejections">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+)
+
+type config struct {
+	addr            string
+	overdueInterval time.Duration
+	shutdownTimeout time.Duration
+	logLevel        slog.Level
+}
+
+func loadConfig() (config, error) {
+	c := config{
+		addr:            ":8080",
+		overdueInterval: time.Minute,
+		shutdownTimeout: 10 * time.Second,
+	}
+	if v := os.Getenv("ADDR"); v != "" {
+		c.addr = v
+	}
+	if v := os.Getenv("OVERDUE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d &lt;= 0 {
+			return c, fmt.Errorf("OVERDUE_INTERVAL: invalid duration %q", v)
+		}
+		c.overdueInterval = d
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		if err := c.logLevel.UnmarshalText([]byte(v)); err != nil {
+			return c, fmt.Errorf("LOG_LEVEL: %w", err)
+		}
+	}
+	return c, nil
+}
+
+func main() {
+	c, err := loadConfig()
+	fmt.Printf("1) addr=%s interval=%s level=%s err=%v\n", c.addr, c.overdueInterval, c.logLevel, err)
+
+	os.Setenv("ADDR", "127.0.0.1:8080")
+	os.Setenv("OVERDUE_INTERVAL", "1s")
+	os.Setenv("LOG_LEVEL", "debug")
+	c, err = loadConfig()
+	fmt.Printf("2) addr=%s interval=%s level=%s err=%v\n", c.addr, c.overdueInterval, c.logLevel, err)
+
+	os.Setenv("OVERDUE_INTERVAL", "-5s")
+	_, err = loadConfig()
+	fmt.Println("3) err:", err)
+
+	os.Setenv("OVERDUE_INTERVAL", "1s")
+	os.Setenv("LOG_LEVEL", "loud")
+	_, err = loadConfig()
+	fmt.Println("4) err:", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="42,18-22" data-state="c={addr::8080 overdueInterval:1m0s logLevel:INFO}">Call 1, nothing set. Start from defaults that work on a laptop. <code>logLevel</code> is not mentioned, so it is the zero <code>slog.Level</code>, which is INFO.</li>
+      <li data-lines="23-37" data-state="ADDR=&quot;&quot;; OVERDUE_INTERVAL=&quot;&quot;; LOG_LEVEL=&quot;&quot;">Each <code>if v := os.Getenv(...); v != ""</code> is skipped because the variables are empty.</li>
+      <li data-lines="43" data-out="1) addr=:8080 interval=1m0s level=INFO err=&lt;nil&gt;">Pure defaults.</li>
+      <li data-lines="45-48,23-24" data-state="c.addr=127.0.0.1:8080">Call 2, with the settings used in the curl session. <code>ADDR</code> overrides the address.</li>
+      <li data-lines="26-31" data-state="d=1s; c.overdueInterval=1s"><code>time.ParseDuration("1s")</code> succeeds and is positive, so it replaces the one-minute default.</li>
+      <li data-lines="33-36" data-state="c.logLevel=DEBUG"><code>slog.Level</code> implements <code>UnmarshalText</code>, so "debug", "INFO", even "warn+2" parse without our own switch statement.</li>
+      <li data-lines="49" data-out="2) addr=127.0.0.1:8080 interval=1s level=DEBUG err=&lt;nil&gt;">Every env var applied.</li>
+      <li data-lines="51-52,26-29" data-state="d=-5s">Call 3: <code>-5s</code> parses as a valid duration, but a negative ticker interval would panic in <code>time.NewTicker</code>. The <code>d &lt;= 0</code> check catches it.</li>
+      <li data-lines="53" data-out="3) err: OVERDUE_INTERVAL: invalid duration &quot;-5s&quot;">The error names the variable and quotes the bad value, so the fix is obvious from one log line.</li>
+      <li data-lines="55-57,33-35" data-state="LOG_LEVEL=loud">Call 4: an unknown level name. We wrap slog's own error with <code>%w</code> and our prefix.</li>
+      <li data-lines="58" data-out="4) err: LOG_LEVEL: slog: level string &quot;loud&quot;: unknown name">In the real program <code>run</code> returns this, <code>main</code> prints it and exits with code 1, before the server ever starts.</li>
+    </ol>
+  </div>
+<div class="output"><pre>1) addr=:8080 interval=1m0s level=INFO err=&lt;nil&gt;
+2) addr=127.0.0.1:8080 interval=1s level=DEBUG err=&lt;nil&gt;
+3) err: OVERDUE_INTERVAL: invalid duration "-5s"
+4) err: LOG_LEVEL: slog: level string "loud": unknown name</pre></div>
+  <p><code>main</code> only calls <code>run</code> and turns an error into exit code 1. Here is <code>run</code> during the real curl session, started with <code>ADDR=127.0.0.1:8080 OVERDUE_INTERVAL=1s</code> and stopped with SIGTERM:</p>
+  <div class="live" data-title="run() from first log line to clean exit">
+    <pre><code class="language-go">// cmd/api/main.go
+func run() error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &amp;slog.HandlerOptions{Level: cfg.logLevel}))
+	log = log.With("app", "taskapi", "version", version)
+
+	// ctx is cancelled on Ctrl-C or SIGTERM: the single "time to stop" signal.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Wiring: the only place that knows every concrete type.
+	store := memstore.New()
+	svc := task.NewService(store)
+	handler := httpapi.New(svc, log)
+
+	var wg sync.WaitGroup
+	overdue := &amp;worker.Overdue{Marker: svc, Interval: cfg.overdueInterval, Log: log}
+	wg.Go(func() { overdue.Run(ctx) })
+
+	srv := &amp;http.Server{
+		Addr:              cfg.addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", cfg.addr)
+		serveErr &lt;- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := &lt;-serveErr:
+		return fmt.Errorf("server: %w", err) // e.g. port already in use
+	case &lt;-ctx.Done():
+		log.Info("shutting down")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil &amp;&amp; !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	wg.Wait() // the worker saw ctx.Done() too; wait for it to return
+	log.Info("stopped cleanly")
+	return nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="3-8" data-state="cfg={addr:127.0.0.1:8080 overdueInterval:1s}; log=+app,version">Config from the environment, then a JSON logger that stamps <code>app</code> and <code>version</code> on every line.</li>
+      <li data-lines="11-12" data-state="ctx=live">One context means "time to stop". Everything long-running receives it.</li>
+      <li data-lines="15-17" data-state="store=*memstore.Store; svc=*task.Service">The wiring: main is the only place that knows every concrete type. Swap <code>memstore</code> for a Postgres store here and nothing else changes.</li>
+      <li data-lines="19-21" data-state="goroutines=main, worker"><code>wg.Go</code> starts the overdue worker in the background and tracks it in the WaitGroup.</li>
+      <li data-lines="23-30" data-state="srv timeouts=5s/15s/15s/60s">An <code>http.Server</code> with all four timeouts set. The defaults are zero, meaning "wait forever", which slow clients can abuse.</li>
+      <li data-lines="32-36" data-state="goroutines=main, worker, server" data-out="{&quot;time&quot;:&quot;2026-10-16T23:47:43.893376+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;listening&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;,&quot;addr&quot;:&quot;127.0.0.1:8080&quot;}\n{&quot;time&quot;:&quot;2026-10-16T23:47:43.893675+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;overdue worker started&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;,&quot;interval&quot;:&quot;1s&quot;}">The server runs in its own goroutine and reports its result on a buffered channel. The two goroutines log almost at once; which line comes first is up to the scheduler.</li>
+      <li data-lines="38-41" data-state="waiting…">main blocks in <code>select</code>: either the server fails (port in use, say) or the context is cancelled. The curl session runs while we wait here.</li>
+      <li data-lines="41-42" data-state="ctx=cancelled" data-out="{&quot;time&quot;:&quot;2026-10-16T23:47:47.193978+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;overdue worker stopped&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;}\n{&quot;time&quot;:&quot;2026-10-16T23:47:47.193977+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;shutting down&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;}">SIGTERM cancels <code>ctx</code>. The worker and main both see it at the same instant; the timestamps differ by 1 µs, and the worker's line happened to be written first.</li>
+      <li data-lines="45-49" data-state="shutdownCtx=10s"><code>Shutdown</code> stops accepting connections and drains in-flight requests within 10 seconds. A fresh context is needed because <code>ctx</code> is already cancelled.</li>
+      <li data-lines="50-52" data-state="goroutines=main" data-out="{&quot;time&quot;:&quot;2026-10-16T23:47:47.194023+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;stopped cleanly&quot;,&quot;app&quot;:&quot;taskapi&quot;,&quot;version&quot;:&quot;v1.0.0&quot;}"><code>wg.Wait</code> confirms the worker returned. Only then do we log the last line and return nil: exit code 0.</li>
+    </ol>
+  </div>
+<div class="output" data-label="server stdout (request lines omitted)"><pre>{"time":"2026-10-16T23:47:43.893376+05:30","level":"INFO","msg":"listening","app":"taskapi","version":"v1.0.0","addr":"127.0.0.1:8080"}
+{"time":"2026-10-16T23:47:43.893675+05:30","level":"INFO","msg":"overdue worker started","app":"taskapi","version":"v1.0.0","interval":"1s"}
+{"time":"2026-10-16T23:47:47.193978+05:30","level":"INFO","msg":"overdue worker stopped","app":"taskapi","version":"v1.0.0"}
+{"time":"2026-10-16T23:47:47.193977+05:30","level":"INFO","msg":"shutting down","app":"taskapi","version":"v1.0.0"}
+{"time":"2026-10-16T23:47:47.194023+05:30","level":"INFO","msg":"stopped cleanly","app":"taskapi","version":"v1.0.0"}</pre></div>
+  <h2>Testing it for real</h2>
+  <p>Four test files, each using the right tool for its layer.</p>
+
+  <h3>Service: table-driven tests with a fixed clock</h3>
+  <p>Each row in the table is one scenario. Adding a new edge case is one line. The fixed clock makes time-based rules (due dates, overdue) completely deterministic, and in <code>TestMarkOverdue</code> we even move the clock forward two hours.</p>
+<div class="code" data-file="internal/task/service_test.go"><pre><code class="language-go">package task_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"example.com/taskapi/internal/memstore"
+	"example.com/taskapi/internal/task"
+)
+
+// fixedNow is the "current time" for every test, so results are repeatable.
+var fixedNow = time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+
+func newService(t *testing.T) *task.Service {
+	t.Helper()
+	return task.NewServiceForTest(memstore.New(), func() time.Time { return fixedNow })
+}
+
+func ptr[T any](v T) *T { return &amp;v }
+
+func TestCreate(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        task.CreateInput
+		wantField string // "" means success expected
+		wantTitle string
+	}{
+		{name: "valid", in: task.CreateInput{Title: "Write docs"}, wantTitle: "Write docs"},
+		{name: "trims spaces", in: task.CreateInput{Title: "  Ship it  "}, wantTitle: "Ship it"},
+		{name: "future due", in: task.CreateInput{Title: "Pay rent", Due: ptr(fixedNow.Add(time.Hour))}, wantTitle: "Pay rent"},
+		{name: "empty title", in: task.CreateInput{Title: "   "}, wantField: "title"},
+		{name: "title too long", in: task.CreateInput{Title: strings.Repeat("x", 201)}, wantField: "title"},
+		{name: "due in past", in: task.CreateInput{Title: "Too late", Due: ptr(fixedNow.Add(-time.Minute))}, wantField: "due"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newService(t)
+			got, err := svc.Create(context.Background(), tc.in)
+
+			if tc.wantField != "" {
+				var ve *task.ValidationError
+				if !errors.As(err, &amp;ve) {
+					t.Fatalf("want ValidationError on %q, got %v", tc.wantField, err)
+				}
+				if ve.Field != tc.wantField {
+					t.Errorf("field = %q, want %q", ve.Field, tc.wantField)
+				}
+				if !errors.Is(err, task.ErrValidation) {
+					t.Errorf("errors.Is(err, ErrValidation) = false")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Title != tc.wantTitle || got.Status != task.StatusTodo || got.ID == "" {
+				t.Errorf("got %+v", got)
+			}
+			if !got.CreatedAt.Equal(fixedNow) {
+				t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, fixedNow)
+			}
+		})
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		in      task.UpdateInput
+		check   func(t *testing.T, got task.Task)
+		wantErr error
+	}{
+		{
+			name: "change status",
+			in:   task.UpdateInput{Status: ptr(task.StatusDoing)},
+			check: func(t *testing.T, got task.Task) {
+				if got.Status != task.StatusDoing {
+					t.Errorf("status = %q", got.Status)
+				}
+			},
+		},
+		{
+			name: "rename keeps status",
+			in:   task.UpdateInput{Title: ptr("New name")},
+			check: func(t *testing.T, got task.Task) {
+				if got.Title != "New name" || got.Status != task.StatusTodo {
+					t.Errorf("got %+v", got)
+				}
+			},
+		},
+		{name: "bad status", in: task.UpdateInput{Status: ptr(task.Status("later"))}, wantErr: task.ErrValidation},
+		{name: "blank title", in: task.UpdateInput{Title: ptr("")}, wantErr: task.ErrValidation},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newService(t)
+			created, err := svc.Create(ctx, task.CreateInput{Title: "Original"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := svc.Update(ctx, created.ID, tc.in)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.check(t, got)
+		})
+	}
+
+	t.Run("unknown id", func(t *testing.T) {
+		_, err := newService(t).Update(ctx, "nope", task.UpdateInput{})
+		if !errors.Is(err, task.ErrNotFound) {
+			t.Fatalf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestMarkOverdue(t *testing.T) {
+	ctx := context.Background()
+	now := fixedNow
+	clock := func() time.Time { return now } // a clock we can move forward
+	svc := task.NewServiceForTest(memstore.New(), clock)
+
+	soon, _ := svc.Create(ctx, task.CreateInput{Title: "soon", Due: ptr(now.Add(time.Hour))})
+	later, _ := svc.Create(ctx, task.CreateInput{Title: "later", Due: ptr(now.Add(48 * time.Hour))})
+	done, _ := svc.Create(ctx, task.CreateInput{Title: "done", Due: ptr(now.Add(time.Hour))})
+	svc.Create(ctx, task.CreateInput{Title: "no due date"})
+	svc.Update(ctx, done.ID, task.UpdateInput{Status: ptr(task.StatusDone)})
+
+	now = now.Add(2 * time.Hour) // two hours pass...
+
+	n, err := svc.MarkOverdue(ctx)
+	if err != nil || n != 1 {
+		t.Fatalf("MarkOverdue = %d, %v; want 1, nil", n, err)
+	}
+	if got, _ := svc.Get(ctx, soon.ID); !got.Overdue {
+		t.Error("soon should be overdue")
+	}
+	if got, _ := svc.Get(ctx, later.ID); got.Overdue {
+		t.Error("later should not be overdue")
+	}
+	if n, _ := svc.MarkOverdue(ctx); n != 0 {
+		t.Errorf("second run changed %d tasks, want 0 (idempotent)", n)
+	}
+}</code></pre></div>
+
+  <h3>Store: concurrency and the race detector</h3>
+  <p>50 goroutines creating and listing at once. On its own this test proves little, but run with <code>-race</code> it would fail loudly if any map access weren't protected by the mutex. It uses <code>wg.Go</code> from Go 1.25.</p>
+<div class="code" data-file="internal/memstore/memstore_test.go"><pre><code class="language-go">package memstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+
+	"example.com/taskapi/internal/task"
+)
+
+func TestConcurrentAccess(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() {
+			id := fmt.Sprintf("t%02d", i)
+			if err := s.Create(ctx, task.Task{ID: id, Title: id}); err != nil {
+				t.Error(err)
+			}
+			if _, err := s.List(ctx, task.Filter{}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	all, _ := s.List(ctx, task.Filter{})
+	if len(all) != 50 {
+		t.Fatalf("got %d tasks, want 50", len(all))
+	}
+}
+
+func TestNotFound(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+	if _, err := s.Get(ctx, "x"); !errors.Is(err, task.ErrNotFound) {
+		t.Errorf("Get: %v", err)
+	}
+	if err := s.Update(ctx, task.Task{ID: "x"}); !errors.Is(err, task.ErrNotFound) {
+		t.Errorf("Update: %v", err)
+	}
+	if err := s.Delete(ctx, "x"); !errors.Is(err, task.ErrNotFound) {
+		t.Errorf("Delete: %v", err)
+	}
+}
+
+func TestCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New().List(ctx, task.Filter{}); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}</code></pre></div>
+
+  <h3>Handlers: real HTTP with <code>httptest</code></h3>
+  <p><code>httptest.NewServer</code> starts the <em>real</em> handler stack (middleware, mux, service, memory store) on a random local port. These tests exercise routing, JSON decoding, status codes, headers and the full create → get → patch → list → delete life cycle, all in milliseconds. <code>t.Context()</code> (Go 1.24) gives each request a context that's cancelled when the test ends.</p>
+<div class="code" data-file="internal/httpapi/handlers_test.go"><pre><code class="language-go">package httpapi_test
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"example.com/taskapi/internal/httpapi"
+	"example.com/taskapi/internal/memstore"
+	"example.com/taskapi/internal/task"
+)
+
+// newServer spins up the real handler stack on a random local port.
+func newServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpapi.New(task.NewService(memstore.New()), log))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func do(t *testing.T, method, url, body string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, strings.TrimSpace(string(b))
+}
+
+func TestCreateValidation(t *testing.T) {
+	srv := newServer(t)
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantInBody string
+	}{
+		{"ok", `{"title":"Buy milk"}`, http.StatusCreated, `"status":"todo"`},
+		{"missing title", `{"title":""}`, http.StatusUnprocessableEntity, `"field":"title"`},
+		{"malformed json", `{"title":`, http.StatusBadRequest, `invalid JSON body`},
+		{"unknown field", `{"title":"x","colour":"red"}`, http.StatusBadRequest, `unknown field`},
+		{"two objects", `{"title":"a"}{"title":"b"}`, http.StatusBadRequest, `multiple values`},
+		{"bad due", `{"title":"x","due":"tomorrow"}`, http.StatusBadRequest, `invalid JSON body`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := do(t, "POST", srv.URL+"/tasks", tc.body)
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", resp.StatusCode, tc.wantStatus, body)
+			}
+			if !strings.Contains(body, tc.wantInBody) {
+				t.Errorf("body %s does not contain %s", body, tc.wantInBody)
+			}
+			if resp.Header.Get("X-Request-ID") == "" {
+				t.Error("missing X-Request-ID header")
+			}
+		})
+	}
+}
+
+func TestTaskLifecycle(t *testing.T) {
+	srv := newServer(t)
+
+	// Create
+	resp, body := do(t, "POST", srv.URL+"/tasks", `{"title":"Write tests"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	var created task.Task
+	if err := json.Unmarshal([]byte(body), &amp;created); err != nil {
+		t.Fatal(err)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/tasks/"+created.ID {
+		t.Errorf("Location = %q", loc)
+	}
+
+	// Get
+	if resp, _ := do(t, "GET", srv.URL+"/tasks/"+created.ID, ""); resp.StatusCode != 200 {
+		t.Errorf("get: %d", resp.StatusCode)
+	}
+
+	// Patch
+	resp, body = do(t, "PATCH", srv.URL+"/tasks/"+created.ID, `{"status":"done"}`)
+	if resp.StatusCode != 200 || !strings.Contains(body, `"status":"done"`) {
+		t.Errorf("patch: %d %s", resp.StatusCode, body)
+	}
+
+	// List with filter
+	_, body = do(t, "GET", srv.URL+"/tasks?status=done", "")
+	if !strings.Contains(body, `"count":1`) {
+		t.Errorf("list done: %s", body)
+	}
+	_, body = do(t, "GET", srv.URL+"/tasks?status=todo", "")
+	if !strings.Contains(body, `"tasks":[]`) {
+		t.Errorf("empty list should be [], got %s", body)
+	}
+
+	// Delete, then it's gone
+	if resp, _ := do(t, "DELETE", srv.URL+"/tasks/"+created.ID, ""); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("delete: %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, "GET", srv.URL+"/tasks/"+created.ID, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("get after delete: %d", resp.StatusCode)
+	}
+}
+
+func TestRouting(t *testing.T) {
+	srv := newServer(t)
+	tests := []struct {
+		method, path string
+		want         int
+	}{
+		{"GET", "/healthz", 200},
+		{"GET", "/tasks/does-not-exist", 404},
+		{"PUT", "/tasks", 405}, // method not allowed: the mux knows POST and GET
+		{"GET", "/nowhere", 404},
+		{"GET", "/tasks?status=someday", 422},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			if resp, body := do(t, tc.method, srv.URL+tc.path, ""); resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d (%s)", resp.StatusCode, tc.want, body)
+			}
+		})
+	}
+}
+
+func TestRequestIDIsPropagated(t *testing.T) {
+	srv := newServer(t)
+	req, _ := http.NewRequest("GET", srv.URL+"/healthz", nil)
+	req.Header.Set("X-Request-ID", "abc-123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("X-Request-ID"); got != "abc-123" {
+		t.Errorf("X-Request-ID = %q, want abc-123", got)
+	}
+}</code></pre></div>
+
+  <h3>Worker: fake time with <code>testing/synctest</code></h3>
+  <p>Testing code with tickers used to mean real sleeps: slow and flaky. <code>testing/synctest</code> (standard since Go 1.25) runs the test in a <strong>bubble</strong> with a fake clock. Time only advances when every goroutine in the bubble is blocked, so "sleep 3 minutes" finishes instantly, and the worker is guaranteed to have ticked exactly 3 times.</p>
+<div class="code" data-file="internal/worker/overdue_test.go"><pre><code class="language-go">package worker
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"sync/atomic"
+	"testing"
+	"testing/synctest"
+	"time"
+)
+
+// fakeMarker counts calls instead of touching real tasks.
+type fakeMarker struct{ calls atomic.Int32 }
+
+func (f *fakeMarker) MarkOverdue(context.Context) (int, error) {
+	f.calls.Add(1)
+	return 1, nil
+}
+
+func TestOverdueRunsAndStops(t *testing.T) {
+	// synctest runs the test in a "bubble" with a fake clock: time only
+	// moves when every goroutine in the bubble is blocked, so a
+	// 3-minute sleep finishes instantly and deterministically.
+	synctest.Test(t, func(t *testing.T) {
+		fake := &amp;fakeMarker{}
+		w := &amp;Overdue{
+			Marker:   fake,
+			Interval: time.Minute,
+			Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
+
+		time.Sleep(3*time.Minute + time.Second) // fake time: returns at once
+		synctest.Wait()                         // let the worker finish its tick
+		if n := fake.calls.Load(); n != 3 {
+			t.Errorf("MarkOverdue called %d times, want 3", n)
+		}
+
+		cancel()
+		&lt;-done // Run must return after cancel: no goroutine leak
+	})
+}</code></pre></div>
+
+  <h3>Running everything</h3>
+  <p>All packages, with the race detector, verbose:</p>
+<div class="output" data-label="go test -race -count=1 -v ./..."><pre>?   	example.com/taskapi/cmd/api	[no test files]
+=== RUN   TestCreateValidation
+=== RUN   TestCreateValidation/ok
+=== RUN   TestCreateValidation/missing_title
+=== RUN   TestCreateValidation/malformed_json
+=== RUN   TestCreateValidation/unknown_field
+=== RUN   TestCreateValidation/two_objects
+=== RUN   TestCreateValidation/bad_due
+--- PASS: TestCreateValidation (0.01s)
+    --- PASS: TestCreateValidation/ok (0.00s)
+    --- PASS: TestCreateValidation/missing_title (0.00s)
+    --- PASS: TestCreateValidation/malformed_json (0.00s)
+    --- PASS: TestCreateValidation/unknown_field (0.00s)
+    --- PASS: TestCreateValidation/two_objects (0.00s)
+    --- PASS: TestCreateValidation/bad_due (0.00s)
+=== RUN   TestTaskLifecycle
+--- PASS: TestTaskLifecycle (0.00s)
+=== RUN   TestRouting
+=== RUN   TestRouting/GET_/healthz
+=== RUN   TestRouting/GET_/tasks/does-not-exist
+=== RUN   TestRouting/PUT_/tasks
+=== RUN   TestRouting/GET_/nowhere
+=== RUN   TestRouting/GET_/tasks?status=someday
+--- PASS: TestRouting (0.00s)
+    --- PASS: TestRouting/GET_/healthz (0.00s)
+    --- PASS: TestRouting/GET_/tasks/does-not-exist (0.00s)
+    --- PASS: TestRouting/PUT_/tasks (0.00s)
+    --- PASS: TestRouting/GET_/nowhere (0.00s)
+    --- PASS: TestRouting/GET_/tasks?status=someday (0.00s)
+=== RUN   TestRequestIDIsPropagated
+--- PASS: TestRequestIDIsPropagated (0.00s)
+PASS
+ok  	example.com/taskapi/internal/httpapi	1.344s
+=== RUN   TestConcurrentAccess
+--- PASS: TestConcurrentAccess (0.00s)
+=== RUN   TestNotFound
+--- PASS: TestNotFound (0.00s)
+=== RUN   TestCancelledContext
+--- PASS: TestCancelledContext (0.00s)
+PASS
+ok  	example.com/taskapi/internal/memstore	1.282s
+=== RUN   TestCreate
+=== RUN   TestCreate/valid
+=== RUN   TestCreate/trims_spaces
+=== RUN   TestCreate/future_due
+=== RUN   TestCreate/empty_title
+=== RUN   TestCreate/title_too_long
+=== RUN   TestCreate/due_in_past
+--- PASS: TestCreate (0.00s)
+    --- PASS: TestCreate/valid (0.00s)
+    --- PASS: TestCreate/trims_spaces (0.00s)
+    --- PASS: TestCreate/future_due (0.00s)
+    --- PASS: TestCreate/empty_title (0.00s)
+    --- PASS: TestCreate/title_too_long (0.00s)
+    --- PASS: TestCreate/due_in_past (0.00s)
+=== RUN   TestUpdate
+=== RUN   TestUpdate/change_status
+=== RUN   TestUpdate/rename_keeps_status
+=== RUN   TestUpdate/bad_status
+=== RUN   TestUpdate/blank_title
+=== RUN   TestUpdate/unknown_id
+--- PASS: TestUpdate (0.00s)
+    --- PASS: TestUpdate/change_status (0.00s)
+    --- PASS: TestUpdate/rename_keeps_status (0.00s)
+    --- PASS: TestUpdate/bad_status (0.00s)
+    --- PASS: TestUpdate/blank_title (0.00s)
+    --- PASS: TestUpdate/unknown_id (0.00s)
+=== RUN   TestMarkOverdue
+--- PASS: TestMarkOverdue (0.00s)
+PASS
+ok  	example.com/taskapi/internal/task	1.282s
+=== RUN   TestOverdueRunsAndStops
+--- PASS: TestOverdueRunsAndStops (0.00s)
+PASS
+ok  	example.com/taskapi/internal/worker	1.572s</pre></div>
+  <p>The worker test reports <code>0.00s</code> even though it "waited" three minutes: that's synctest's fake clock. And coverage:</p>
+<div class="output" data-label="go test -cover ./..."><pre>	example.com/taskapi/cmd/api		coverage: 0.0% of statements
+ok  	example.com/taskapi/internal/httpapi	0.491s	coverage: 89.0% of statements
+ok  	example.com/taskapi/internal/memstore	0.440s	coverage: 78.3% of statements
+ok  	example.com/taskapi/internal/task	0.484s	coverage: 76.9% of statements
+ok  	example.com/taskapi/internal/worker	0.478s	coverage: 92.9% of statements</pre></div>
+  <p>Finally, the most important property of a test: <strong>it fails when the code is wrong</strong>. We temporarily changed <code>maxTitleLen</code> from 200 to 300 and re-ran:</p>
+<div class="output error" data-label="go test -run &#x27;TestCreate$&#x27; ./internal/task  (with a deliberate bug)"><pre>--- FAIL: TestCreate (0.00s)
+    --- FAIL: TestCreate/title_too_long (0.00s)
+        service_test.go:46: want ValidationError on "title", got &lt;nil&gt;
+FAIL
+FAIL	example.com/taskapi/internal/task	0.482s
+FAIL</pre></div>
+  <p>The failure names the exact sub-test, file and line. We put the constant back and everything passed again.</p>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">Why does <code>worker.Overdue</code> take a <code>Marker</code> interface instead of a <code>*task.Service</code>?</div>
+    <div class="quiz-opts"><button>Interfaces are faster than concrete types</button><button>Go doesn't allow a struct field of type *task.Service in another package</button><button>The worker only needs one behaviour, so a tiny consumer-side interface lets tests pass a fake and keeps coupling low</button><button>So the worker can modify the service's private fields</button></div>
+    <div class="quiz-explain">"Accept interfaces": the worker declares exactly what it needs, one method. <code>*task.Service</code> satisfies it implicitly, and the test passes a 5-line fake that counts calls. Interface calls are actually a tiny bit <em>slower</em>, but that's irrelevant here.</div>
+  </div>
+
+  <h2>Running the server: a live curl session</h2>
+  <p>Build it with a version stamp and start it with a 1-second worker interval so we can watch the overdue logic work:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go build -ldflags "-X main.version=v1.0.0" -o bin/api ./cmd/api
+ADDR=127.0.0.1:8080 OVERDUE_INTERVAL=1s ./bin/api</code></pre></div>
+  <p>Then, in a second terminal, this whole session was run against it. IDs are random and timestamps reflect when it ran:</p>
+<div class="output" data-label="terminal 2: curl session"><pre>$ curl -s localhost:8080/healthz
+{"status":"ok"}
+
+$ curl -s -i -X POST localhost:8080/tasks -d '{"title":"Write the capstone","description":"chapter 21"}'
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /tasks/5940c30b6c1d
+X-Request-Id: 9b51753bed510cdd
+
+{"id":"5940c30b6c1d","title":"Write the capstone","description":"chapter 21","status":"todo","overdue":false,"created_at":"2026-10-16T18:17:44.013578Z","updated_at":"2026-10-16T18:17:44.013578Z"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"Pay invoice","due":"2026-10-16T18:17:46Z"}' | jq
+{
+  "id": "26a61cea157c",
+  "title": "Pay invoice",
+  "status": "todo",
+  "due": "2026-10-16T18:17:46Z",
+  "overdue": false,
+  "created_at": "2026-10-16T18:17:44.042341Z",
+  "updated_at": "2026-10-16T18:17:44.042341Z"
+}
+
+$ curl -s -i -X POST localhost:8080/tasks -d '{"title":"   "}' | grep -v -i '^date\|^content-length'
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+X-Request-Id: ec4b2f098560de77
+
+{"error":"title: is required","field":"title"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"oops"'
+{"error":"invalid JSON body: unexpected EOF"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"x","priority":1}'
+{"error":"invalid JSON body: json: unknown field \"priority\""}
+
+$ curl -s -X PATCH localhost:8080/tasks/5940c30b6c1d -d '{"status":"doing"}' | jq '{id, status, updated_at}'
+{
+  "id": "5940c30b6c1d",
+  "status": "doing",
+  "updated_at": "2026-10-16T18:17:44.082321Z"
+}
+
+$ sleep 3   # let the due time pass; the worker ticks every second
+
+$ curl -s localhost:8080/tasks/26a61cea157c | jq '{title, due, overdue}'
+{
+  "title": "Pay invoice",
+  "due": "2026-10-16T18:17:46Z",
+  "overdue": true
+}
+
+$ curl -s 'localhost:8080/tasks?status=doing' | jq '{count, titles: [.tasks[].title]}'
+{
+  "count": 1,
+  "titles": [
+    "Write the capstone"
+  ]
+}
+
+$ curl -s 'localhost:8080/tasks' | jq -c '.tasks[] | {title, status, overdue}'
+{"title":"Write the capstone","status":"doing","overdue":false}
+{"title":"Pay invoice","status":"todo","overdue":true}
+
+$ curl -s 'localhost:8080/tasks?status=someday'
+{"error":"status: must be todo, doing or done","field":"status"}
+
+$ curl -s -i -X DELETE localhost:8080/tasks/5940c30b6c1d | grep -v -i '^date'
+HTTP/1.1 204 No Content
+X-Request-Id: 5112b1f68014d072
+
+
+$ curl -s localhost:8080/tasks/5940c30b6c1d
+{"error":"task not found"}
+
+$ curl -s -i -X PUT localhost:8080/tasks | grep -v -i '^date\|^content-length\|^x-content'
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD, POST
+Content-Type: text/plain; charset=utf-8
+X-Request-Id: 40b4079234cb869e
+
+Method Not Allowed
+
+$ curl -s -D - -o /dev/null -H 'X-Request-ID: demo-42' localhost:8080/healthz | grep -i request-id
+X-Request-Id: demo-42
+
+$ kill -TERM &lt;server pid&gt;</pre></div>
+  <p>And here's everything the server logged during that session, including the worker flagging the invoice and the clean shutdown at the end:</p>
+<div class="output" data-label="terminal 1: server output"><pre>{"time":"2026-10-16T23:47:43.893376+05:30","level":"INFO","msg":"listening","app":"taskapi","version":"v1.0.0","addr":"127.0.0.1:8080"}
+{"time":"2026-10-16T23:47:43.893675+05:30","level":"INFO","msg":"overdue worker started","app":"taskapi","version":"v1.0.0","interval":"1s"}
+{"time":"2026-10-16T23:47:44.002487+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/healthz","route":"GET /healthz","status":200,"dur":"263µs","request_id":"d73207fc10cda319"}
+{"time":"2026-10-16T23:47:44.013611+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"POST","path":"/tasks","route":"POST /tasks","status":201,"dur":"286µs","request_id":"9b51753bed510cdd"}
+{"time":"2026-10-16T23:47:44.042355+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"POST","path":"/tasks","route":"POST /tasks","status":201,"dur":"39µs","request_id":"a63ff6b618260ed3"}
+{"time":"2026-10-16T23:47:44.057668+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"POST","path":"/tasks","route":"POST /tasks","status":422,"dur":"58µs","request_id":"ec4b2f098560de77"}
+{"time":"2026-10-16T23:47:44.066245+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"POST","path":"/tasks","route":"POST /tasks","status":400,"dur":"31µs","request_id":"40213583c18e6c92"}
+{"time":"2026-10-16T23:47:44.074251+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"POST","path":"/tasks","route":"POST /tasks","status":400,"dur":"26µs","request_id":"3561d1bff7f04b91"}
+{"time":"2026-10-16T23:47:44.082329+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"PATCH","path":"/tasks/5940c30b6c1d","route":"PATCH /tasks/{id}","status":200,"dur":"54µs","request_id":"36618912946a6341"}
+{"time":"2026-10-16T23:47:46.895246+05:30","level":"INFO","msg":"marked tasks overdue","app":"taskapi","version":"v1.0.0","count":1}
+{"time":"2026-10-16T23:47:47.114423+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/tasks/26a61cea157c","route":"GET /tasks/{id}","status":200,"dur":"43µs","request_id":"5d2fc2c2535a3dc2"}
+{"time":"2026-10-16T23:47:47.130991+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/tasks","route":"GET /tasks","status":200,"dur":"105µs","request_id":"5f5dfb5518447ae4"}
+{"time":"2026-10-16T23:47:47.144425+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/tasks","route":"GET /tasks","status":200,"dur":"41µs","request_id":"5dda08b97b560c72"}
+{"time":"2026-10-16T23:47:47.155826+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/tasks","route":"GET /tasks","status":422,"dur":"26µs","request_id":"02c3948b79ec2a90"}
+{"time":"2026-10-16T23:47:47.165875+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"DELETE","path":"/tasks/5940c30b6c1d","route":"DELETE /tasks/{id}","status":204,"dur":"13µs","request_id":"5112b1f68014d072"}
+{"time":"2026-10-16T23:47:47.175325+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/tasks/5940c30b6c1d","route":"GET /tasks/{id}","status":404,"dur":"23µs","request_id":"768cb2c0acbbf434"}
+{"time":"2026-10-16T23:47:47.184018+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"PUT","path":"/tasks","route":"","status":405,"dur":"30µs","request_id":"40b4079234cb869e"}
+{"time":"2026-10-16T23:47:47.192887+05:30","level":"INFO","msg":"request","app":"taskapi","version":"v1.0.0","method":"GET","path":"/healthz","route":"GET /healthz","status":200,"dur":"17µs","request_id":"demo-42"}
+{"time":"2026-10-16T23:47:47.193978+05:30","level":"INFO","msg":"overdue worker stopped","app":"taskapi","version":"v1.0.0"}
+{"time":"2026-10-16T23:47:47.193977+05:30","level":"INFO","msg":"shutting down","app":"taskapi","version":"v1.0.0"}
+{"time":"2026-10-16T23:47:47.194023+05:30","level":"INFO","msg":"stopped cleanly","app":"taskapi","version":"v1.0.0"}
+exit code: 0</pre></div>
+
+  <p>Read the logs alongside the session and you can see every design decision paying off:</p>
+  <ul>
+    <li>Every line has <code>app</code> and <code>version</code>, and every request line has a <code>request_id</code> that matches the <code>X-Request-Id</code> header the client got back. When a user reports a problem, that ID finds the exact log line.</li>
+    <li>The <code>route</code> field shows the matched <em>pattern</em> (<code>PATCH /tasks/{id}</code>), perfect for grouping metrics without exploding cardinality. For the 405, no route matched, so it's empty.</li>
+    <li>The worker logged nothing for ticks with no changes, then <code>marked tasks overdue count=1</code> right after the due time. The next <code>GET</code> showed <code>"overdue": true</code>.</li>
+    <li>The client-supplied <code>X-Request-ID: demo-42</code> was reused, so a request can be traced across services.</li>
+    <li>On <code>SIGTERM</code>: worker stopped, server drained, "stopped cleanly", exit code 0.</li>
+  </ul>
+  <div class="callout warn"><p>One inconsistency is visible in the session: the 405 response is <code>text/plain</code> (written by <code>ServeMux</code> itself), while all our own errors are JSON. Many APIs accept that. If you want JSON everywhere, register a catch-all <code>mux.HandleFunc("/", ...)</code> for 404s and wrap the mux to rewrite 405s, or add per-path fallback handlers.</p></div>
+
+  <h2>Shipping it: Dockerfile and Makefile</h2>
+  <p>The same multi-stage pattern from Chapter 20. With no third-party dependencies yet, there's no <code>go.sum</code> to copy.</p>
+<div class="code" data-file="Dockerfile"><pre><code class="language-docker"># syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+WORKDIR /src
+# No third-party deps yet, so there is no go.sum. Add it here when you add one.
+COPY go.mod ./
+RUN go mod download
+COPY . .
+ARG TARGETOS TARGETARCH VERSION=dev
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/api ./cmd/api
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/api /api
+USER nonroot:nonroot
+ENV ADDR=:8080
+EXPOSE 8080
+ENTRYPOINT ["/api"]</code></pre></div>
+<div class="code" data-file=".dockerignore"><pre><code class="language-bash">.git
+bin/
+*.test
+coverage.out</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">docker build --build-arg VERSION=v1.0.0 -t taskapi:v1.0.0 .
+docker run --rm -p 8080:8080 -e OVERDUE_INTERVAL=30s taskapi:v1.0.0
+# Ctrl-C (or docker stop) sends SIGINT/SIGTERM: you'll see "stopped cleanly"</code></pre></div>
+  <p>Build it locally with <code>docker build -t taskapi .</code>, or in the cloud (Docker Build Cloud, Google Cloud Build, GitHub Actions). The binary inside is the same one built and tested above. And a Makefile so nobody has to remember the commands:</p>
+<div class="code" data-file="Makefile"><pre><code class="language-bash">VERSION ?= $(shell git describe --tags --always --dirty 2&gt;/dev/null || echo dev)
+
+.PHONY: run test cover build docker
+
+run: ## run locally with a fast overdue worker
+	OVERDUE_INTERVAL=5s go run ./cmd/api
+
+test: ## vet + race tests
+	go vet ./...
+	go test -race -count=1 ./...
+
+cover: ## coverage report in the browser
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out
+
+build: ## static release binary
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/api ./cmd/api
+
+docker: ## container image
+	docker build --build-arg VERSION=$(VERSION) -t taskapi:$(VERSION) .</code></pre></div>
+<div class="output" data-label="make test, then make build"><pre>$ make test
+go vet ./...
+go test -race -count=1 ./...
+?   	example.com/taskapi/cmd/api	[no test files]
+ok  	example.com/taskapi/internal/httpapi	1.616s
+ok  	example.com/taskapi/internal/memstore	1.545s
+ok  	example.com/taskapi/internal/task	1.544s
+ok  	example.com/taskapi/internal/worker	1.544s
+$ make build
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=dev" -o bin/api ./cmd/api
+$ ls -lh bin/api | awk '{print $5, $NF}'
+6.2M bin/api</pre></div>
+
+  <h2>Next steps: from capstone to production</h2>
+  <p>This service is small, but its <em>shape</em> is production-ready. Here's how to grow it, roughly in the order a real team would.</p>
+  <table>
+    <thead><tr><th>Step</th><th>What to do</th><th>What changes</th></tr></thead>
+    <tbody>
+      <tr><td><strong>1. Postgres</strong></td><td>Add <code>internal/postgres</code> implementing <code>task.Store</code> with <code>database/sql</code> + <code>github.com/jackc/pgx/v5/stdlib</code>. Use <code>QueryContext</code>/<code>ExecContext</code> with placeholders (<code>$1</code>), never string building. Map <code>sql.ErrNoRows</code> to <code>task.ErrNotFound</code>. Manage schema with migrations (goose, golang-migrate).</td><td>One new package + a few lines in <code>main</code>. The service and HTTP layers don't change.</td></tr>
+      <tr><td><strong>2. Readiness</strong></td><td>Add <code>GET /readyz</code> that pings the database; flip it to 503 on shutdown.</td><td><code>httpapi</code>, <code>main</code></td></tr>
+      <tr><td><strong>3. Pagination</strong></td><td><code>GET /tasks?limit=50&amp;cursor=...</code>. Prefer <strong>cursor</strong> (keyset) pagination: the cursor encodes the last <code>(created_at, id)</code> seen, and the query is <code>WHERE (created_at, id) &gt; ($1, $2) ORDER BY created_at, id LIMIT $3</code>. It stays fast at any depth, unlike <code>OFFSET</code>. Cap <code>limit</code>.</td><td><code>task.Filter</code> gets <code>Limit</code>/<code>After</code>; response gets <code>next_cursor</code>.</td></tr>
+      <tr><td><strong>4. Auth</strong></td><td>A middleware that validates a bearer token (JWT or opaque session), puts the user ID in the context, and returns 401 otherwise. Add an <code>OwnerID</code> to <code>Task</code> and filter every query by it.</td><td>New middleware, domain field, store queries.</td></tr>
+      <tr><td><strong>5. Concurrency control</strong></td><td>Add a <code>Version int</code> to tasks; PATCH requires <code>If-Match</code>, and the update fails with 409 or 412 if someone else changed it first (optimistic locking).</td><td>Domain, store, handler.</td></tr>
+      <tr><td><strong>6. Metrics &amp; tracing</strong></td><td>Prometheus histogram per <code>r.Pattern</code> in the logging middleware; wrap the handler with <code>otelhttp</code>.</td><td>Middleware only.</td></tr>
+      <tr><td><strong>7. Rate limiting</strong></td><td>Per-client token bucket (<code>golang.org/x/time/rate</code>) middleware returning 429.</td><td>Middleware only.</td></tr>
+      <tr><td><strong>8. Worker at scale</strong></td><td>With several replicas, every pod runs the worker. Make it a single SQL <code>UPDATE ... WHERE due &lt; now() AND NOT overdue</code> (idempotent, so duplicates are harmless), or use a leader lock (<code>pg_try_advisory_lock</code>).</td><td><code>Store</code> gets a <code>MarkOverdue</code> method.</td></tr>
+      <tr><td><strong>9. API docs</strong></td><td>Write an OpenAPI spec and serve it; generate client SDKs from it.</td><td>New files only.</td></tr>
+      <tr><td><strong>10. CI/CD</strong></td><td>The GitHub Actions pipeline and goreleaser setup from Chapter 20.</td><td>New files only.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout senior"><p>Look at that "What changes" column. Almost every feature lands in exactly one layer. That's the real payoff of the architecture: not elegance for its own sake, but small, low-risk pull requests that are easy to review. When a change forces you to touch every package at once, take that as a sign a boundary is in the wrong place.</p></div>
+
+  <h3>Exercises</h3>
+  <details class="exercise">
+    <summary>Exercise 1: Add a "done" shortcut endpoint and test it</summary>
+    <p>Add <code>POST /tasks/{id}/done</code> that marks a task done and returns it. Reuse the service, don't duplicate logic. Add a handler test that creates a task, calls the endpoint, and checks the status is <code>done</code> and <code>overdue</code> is false.</p>
+    <div class="solution-label">Solution</div>
+<div class="code" data-file="internal/httpapi/handlers.go"><pre><code class="language-go">// In New, next to the other routes:
+mux.HandleFunc("POST /tasks/{id}/done", a.markDone)
+
+// markDone is a shortcut for PATCH {"status":"done"}.
+func (a *API) markDone(w http.ResponseWriter, r *http.Request) {
+	done := task.StatusDone
+	t, err := a.svc.Update(r.Context(), r.PathValue("id"), task.UpdateInput{Status: &amp;done})
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}</code></pre></div>
+  <div class="live" data-title="TestMarkDone against a real server">
+    <pre><code class="language-go">package httpapi_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"example.com/taskapi/internal/task"
+)
+
+func TestMarkDone(t *testing.T) {
+	srv := newServer(t)
+	_, body := do(t, "POST", srv.URL+"/tasks", `{"title":"Finish chapter"}`)
+	var created task.Task
+	if err := json.Unmarshal([]byte(body), &amp;created); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := do(t, "POST", srv.URL+"/tasks/"+created.ID+"/done", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body %s", resp.StatusCode, body)
+	}
+	var got task.Task
+	json.Unmarshal([]byte(body), &amp;got)
+	if got.Status != task.StatusDone || got.Overdue {
+		t.Errorf("got status=%q overdue=%v", got.Status, got.Overdue)
+	}
+
+	if resp, _ := do(t, "POST", srv.URL+"/tasks/missing/done", ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("missing task: status = %d, want 404", resp.StatusCode)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12" data-state="srv=httptest.Server" data-out="=== RUN   TestMarkDone"><code>newServer</code> (a helper from handlers_test.go) starts the full stack on a random port: memstore, service, handlers, middleware.</li>
+      <li data-lines="13-17" data-state="created={ID:… Title:Finish chapter Status:todo}">Create a task through the real <code>POST /tasks</code> and decode the response to learn its ID.</li>
+      <li data-lines="19,5-7" data-state="path=/tasks/{id}/done">Call the new endpoint. <code>markDone</code> builds an <code>UpdateInput</code> with only <code>Status</code> set, reusing <code>Service.Update</code> instead of duplicating its rules.</li>
+      <li data-lines="20-22" data-state="resp.StatusCode=200">200, so <code>t.Fatalf</code> doesn't fire. <code>Fatalf</code> stops the test here if it does, since the rest would be meaningless.</li>
+      <li data-lines="23-27" data-state="got.Status=done; got.Overdue=false">The service rule "finished work is never overdue" applies to this endpoint for free.</li>
+      <li data-lines="29-31" data-state="resp.StatusCode=404">An unknown ID goes through <code>svc.Update</code>, the store returns <code>ErrNotFound</code>, and <code>fail</code> maps it to 404. The error path is tested too.</li>
+      <li data-lines="32" data-state="failures=0" data-out="--- PASS: TestMarkDone (0.01s)\nPASS\nok  	example.com/taskapi/internal/httpapi	1.592s">All checks passed. The whole HTTP stack ran in about 10 ms.</li>
+    </ol>
+  </div>
+<div class="output" data-label="go test -race -run TestMarkDone -v ./internal/httpapi"><pre>=== RUN   TestMarkDone
+--- PASS: TestMarkDone (0.01s)
+PASS
+ok  	example.com/taskapi/internal/httpapi	1.592s</pre></div>
+    <p>The handler is four lines because <code>Service.Update</code> already enforces "done tasks are never overdue". New endpoints should be thin adapters over existing rules.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: Simple limit/offset pagination in the memory store</summary>
+    <p>Before going all the way to cursors, add <code>Limit</code> and <code>Offset</code> to <code>task.Filter</code>, apply them in <code>memstore.List</code> after sorting, and default <code>Limit</code> to 50 (max 100) in the service. Write a table-driven test.</p>
+    <div class="solution-label">Solution</div>
+<div class="code" data-file="internal/memstore/page.go"><pre><code class="language-go">package memstore
+
+import "example.com/taskapi/internal/task"
+
+// page returns at most limit tasks starting at offset, never panicking
+// on out-of-range values. limit &lt;= 0 means "no limit".
+func page(ts []task.Task, offset, limit int) []task.Task {
+	offset = max(0, min(offset, len(ts)))
+	end := len(ts)
+	if limit &gt; 0 {
+		end = min(offset+limit, len(ts))
+	}
+	return ts[offset:end:end] // full slice expression: callers can't append into our array
+}</code></pre></div>
+  <div class="live" data-title="TestPage runs six subtests">
+    <pre><code class="language-go">package memstore
+
+import (
+	"slices"
+	"testing"
+
+	"example.com/taskapi/internal/task"
+)
+
+func TestPage(t *testing.T) {
+	all := []task.Task{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}, {ID: "e"}}
+	ids := func(ts []task.Task) []string {
+		out := []string{}
+		for _, t := range ts {
+			out = append(out, t.ID)
+		}
+		return out
+	}
+	tests := []struct {
+		name          string
+		offset, limit int
+		want          []string
+	}{
+		{"first page", 0, 2, []string{"a", "b"}},
+		{"second page", 2, 2, []string{"c", "d"}},
+		{"last partial page", 4, 2, []string{"e"}},
+		{"offset past end", 10, 2, []string{}},
+		{"negative offset", -3, 2, []string{"a", "b"}},
+		{"no limit", 1, 0, []string{"b", "c", "d", "e"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := page(all, tc.offset, tc.limit)
+			if !slices.Equal(ids(got), tc.want) {
+				t.Errorf("page(%d, %d) = %v, want %v", tc.offset, tc.limit, ids(got), tc.want)
+			}
+			if got == nil {
+				t.Error("page returned nil; want empty slice for JSON []")
+			}
+		})
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="all=[a b c d e]" data-out="=== RUN   TestPage">Five tasks with IDs a to e. Only the IDs matter for paging.</li>
+      <li data-lines="12-18">A small helper that turns tasks into IDs. It starts from <code>[]string{}</code>, not nil, so <code>slices.Equal</code> compares cleanly with the empty case.</li>
+      <li data-lines="19-30" data-state="tests=6 cases">The table: each row is a name, inputs and the expected IDs. Adding a case is one line.</li>
+      <li data-lines="31-33" data-state="tc=first page; offset=0; limit=2; got=[a b]" data-out="=== RUN   TestPage/first_page"><code>t.Run</code> starts a named subtest (spaces become underscores). <code>page</code> clamps offset to 0..5 and ends at <code>min(0+2, 5)</code>: <code>[a b]</code>.</li>
+      <li data-lines="31-36" data-state="tc=second page; got=[c d]" data-out="=== RUN   TestPage/second_page">offset 2, limit 2: <code>ts[2:4]</code>.</li>
+      <li data-lines="31-36" data-state="tc=last partial page; got=[e]" data-out="=== RUN   TestPage/last_partial_page">offset 4, limit 2: the end is clamped to 5, so we get one item instead of a slice-bounds panic.</li>
+      <li data-lines="31-39" data-state="tc=offset past end; got=[] (non-nil)" data-out="=== RUN   TestPage/offset_past_end">offset 10 is clamped to 5, giving <code>ts[5:5:5]</code>: empty but non-nil. The nil check on line 37 makes sure JSON would say <code>[]</code>.</li>
+      <li data-lines="31-36" data-state="tc=negative offset; got=[a b]" data-out="=== RUN   TestPage/negative_offset"><code>max(0, ...)</code> turns -3 into 0. Bad query parameters from clients never panic.</li>
+      <li data-lines="31-36" data-state="tc=no limit; got=[b c d e]" data-out="=== RUN   TestPage/no_limit"><code>limit &lt;= 0</code> means "no limit", so we return everything from offset 1.</li>
+      <li data-lines="31-41" data-state="failures=0" data-out="--- PASS: TestPage (0.00s)\n    --- PASS: TestPage/first_page (0.00s)\n    --- PASS: TestPage/second_page (0.00s)\n    --- PASS: TestPage/last_partial_page (0.00s)\n    --- PASS: TestPage/offset_past_end (0.00s)\n    --- PASS: TestPage/negative_offset (0.00s)\n    --- PASS: TestPage/no_limit (0.00s)\nPASS\nok  	example.com/taskapi/internal/memstore	0.628s">No <code>t.Errorf</code> fired, so every subtest passes. The parent reports first, then each subtest, indented.</li>
+    </ol>
+  </div>
+<div class="output" data-label="go test -run TestPage -v ./internal/memstore"><pre>=== RUN   TestPage
+=== RUN   TestPage/first_page
+=== RUN   TestPage/second_page
+=== RUN   TestPage/last_partial_page
+=== RUN   TestPage/offset_past_end
+=== RUN   TestPage/negative_offset
+=== RUN   TestPage/no_limit
+--- PASS: TestPage (0.00s)
+    --- PASS: TestPage/first_page (0.00s)
+    --- PASS: TestPage/second_page (0.00s)
+    --- PASS: TestPage/last_partial_page (0.00s)
+    --- PASS: TestPage/offset_past_end (0.00s)
+    --- PASS: TestPage/negative_offset (0.00s)
+    --- PASS: TestPage/no_limit (0.00s)
+PASS
+ok  	example.com/taskapi/internal/memstore	0.628s</pre></div>
+    <p>In <code>List</code>, replace <code>return out, nil</code> with <code>return page(out, f.Offset, f.Limit), nil</code>. The helper clamps every bound, so an offset past the end returns an empty (non-nil) slice instead of panicking with "slice bounds out of range". In the service, set the default limit and cap it before calling the store.</p>
+  </details>
+
+  <div class="quiz" data-answer="0">
+    <div class="quiz-q">You add a Postgres store. Which packages must change?</div>
+    <div class="quiz-opts"><button>A new <code>internal/postgres</code> package, plus a few lines in <code>cmd/api/main.go</code></button><button><code>task</code>, <code>httpapi</code> and <code>main</code></button><button>Every package, because the Store interface changes</button><button>Only <code>memstore</code>, which gets a Postgres mode</button></div>
+    <div class="quiz-explain">The <code>task.Store</code> interface already has the right shape, with context-aware methods returning domain errors. A new implementation plugs in at the wiring point in <code>main</code>. Nothing that depends on the interface needs to know.</div>
+  </div>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li><strong>Layout</strong>: thin <code>cmd/api/main.go</code> for wiring; <code>internal/</code> packages by role; the domain imports nothing of ours.</li>
+      <li><strong>Domain</strong>: named types with <code>Valid</code> methods, a sentinel <code>ErrNotFound</code>, a typed <code>ValidationError</code> that unwraps to <code>ErrValidation</code>, and a consumer-owned <code>Store</code> interface with <code>ctx</code> everywhere.</li>
+      <li><strong>Store</strong>: a map behind <code>sync.RWMutex</code>, values not pointers, short critical sections, sorted results, <code>[]</code> not <code>null</code>.</li>
+      <li><strong>HTTP</strong>: Go 1.22 method+path patterns, careful JSON decoding (size limit, unknown fields), and a single <code>fail</code> function that maps domain errors to status codes.</li>
+      <li><strong>Middleware</strong> composes like an onion: recover → request ID → logging → mux.</li>
+      <li><strong>Concurrency</strong>: a ticker + context worker, a buffered error channel, <code>wg.Go</code> + <code>wg.Wait</code>, and an ordered graceful shutdown.</li>
+      <li><strong>Tests</strong> match their layer: table-driven with a fake clock, <code>-race</code> for the store, <code>httptest</code> for handlers, <code>synctest</code> for time. And check that they fail when the code is broken.</li>
+      <li>The architecture's payoff is that features like Postgres, auth and pagination each land in one layer, in one reviewable PR.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

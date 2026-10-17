@@ -1,0 +1,1364 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 05 · Arrays, Slices &amp; Maps — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="05">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part II · Chapter 05</div>
+  <h1>Arrays, Slices &amp; Maps</h1>
+  <p class="lead">Almost every program stores collections of things: a list of users, a queue of jobs, a lookup table from IDs to records. Go gives you three built-in tools for this. Arrays are the rarely-used foundation, slices are the everyday workhorse, and maps are the go-to lookup table. Understanding how slices really work under the hood will save you from some of the sneakiest bugs in Go.</p>
+  <div class="meta">
+    <span class="pill">⏱ 50 min read</span>
+    <span class="pill">◆ Beginner → Advanced</span>
+    <span class="pill">▶ 16 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>Why arrays are values, and why you'll rarely use them directly</li>
+      <li>The slice header (pointer, length, capacity) and how slicing creates "windows" onto shared memory</li>
+      <li>How <code>append</code> grows a slice, and the aliasing bugs that shared backing arrays cause</li>
+      <li><code>copy</code>, nil vs empty slices, 2D slices, inserting and removing elements</li>
+      <li>The <code>slices</code> package: sorting, searching, compacting and iterators</li>
+      <li>Maps: creation, the comma-ok idiom, deletion, random iteration order, and the struct-value gotcha</li>
+      <li>Sets with <code>map[T]struct{}</code>, the <code>maps</code> package, and the <code>clear</code> builtin</li>
+      <li>Why concurrent map writes crash your program, and how preallocation speeds things up</li>
+    </ul>
+  </div>
+
+  <h2>Arrays: fixed-size values</h2>
+  <p>An <strong>array</strong> is a numbered sequence of elements of one type, with a <strong>fixed length</strong> decided at compile time. Think of an egg carton: a 12-egg carton always has 12 slots, and you can't stretch it to 13.</p>
+  <div class="live" data-title="Arrays are values: copy, compare, use as keys">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var a [3]int // zero value: [0 0 0]
+	b := [3]int{10, 20, 30}
+	c := [...]string{"x", "y"} // compiler counts: [2]string
+	fmt.Println(a, b, c, len(b), len(c))
+
+	// Arrays are VALUES: assignment copies every element.
+	d := b
+	d[0] = 999
+	fmt.Println("b:", b, "d:", d)
+
+	// Arrays of comparable types can be compared with ==
+	fmt.Println(b == [3]int{10, 20, 30})
+
+	// ...and used as map keys.
+	visited := map[[2]int]bool{{0, 0}: true}
+	fmt.Println(visited[[2]int{0, 0}], visited[[2]int{1, 2}])
+
+	// The length is part of the TYPE.
+	fmt.Printf("%T vs %T\n", b, c)
+
+	// Index by position, with a few elements set explicitly.
+	weekend := [7]bool{5: true, 6: true}
+	fmt.Println(weekend)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="a=[0 0 0]">A declared array is never "empty": all three slots hold the zero value 0.</li>
+      <li data-lines="7-8" data-state="a=[0 0 0]; b=[10 20 30]; c=[x y]"><code>[...]</code> asks the compiler to count the elements, so <code>c</code> is a <code>[2]string</code>.</li>
+      <li data-lines="9" data-state="a=[0 0 0]; b=[10 20 30]; c=[x y]" data-out="[0 0 0] [10 20 30] [x y] 3 2">The lengths are 3 and 2, fixed forever.</li>
+      <li data-lines="12-13" data-state="b=[10 20 30]; d=[999 20 30]"><code>d := b</code> copies <strong>every element</strong> into a new array. Writing <code>d[0]</code> touches only the copy.</li>
+      <li data-lines="14" data-state="b=[10 20 30]; d=[999 20 30]" data-out="b: [10 20 30] d: [999 20 30]">Proof: <code>b</code> is untouched. Compare this with slices later, which share memory.</li>
+      <li data-lines="17" data-state="b=[10 20 30]" data-out="true">Arrays of comparable elements support <code>==</code>: same length, same elements, so <code>true</code>.</li>
+      <li data-lines="20-21" data-state="visited=map[[0 0]:true]" data-out="true false">Being comparable also makes them valid map keys. <code>{1, 2}</code> was never stored, so the lookup gives the zero value <code>false</code>.</li>
+      <li data-lines="24" data-state="b=[10 20 30]; c=[x y]" data-out="[3]int vs [2]string">The length is part of the type: <code>[3]int</code> and <code>[4]int</code> would be different, incompatible types.</li>
+      <li data-lines="27-28" data-state="weekend=[false false false false false true true]" data-out="[false false false false false true true]">Indexed literal: only slots 5 and 6 are set; everything else gets <code>false</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[0 0 0] [10 20 30] [x y] 3 2
+b: [10 20 30] d: [999 20 30]
+true
+true false
+[3]int vs [2]string
+[false false false false false true true]</pre></div>
+  <p>Three facts define arrays in Go:</p>
+  <ol>
+    <li><strong>The length is part of the type.</strong> <code>[3]int</code> and <code>[4]int</code> are different, incompatible types. A function taking <code>[3]int</code> can't accept a <code>[4]int</code>.</li>
+    <li><strong>Arrays are values.</strong> Assigning (<code>d := b</code>) or passing one to a function copies <em>every element</em>. Changing the copy doesn't affect the original.</li>
+    <li><strong>Arrays are comparable</strong> (if their elements are). You can use <code>==</code> and use them as map keys, which is handy for coordinates like <code>[2]int{x, y}</code>.</li>
+  </ol>
+  <p>Because the size is frozen into the type, arrays are awkward for most everyday work. Where do they show up? Fixed-size data like a SHA-256 hash (<code>[32]byte</code>), an RGB colour (<code>[3]uint8</code>), grid coordinates as map keys, and as the hidden storage <em>behind</em> every slice.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>An array is the actual row of boxes in memory. A slice, which we meet next, is a small <em>label</em> that says "start at this box, I'm using this many, and there's room for this many more". Most of the time you pass labels around, not the boxes themselves.</p></div>
+
+  <h2>Slices: a window onto an array</h2>
+  <p>A <strong>slice</strong> is a flexible, growable view of a sequence. It's what you'll use 99% of the time when you want "a list". Under the hood a slice is a tiny struct called the <strong>slice header</strong>, with three fields:</p>
+  <ul>
+    <li><strong>ptr</strong>: a pointer to the first element the slice can see, inside some underlying array (the <strong>backing array</strong>).</li>
+    <li><strong>len</strong>: how many elements the slice currently contains. <code>len(s)</code>. You can index <code>s[0]</code> through <code>s[len-1]</code>.</li>
+    <li><strong>cap</strong>: how many elements exist from <code>ptr</code> to the end of the backing array. <code>cap(s)</code>. This is the room available before Go must allocate a new array.</li>
+  </ul>
+  <p>On a 64-bit machine the header is 24 bytes (three 8-byte words), no matter how many elements the slice has. That's why passing a slice to a function is cheap: you copy 24 bytes, not the data.</p>
+
+  <figure class="diagram"><svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect x="0" y="0" width="680" height="270" rx="10" fill="#262624"/>
+    <text x="24" y="30" fill="#a8a49a" font-size="12">slice header s := arr[1:4]   (24 bytes)</text>
+    <rect x="24" y="42" width="90" height="46" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+    <text x="40" y="62" fill="#a8a49a" font-size="11">ptr</text>
+    <text x="40" y="80" fill="#ece9e1" font-family="JetBrains Mono, monospace" font-size="13">&amp;arr[1]</text>
+    <rect x="114" y="42" width="70" height="46" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+    <text x="128" y="62" fill="#a8a49a" font-size="11">len</text>
+    <text x="128" y="80" fill="#7fa6d9" font-family="JetBrains Mono, monospace" font-size="14">3</text>
+    <rect x="184" y="42" width="70" height="46" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+    <text x="198" y="62" fill="#a8a49a" font-size="11">cap</text>
+    <text x="198" y="80" fill="#e0b45c" font-family="JetBrains Mono, monospace" font-size="14">5</text>
+    <text x="24" y="150" fill="#a8a49a" font-size="12">backing array arr [6]int</text>
+    <g font-family="JetBrains Mono, monospace" font-size="14">
+      <rect x="24" y="162" width="80" height="46" fill="#2e2d2a" stroke="#3a3936"/><text x="52" y="190" fill="#a8a49a">0</text>
+      <rect x="104" y="162" width="80" height="46" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="128" y="190" fill="#ece9e1">10</text>
+      <rect x="184" y="162" width="80" height="46" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="208" y="190" fill="#ece9e1">20</text>
+      <rect x="264" y="162" width="80" height="46" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="288" y="190" fill="#ece9e1">30</text>
+      <rect x="344" y="162" width="80" height="46" fill="#2e2d2a" stroke="#e0b45c" stroke-dasharray="4 3"/><text x="368" y="190" fill="#a8a49a">40</text>
+      <rect x="424" y="162" width="80" height="46" fill="#2e2d2a" stroke="#e0b45c" stroke-dasharray="4 3"/><text x="448" y="190" fill="#a8a49a">50</text>
+    </g>
+    <g fill="#a8a49a" font-size="11" font-family="JetBrains Mono, monospace">
+      <text x="56" y="226">[0]</text><text x="136" y="226">[1]</text><text x="216" y="226">[2]</text><text x="296" y="226">[3]</text><text x="376" y="226">[4]</text><text x="456" y="226">[5]</text>
+    </g>
+    <path d="M69 88 L140 158" stroke="#d97757" stroke-width="2" fill="none"/>
+    <path d="M134 152 L142 160 L144 149z" fill="#d97757"/>
+    <path d="M104 244 L344 244" stroke="#7fa6d9" stroke-width="2"/>
+    <text x="180" y="262" fill="#7fa6d9" font-size="12">len = 3 (s[0]..s[2])</text>
+    <path d="M104 118 L504 118" stroke="#e0b45c" stroke-width="2" stroke-dasharray="5 4"/>
+    <text x="380" y="110" fill="#e0b45c" font-size="12">cap = 5 (to end of array)</text>
+    <text x="530" y="180" fill="#a8a49a" font-size="12">dashed = spare</text>
+    <text x="530" y="196" fill="#a8a49a" font-size="12">capacity append</text>
+    <text x="530" y="212" fill="#a8a49a" font-size="12">can fill in place</text>
+  </svg><figcaption>The slice header points into a backing array. <code>len</code> is what you can index; <code>cap</code> is how far the slice could grow without reallocating.</figcaption></figure>
+
+  <p>Let's see the header in action. Slicing an array with <code>arr[low:high]</code> creates a slice whose <code>ptr</code> is <code>&amp;arr[low]</code>, <code>len</code> is <code>high-low</code>, and <code>cap</code> runs to the end of the array:</p>
+  <div class="live" data-title="A slice is a window onto an array">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	arr := [6]int{0, 10, 20, 30, 40, 50}
+
+	s := arr[1:4] // elements 1,2,3 -&gt; [10 20 30]
+	fmt.Println(s, "len", len(s), "cap", cap(s))
+
+	// s is a WINDOW onto arr. Writing through s writes into arr.
+	s[0] = 111
+	fmt.Println("arr:", arr)
+
+	// Both point at the same memory.
+	fmt.Println("same address:", &amp;s[0] == &amp;arr[1])
+
+	// Omitted bounds default to 0 and len.
+	fmt.Println(arr[:2], arr[4:], arr[:])
+
+	// You may re-slice up to cap, beyond len.
+	t := s[:cap(s)]
+	fmt.Println("t:", t, "len", len(t), "cap", cap(t))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="arr=[0 10 20 30 40 50]">A six-element array: the real storage.</li>
+      <li data-lines="8" data-state="arr=[0 10 20 30 40 50]; s=[10 20 30]; len(s)=3; cap(s)=5"><code>arr[1:4]</code> builds a header: <code>ptr=&amp;arr[1]</code>, <code>len=4-1=3</code>, and <code>cap</code> runs to the end of the array: 5.</li>
+      <li data-lines="9" data-state="s=[10 20 30]; len(s)=3; cap(s)=5" data-out="[10 20 30] len 3 cap 5">No data was copied; <code>s</code> is just a window.</li>
+      <li data-lines="12-13" data-state="arr=[0 111 20 30 40 50]; s=[111 20 30]" data-out="arr: [0 111 20 30 40 50]">Writing <code>s[0]</code> writes <code>arr[1]</code>, because that's where <code>s</code> points.</li>
+      <li data-lines="16" data-state="arr=[0 111 20 30 40 50]; s=[111 20 30]" data-out="same address: true">Same memory address: the slice element and the array element are one and the same.</li>
+      <li data-lines="19" data-state="arr=[0 111 20 30 40 50]" data-out="[0 111] [40 50] [0 111 20 30 40 50]">Missing bounds default to 0 and <code>len</code>. <code>arr[:]</code> is a slice over the whole array.</li>
+      <li data-lines="22" data-state="s=[111 20 30]; t=[111 20 30 40 50]; len(t)=5; cap(t)=5">You can re-slice <em>beyond</em> <code>len</code>, up to <code>cap</code>. <code>t</code> reveals the hidden 40 and 50 that <code>s</code> could not index.</li>
+      <li data-lines="23" data-state="t=[111 20 30 40 50]; len(t)=5; cap(t)=5" data-out="t: [111 20 30 40 50] len 5 cap 5">Going past <code>cap(s)</code> would panic; going past <code>len(s)</code> is fine when re-slicing.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[10 20 30] len 3 cap 5
+arr: [0 111 20 30 40 50]
+same address: true
+[0 111] [40 50] [0 111 20 30 40 50]
+t: [111 20 30 40 50] len 5 cap 5</pre></div>
+  <p>The important line is <code>arr: [0 111 20 30 40 50]</code>. We wrote through the slice <code>s</code> and the <em>array</em> changed. A slice doesn't own its data; it just looks at it. Several slices can look at the same array at once, which is efficient and also the source of the bugs we'll meet shortly.</p>
+
+  <h3>Creating slices</h3>
+  <p>There are three common ways to create a slice. A <strong>literal</strong> lists the elements. <strong><code>make([]T, len, cap)</code></strong> allocates a zeroed backing array of size <code>cap</code> and gives you a slice of length <code>len</code> (cap defaults to len). And a plain <code>var s []T</code> declares a <strong>nil slice</strong>: no backing array at all.</p>
+  <div class="live" data-title="Three ways to create a slice">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	a := []int{1, 2, 3}     // literal: len 3, cap 3
+	b := make([]int, 3)     // len 3, cap 3, all zero
+	c := make([]int, 0, 10) // len 0, cap 10: room to grow
+	var d []int             // nil slice: len 0, cap 0
+
+	for _, s := range [][]int{a, b, c, d} {
+		fmt.Printf("%v len=%d cap=%d nil=%t\n", s, len(s), cap(s), s == nil)
+	}
+
+	// Indexing past len panics, even if cap is bigger.
+	defer func() { fmt.Println("recovered:", recover()) }()
+	c[0] = 1
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="a=[1 2 3]; len(a)=3; cap(a)=3">A literal allocates a backing array exactly big enough: len and cap are both 3.</li>
+      <li data-lines="7" data-state="b=[0 0 0]; len(b)=3; cap(b)=3"><code>make([]int, 3)</code> gives three zeroed, usable elements.</li>
+      <li data-lines="8" data-state="c=[]; len(c)=0; cap(c)=10"><code>make([]int, 0, 10)</code> reserves room for 10 but contains nothing yet. Perfect before a loop of <code>append</code>s.</li>
+      <li data-lines="9" data-state="d=nil; len(d)=0; cap(d)=0"><code>var d []int</code> has no backing array at all: it's <code>nil</code>, yet <code>len</code>, <code>cap</code>, <code>range</code> and <code>append</code> all work on it.</li>
+      <li data-lines="11-13" data-state="s=a" data-out="[1 2 3] len=3 cap=3 nil=false">The loop prints each slice's header. First, the literal.</li>
+      <li data-lines="11-13" data-state="s=b" data-out="[0 0 0] len=3 cap=3 nil=false">Then the zeroed <code>make</code> result.</li>
+      <li data-lines="11-13" data-state="s=c" data-out="[] len=0 cap=10 nil=false"><code>c</code> prints as <code>[]</code> but is not nil: it has a backing array of 10.</li>
+      <li data-lines="11-13" data-state="s=d" data-out="[] len=0 cap=0 nil=true"><code>d</code> also prints <code>[]</code>, but it is the only nil one.</li>
+      <li data-lines="16" data-state="c=[]; len(c)=0; cap(c)=10">We register a deferred <code>recover</code> so the coming panic doesn't crash the program.</li>
+      <li data-lines="17" data-state="c=[]; len(c)=0; cap(c)=10">The gotcha: <code>c[0] = 1</code> panics. Capacity is room for <code>append</code>, not indexable space. Only <code>0..len-1</code> may be indexed.</li>
+      <li data-lines="16,18" data-state="recovered=index out of range [0] with length 0" data-out="recovered: runtime error: index out of range [0] with length 0">As <code>main</code> unwinds, the deferred func runs and prints the recovered panic value.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[1 2 3] len=3 cap=3 nil=false
+[0 0 0] len=3 cap=3 nil=false
+[] len=0 cap=10 nil=false
+[] len=0 cap=0 nil=true
+recovered: runtime error: index out of range [0] with length 0</pre></div>
+  <p>Notice that <code>c</code> has capacity 10 but length 0, so <code>c[0] = 1</code> panics. Capacity is room for <code>append</code> to use; it is not addressable until the length grows into it.</p>
+
+  <h3>Slicing expressions and the full slice expression</h3>
+  <p>You can slice a slice too. <code>s[low:high]</code> creates a new header over the same backing array. Either bound can be omitted: <code>s[:high]</code>, <code>s[low:]</code>, <code>s[:]</code>. The rules are <code>0 &lt;= low &lt;= high &lt;= cap(s)</code>; notice that <code>high</code> may go past <code>len</code>, up to <code>cap</code>.</p>
+  <p>There's also a three-index form, the <strong>full slice expression</strong> <code>s[low:high:max]</code>. It sets the new slice's capacity to <code>max-low</code>. Why would you <em>limit</em> capacity? To stop a later <code>append</code> from scribbling over memory that someone else is still using. Watch:</p>
+
+  <div class="live" data-title="Two-index vs three-index slicing">
+    <pre><code class="language-go">base := []int{1, 2, 3, 4, 5}
+a := base[1:3]
+fmt.Println(a, len(a), cap(a))
+b := base[1:3:3]
+fmt.Println(b, len(b), cap(b))
+a = append(a, 99)
+fmt.Println(base)
+b = append(b, 77)
+fmt.Println(base, b)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="base=[1 2 3 4 5]; len=5; cap=5">A slice with five elements and capacity 5.</li>
+      <li data-lines="2-3" data-state="a=[2 3]; len(a)=2; cap(a)=4" data-out="[2 3] 2 4"><code>a</code> sees elements 1 and 2. Its cap runs to the end of base: 5 − 1 = 4.</li>
+      <li data-lines="4-5" data-state="b=[2 3]; len(b)=2; cap(b)=2" data-out="[2 3] 2 2">Same window, but <code>:3</code> as max caps it at 3 − 1 = 2. <code>b</code> has no spare room.</li>
+      <li data-lines="6" data-state="a=[2 3 99]; base[3]=99 (overwritten!)"><code>a</code> has spare capacity, so append writes 99 <strong>in place</strong> into base[3]. That slot belonged to base's 4.</li>
+      <li data-lines="7" data-state="base=[1 2 3 99 5]" data-out="[1 2 3 99 5]">base has silently changed. This is the aliasing bug in its purest form.</li>
+      <li data-lines="8" data-state="b=[2 3 77] (new array); base untouched"><code>b</code> is full (len == cap), so append must allocate a <strong>new</strong> array, copy 2 and 3, then add 77.</li>
+      <li data-lines="9" data-state="base=[1 2 3 99 5]; b=[2 3 77]" data-out="[1 2 3 99 5] [2 3 77]">base is untouched by <code>b</code>'s append. The three-index slice protected it.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>If you hand out a sub-slice of an internal buffer (say, from a parser or a pool), return <code>buf[i:j:j]</code>. Then the caller's appends can't corrupt your buffer: their first append is forced to copy. It costs nothing until they actually append.</p></div>
+
+  <h2>append and how slices grow</h2>
+  <p><code>append(s, values...)</code> adds elements to the end of a slice and returns the <strong>new slice header</strong>. That's why you always write <code>s = append(s, x)</code>. What it does depends on capacity:</p>
+  <ul>
+    <li>If <code>len(s) + n &lt;= cap(s)</code>: there's room. It writes the values into the existing backing array and returns a header with a bigger <code>len</code>. Same <code>ptr</code>, same array.</li>
+    <li>Otherwise: it allocates a <strong>new, bigger</strong> backing array, copies the old elements over, adds the new ones, and returns a header pointing to the new array. The old array is left behind (garbage collected once nobody refers to it).</li>
+  </ul>
+  <p>Let's watch length and capacity change, one append at a time:</p>
+
+  <div class="live" data-title="Appending to a nil slice">
+    <pre><code class="language-go">var s []int
+fmt.Println(len(s), cap(s))
+s = append(s, 1)
+fmt.Println(len(s), cap(s))
+s = append(s, 2)
+fmt.Println(len(s), cap(s))
+s = append(s, 3)
+fmt.Println(len(s), cap(s))
+s = append(s, 4)
+fmt.Println(len(s), cap(s))
+s = append(s, 5)
+fmt.Println(len(s), cap(s), s)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="s=nil; len=0; cap=0" data-out="0 0">A nil slice: no backing array at all. len and cap are both 0.</li>
+      <li data-lines="3-4" data-state="s=[1]; len=1; cap=1; array=#1 (new)" data-out="1 1">No room, so append allocates array #1 with space for 1 and stores 1.</li>
+      <li data-lines="5-6" data-state="s=[1 2]; len=2; cap=2; array=#2 (new)" data-out="2 2">Full again. A new array of size 2 is allocated, 1 is copied, 2 is added.</li>
+      <li data-lines="7-8" data-state="s=[1 2 3]; len=3; cap=4; array=#3 (new)" data-out="3 4">Full again. Capacity doubles to 4. Now there's one spare slot.</li>
+      <li data-lines="9-10" data-state="s=[1 2 3 4]; len=4; cap=4; array=#3 (same)" data-out="4 4">This time there <strong>is</strong> room: 4 is written in place. No allocation, no copy.</li>
+      <li data-lines="11-12" data-state="s=[1 2 3 4 5]; len=5; cap=8; array=#4 (new)" data-out="5 8 [1 2 3 4 5]">Full, so capacity doubles to 8. Four allocations for five appends, but the gaps get bigger and bigger.</li>
+    </ol>
+  </div>
+
+  <p>Doubling means that appending <em>n</em> elements one by one does only about log₂(n) allocations, and each element is copied a constant number of times on average. This is called <strong>amortised O(1)</strong> append: occasionally slow, cheap on average. Here's the growth over 2,000 appends:</p>
+  <div class="live" data-title="Watch capacity grow over 2,000 appends">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var s []int
+	prevCap := cap(s)
+	for i := range 2000 {
+		s = append(s, i)
+		if cap(s) != prevCap {
+			fmt.Printf("len=%-5d cap %4d -&gt; %4d\n", len(s), prevCap, cap(s))
+			prevCap = cap(s)
+		}
+	}
+
+	// append can add several values, or a whole slice with ...
+	x := []string{"a"}
+	x = append(x, "b", "c")
+	x = append(x, []string{"d", "e"}...)
+	fmt.Println(x)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6-7" data-state="s=nil; len(s)=0; cap(s)=0; prevCap=0">Start with a nil slice and remember its capacity, 0.</li>
+      <li data-lines="8-12" data-state="i=0; len(s)=1; cap(s)=4; prevCap=4" data-out="len=1     cap    0 -&gt;    4">First append: no room, so a backing array is allocated. This compiler chose capacity 4 straight away. Capacity changed, so we print and update <code>prevCap</code>.</li>
+      <li data-lines="8-10" data-state="i=3; len(s)=4; cap(s)=4; prevCap=4">Appends of 1, 2 and 3 fit in the spare slots: written in place, no allocation, nothing printed.</li>
+      <li data-lines="8-12" data-state="i=4; len(s)=5; cap(s)=8; prevCap=8" data-out="len=5     cap    4 -&gt;    8">The fifth element doesn't fit. <code>append</code> allocates a new array, double the size, and copies the four old elements over.</li>
+      <li data-lines="8-12" data-state="i=255; len(s)=256; cap(s)=256; prevCap=256" data-out="len=9     cap    8 -&gt;   16\nlen=17    cap   16 -&gt;   32\nlen=33    cap   32 -&gt;   64\nlen=65    cap   64 -&gt;  128\nlen=129   cap  128 -&gt;  256">While the slice is small, capacity keeps <strong>doubling</strong>: 16, 32, 64, 128, 256. Each reallocation is rarer than the last.</li>
+      <li data-lines="8-12" data-state="i=512; len(s)=513; cap(s)=848; prevCap=848" data-out="len=257   cap  256 -&gt;  512\nlen=513   cap  512 -&gt;  848">Past 256 the growth factor eases off toward 1.25×. 848 isn't a neat number because the runtime rounds up to an allocator size class.</li>
+      <li data-lines="8-12" data-state="i=1999; len(s)=2000; cap(s)=2560; prevCap=2560" data-out="len=849   cap  848 -&gt; 1280\nlen=1281  cap 1280 -&gt; 1792\nlen=1793  cap 1792 -&gt; 2560">Three more growths finish the 2,000 appends: only 12 allocations in total. That's <strong>amortised O(1)</strong> append.</li>
+      <li data-lines="17-18" data-state="x=[a b c]"><code>append</code> is variadic, so it can add several values at once.</li>
+      <li data-lines="19-20" data-state="x=[a b c d e]" data-out="[a b c d e]">To append a whole slice, spread it with <code>...</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>len=1     cap    0 -&gt;    4
+len=5     cap    4 -&gt;    8
+len=9     cap    8 -&gt;   16
+len=17    cap   16 -&gt;   32
+len=33    cap   32 -&gt;   64
+len=65    cap   64 -&gt;  128
+len=129   cap  128 -&gt;  256
+len=257   cap  256 -&gt;  512
+len=513   cap  512 -&gt;  848
+len=849   cap  848 -&gt; 1280
+len=1281  cap 1280 -&gt; 1792
+len=1793  cap 1792 -&gt; 2560
+[a b c d e]</pre></div>
+  <p>Two things to notice. Small slices double. Once they reach 256 elements, growth slows to roughly 1.25× (plus a bit), so big slices don't waste huge amounts of memory. The odd numbers like 848 come from the runtime rounding up to the memory allocator's <em>size classes</em> (fixed bucket sizes it hands out).</p>
+  <p>Also notice the very first append went straight to capacity 4, while the walkthrough above started at 1. Recent compilers can give a small slice that's built in a loop a tiny starting buffer, sometimes on the stack. That's the point: <strong>the exact growth numbers are an implementation detail</strong> that changes between Go versions. Never write code that depends on them.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: append inside a function</div><p>A function that appends to a slice parameter changes its own <em>copy</em> of the header. The caller's header keeps the old length, so the caller never sees the new element.</p></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// addItem appends, but the caller's slice header never learns the new length.
+func addItem(items []string, it string) {
+	items = append(items, it)
+}
+
+// Return the new slice (like append itself does).
+func addItemFixed(items []string, it string) []string {
+	return append(items, it)
+}
+
+func main() {
+	list := make([]string, 0, 5)
+	addItem(list, "apple")
+	fmt.Println(list, len(list))
+	// The value IS in the backing array, just hidden past len:
+	fmt.Println(list[:1])
+
+	list = addItemFixed(list, "banana")
+	fmt.Println(list, len(list))
+}</code></pre></div>
+  <div class="output"><pre>[] 0
+[apple]
+[banana] 1</pre></div>
+  <p>Look closely at the last line. <code>addItem</code> really did write "apple" into the backing array (we can peek at it with <code>list[:1]</code>), but <code>list</code> still has length 0. So when <code>addItemFixed</code> appended "banana", it reused that same slot and <strong>overwrote</strong> "apple". The rule is the same as for <code>append</code> itself: if a function may grow a slice, it must <em>return</em> the new slice.</p>
+
+  <h2>Shared backing arrays: the aliasing bug</h2>
+  <p><strong>Aliasing</strong> means two names refer to the same memory. With slices it happens whenever two slice headers point into the same backing array. Reads are fine. The trouble starts with writes, and especially with <code>append</code>, because whether <code>append</code> writes in place or copies depends on spare capacity, which you usually can't see.</p>
+  <p>This next example is the bug that bites everyone at least once. Two slices are built by appending to the same base slice:</p>
+
+  <div class="live" data-title="Two appends, one backing array">
+    <pre><code class="language-go">nums := make([]int, 3, 4)
+evens := append(nums, 2)
+odds := append(nums, 1)
+fmt.Println(evens, odds)
+fmt.Println(&amp;evens[0] == &amp;odds[0])
+odds = append(odds, 3)
+odds[0] = 42
+fmt.Println(evens, odds)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="nums=[0 0 0]; len=3; cap=4; array=A">A slice of 3 zeros with one spare slot in array A.</li>
+      <li data-lines="2" data-state="nums len=3; evens=[0 0 0 2]; A[3]=2">There's room, so append writes 2 into <code>A[3]</code> and returns a header with len 4. <code>evens</code> points at A.</li>
+      <li data-lines="3" data-state="nums len=3; odds=[0 0 0 1]; A[3]=1 (overwrote 2!)"><code>nums</code> still has len 3 and the same spare slot. append writes 1 into the <strong>same</strong> <code>A[3]</code>. evens and odds share it.</li>
+      <li data-lines="4" data-state="evens=[0 0 0 1]; odds=[0 0 0 1]" data-out="[0 0 0 1] [0 0 0 1]">Surprise: <code>evens</code> now ends in 1. Our 2 was clobbered.</li>
+      <li data-lines="5" data-state="&amp;evens[0] == &amp;odds[0]" data-out="true">Proof that they share memory: element 0 has the same address in both.</li>
+      <li data-lines="6" data-state="odds=[0 0 0 1 3]; len=5; cap=8; array=B (new)"><code>odds</code> is full (len 4, cap 4), so this append allocates a new array B and copies. From now on odds and evens are independent.</li>
+      <li data-lines="7-8" data-state="evens=[0 0 0 1] (A); odds=[42 0 0 1 3] (B)" data-out="[0 0 0 1] [42 0 0 1 3]">Writing <code>odds[0]</code> changes only B. evens (still on A) is unaffected. Same code, different behaviour, purely because of capacity.</li>
+    </ol>
+  </div>
+
+  <figure class="diagram"><svg viewBox="0 0 680 210" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect x="0" y="0" width="680" height="210" rx="10" fill="#262624"/>
+    <g font-family="JetBrains Mono, monospace" font-size="13">
+      <rect x="24" y="24" width="150" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="36" y="46" fill="#ece9e1">nums  len3 cap4</text>
+      <rect x="24" y="78" width="150" height="34" rx="6" fill="#2e2d2a" stroke="#7fa6d9"/><text x="36" y="100" fill="#7fa6d9">evens len4 cap4</text>
+      <rect x="24" y="132" width="150" height="34" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/><text x="36" y="154" fill="#8fbf7f">odds  len4 cap4</text>
+    </g>
+    <text x="300" y="62" fill="#a8a49a" font-size="12">backing array A</text>
+    <g font-family="JetBrains Mono, monospace" font-size="15">
+      <rect x="300" y="74" width="64" height="46" fill="#2e2d2a" stroke="#3a3936"/><text x="326" y="103" fill="#ece9e1">0</text>
+      <rect x="364" y="74" width="64" height="46" fill="#2e2d2a" stroke="#3a3936"/><text x="390" y="103" fill="#ece9e1">0</text>
+      <rect x="428" y="74" width="64" height="46" fill="#2e2d2a" stroke="#3a3936"/><text x="454" y="103" fill="#ece9e1">0</text>
+      <rect x="492" y="74" width="64" height="46" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/><text x="504" y="103" fill="#d97757">2→1</text>
+    </g>
+    <g stroke="#a8a49a" stroke-width="1.5" fill="none"><path d="M174 41 L296 90"/><path d="M174 95 L296 96"/><path d="M174 149 L296 104"/></g>
+    <text x="300" y="150" fill="#d97757" font-size="12">A[3] is shared by evens and odds: the second append overwrote the first.</text>
+    <text x="300" y="170" fill="#a8a49a" font-size="12">nums's spare capacity was handed out twice.</text>
+  </svg><figcaption>Three headers, one array. Appending to the same base twice reuses the same spare slot.</figcaption></figure>
+
+  <div class="output" data-label="Real output"><pre>[0 0 0 1] [0 0 0 1]
+true
+[0 0 0 1] [42 0 0 1 3]</pre></div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of the backing array as a shared whiteboard and each slice as a person who has been told "your list is the first N lines". Spare capacity is the blank space below. If two people both think "the next blank line is mine", they write on top of each other. <code>append</code> only gets a fresh whiteboard when the current one is completely full.</p></div>
+
+  <p>How to avoid aliasing bugs:</p>
+  <ul>
+    <li><strong>Always assign append's result back to the same variable</strong>: <code>s = append(s, x)</code>. Building <code>b := append(a, x)</code> from a slice you'll keep using is the danger sign.</li>
+    <li>If you need an independent copy, make one explicitly: <code>slices.Clone(s)</code>, or <code>append(s[:len(s):len(s)], x)</code> to force a copy.</li>
+    <li>When returning a sub-slice of something you'll keep using, cap it with a full slice expression.</li>
+    <li>Be careful holding a tiny sub-slice of a huge slice: it keeps the <em>entire</em> backing array alive in memory. Clone the small part if the big one should be freed.</li>
+  </ul>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q"><code>a := make([]int, 2, 10); b := append(a, 5); c := append(a, 6)</code>. What is <code>b[2]</code>?</div>
+    <div class="quiz-opts"><button>5</button><button>0</button><button>6</button><button>It panics</button></div>
+    <div class="quiz-explain"><code>a</code> has 8 spare slots. Both appends write into the same index 2 of the shared backing array. The second one writes 6, so <code>b[2]</code> is 6 too.</div>
+  </div>
+
+  <h2>Working with slices: copy, nil, 2D, insert and remove</h2>
+
+  <h3>copy</h3>
+  <p><code>copy(dst, src)</code> copies elements from <code>src</code> into <code>dst</code> and returns how many it copied: the <em>smaller</em> of the two lengths. It never allocates, and it never grows <code>dst</code>. It handles overlapping ranges correctly, so it's safe for shifting elements within one slice.</p>
+  <div class="live" data-title="copy: bounded, independent, overlap-safe">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"slices"
+)
+
+func main() {
+	src := []int{1, 2, 3, 4, 5}
+
+	dst := make([]int, 3)
+	n := copy(dst, src) // copies min(len(dst), len(src)) elements
+	fmt.Println(n, dst)
+
+	// A full independent copy:
+	cp := make([]int, len(src))
+	copy(cp, src)
+	cp[0] = 100
+	fmt.Println(src, cp)
+
+	// Or, more simply, slices.Clone (Go 1.21+):
+	cl := slices.Clone(src)
+	cl[1] = 200
+	fmt.Println(src, cl)
+
+	// copy handles overlapping ranges correctly: shift left by one.
+	copy(src, src[1:])
+	fmt.Println(src)
+
+	// copy from a string into a []byte works too.
+	b := make([]byte, 5)
+	copy(b, "hello, world")
+	fmt.Println(string(b))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9,11" data-state="src=[1 2 3 4 5]; dst=[0 0 0]"><code>dst</code> has room for only three elements.</li>
+      <li data-lines="12-13" data-state="src=[1 2 3 4 5]; dst=[1 2 3]; n=3" data-out="3 [1 2 3]"><code>copy</code> moves <code>min(len(dst), len(src))</code> = 3 elements and reports that count. It never grows <code>dst</code>.</li>
+      <li data-lines="16-18" data-state="src=[1 2 3 4 5]; cp=[100 2 3 4 5]">A full-length <code>make</code> plus <code>copy</code> gives an <em>independent</em> backing array, so changing <code>cp[0]</code> leaves <code>src</code> alone.</li>
+      <li data-lines="19" data-state="src=[1 2 3 4 5]; cp=[100 2 3 4 5]" data-out="[1 2 3 4 5] [100 2 3 4 5]">Two separate arrays.</li>
+      <li data-lines="22-24" data-state="src=[1 2 3 4 5]; cl=[1 200 3 4 5]" data-out="[1 2 3 4 5] [1 200 3 4 5]"><code>slices.Clone</code> does the same thing in one call.</li>
+      <li data-lines="27" data-state="src=[2 3 4 5 5]">Overlapping copy: <code>src[1:]</code> (4 elements) is copied onto the front of <code>src</code>. Everything shifts left by one; the last slot keeps its old 5.</li>
+      <li data-lines="28" data-state="src=[2 3 4 5 5]" data-out="[2 3 4 5 5]"><code>copy</code> handles the overlap correctly, like <code>memmove</code>.</li>
+      <li data-lines="31-33" data-state="b=[104 101 108 108 111]" data-out="hello">Copying from a string into a <code>[]byte</code> is allowed. Only 5 bytes fit, so we get <code>hello</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>3 [1 2 3]
+[1 2 3 4 5] [100 2 3 4 5]
+[1 2 3 4 5] [1 200 3 4 5]
+[2 3 4 5 5]
+hello</pre></div>
+
+  <h3>nil slice vs empty slice</h3>
+  <p>A <strong>nil slice</strong> (<code>var s []int</code>) has no backing array. An <strong>empty slice</strong> (<code>[]int{}</code> or <code>make([]int, 0)</code>) has length 0 but is not nil. For almost everything, they behave the same: <code>len</code> is 0, <code>range</code> does nothing, <code>append</code> works. The differences are <code>s == nil</code> and some encoders:</p>
+  <div class="live" data-title="nil slice vs empty slice">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+func main() {
+	var nilSlice []string
+	emptySlice := []string{}
+
+	fmt.Println(len(nilSlice), len(emptySlice))
+	fmt.Println(nilSlice == nil, emptySlice == nil)
+
+	// Both work with range, len, append.
+	nilSlice = append(nilSlice, "ok")
+	fmt.Println(nilSlice)
+
+	// The visible difference: JSON encoding.
+	var a []string
+	b := []string{}
+	ja, _ := json.Marshal(map[string]any{"tags": a})
+	jb, _ := json.Marshal(map[string]any{"tags": b})
+	fmt.Println(string(ja))
+	fmt.Println(string(jb))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-10" data-state="nilSlice=nil; emptySlice=[] (not nil)"><code>nilSlice</code> has no backing array. <code>emptySlice</code> has one, of size zero.</li>
+      <li data-lines="12" data-state="nilSlice=nil; emptySlice=[]" data-out="0 0">Their lengths are identical.</li>
+      <li data-lines="13" data-state="nilSlice=nil; emptySlice=[]" data-out="true false">Only a comparison with <code>nil</code> tells them apart. That's why you should test <code>len(s) == 0</code> instead.</li>
+      <li data-lines="16-17" data-state="nilSlice=[ok]; emptySlice=[]" data-out="[ok]"><code>append</code> on a nil slice just allocates a backing array. No special case needed.</li>
+      <li data-lines="20-23" data-state="a=nil; b=[]; ja={&quot;tags&quot;:null}; jb={&quot;tags&quot;:[]}">The one place it matters: <code>encoding/json</code> encodes a nil slice as <code>null</code> and an empty one as <code>[]</code>.</li>
+      <li data-lines="24-25" data-state="ja={&quot;tags&quot;:null}; jb={&quot;tags&quot;:[]}" data-out="{&quot;tags&quot;:null}\n{&quot;tags&quot;:[]}">A JavaScript client doing <code>tags.length</code> would crash on the first one.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>0 0
+true false
+[ok]
+{"tags":null}
+{"tags":[]}</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Inside your code, prefer <code>var s []T</code> (nil) and check emptiness with <code>len(s) == 0</code>, never <code>s == nil</code>. That way nil and empty are treated the same and nobody has to care which one they got. At API boundaries, decide deliberately: if your JSON clients expect <code>[]</code> and break on <code>null</code>, initialise with <code>[]T{}</code> before encoding.</p></div>
+
+  <h3>2D slices</h3>
+  <p>Go has no built-in 2D slice type. A "grid" is a slice of slices, <code>[][]T</code>, where each row is its own slice with its own backing array. You must create each row yourself, and rows may even have different lengths:</p>
+  <div class="live" data-title="Building 2D slices, row by row or from one flat slice">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	// A rows x cols grid: a slice of slices.
+	rows, cols := 3, 4
+	grid := make([][]int, rows)
+	for r := range grid {
+		grid[r] = make([]int, cols)
+	}
+	grid[1][2] = 7
+	for _, row := range grid {
+		fmt.Println(row)
+	}
+
+	// Rows can have different lengths ("jagged").
+	tri := [][]int{{1}, {1, 1}, {1, 2, 1}, {1, 3, 3, 1}}
+	for _, row := range tri {
+		fmt.Println(row)
+	}
+
+	// One allocation for the whole grid: slice one big backing slice.
+	flat := make([]int, rows*cols)
+	g2 := make([][]int, rows)
+	for r := range g2 {
+		g2[r] = flat[r*cols : (r+1)*cols : (r+1)*cols]
+	}
+	g2[2][3] = 9
+	fmt.Println(g2, flat)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="7-8" data-state="rows=3; cols=4; grid=[nil nil nil]"><code>make([][]int, 3)</code> creates the outer slice only. Each row is a <code>nil</code> slice; <code>grid[1][2] = 7</code> right now would panic.</li>
+      <li data-lines="9-11" data-state="grid=[[0 0 0 0] [0 0 0 0] [0 0 0 0]]">The loop allocates each row separately: three independent backing arrays.</li>
+      <li data-lines="12" data-state="grid=[[0 0 0 0] [0 0 7 0] [0 0 0 0]]"><code>grid[1]</code> picks the row, <code>[2]</code> the column.</li>
+      <li data-lines="13-15" data-state="grid=[[0 0 0 0] [0 0 7 0] [0 0 0 0]]" data-out="[0 0 0 0]\n[0 0 7 0]\n[0 0 0 0]">Ranging over the outer slice gives one row per iteration.</li>
+      <li data-lines="18-21" data-state="tri=[[1] [1 1] [1 2 1] [1 3 3 1]]" data-out="[1]\n[1 1]\n[1 2 1]\n[1 3 3 1]">Rows don't have to match in length: a "jagged" slice like Pascal's triangle is fine.</li>
+      <li data-lines="24-25" data-state="flat=[0 0 0 0 0 0 0 0 0 0 0 0]; g2=[nil nil nil]">For one allocation instead of four, make a single flat slice of 12 ints.</li>
+      <li data-lines="26-28" data-state="r=0; g2[0]=flat[0:4:4]">Row 0 is a window <code>flat[0:4:4]</code>. The third index caps it at 4, so an <code>append</code> to the row can't spill into row 1.</li>
+      <li data-lines="26-28" data-state="r=2; g2[1]=flat[4:8:8]; g2[2]=flat[8:12:12]">Rows 1 and 2 cover the next two windows. All three rows share <code>flat</code>'s backing array.</li>
+      <li data-lines="29" data-state="g2[2][3]=9; flat[11]=9">Writing row 2, column 3 writes <code>flat[2*4+3]</code> = <code>flat[11]</code>.</li>
+      <li data-lines="30" data-state="g2=[[0 0 0 0] [0 0 0 0] [0 0 0 9]]; flat=[0 0 0 0 0 0 0 0 0 0 0 9]" data-out="[[0 0 0 0] [0 0 0 0] [0 0 0 9]] [0 0 0 0 0 0 0 0 0 0 0 9]">Same memory, two views.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[0 0 0 0]
+[0 0 7 0]
+[0 0 0 0]
+[1]
+[1 1]
+[1 2 1]
+[1 3 3 1]
+[[0 0 0 0] [0 0 0 0] [0 0 0 9]] [0 0 0 0 0 0 0 0 0 0 0 9]</pre></div>
+  <p>The last trick, carving all rows out of one flat slice, uses a single allocation instead of one per row. That's friendlier to the CPU cache for large grids. Note the three-index slices so a row can't grow into its neighbour.</p>
+
+  <h3>Removing and inserting elements</h3>
+  <p>Slices don't have <code>remove</code> or <code>insert</code> methods. Before the <code>slices</code> package you did it with <code>append</code> tricks, which you'll still see everywhere, so it's worth understanding them:</p>
+
+  <div class="live" data-title="Remove, insert, and swap-remove">
+    <pre><code class="language-go">s := []string{"a", "b", "c", "d", "e"}
+i := 1
+s = append(s[:i], s[i+1:]...)
+fmt.Println(s, len(s), cap(s))
+j := 2
+s = append(s[:j], append([]string{"X"}, s[j:]...)...)
+fmt.Println(s)
+k := 0
+s[k] = s[len(s)-1]
+s = s[:len(s)-1]
+fmt.Println(s)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="s=[a b c d e]; len=5; cap=5; i=1">We want to remove index 1 ("b").</li>
+      <li data-lines="3" data-state="s[:1]=[a]; s[2:]=[c d e]"><code>s[:i]</code> is the part before, <code>s[i+1:]</code> is the part after. Appending the tail onto the head shifts c, d, e left by one, <em>in place</em> (the head has room).</li>
+      <li data-lines="4" data-state="s=[a c d e]; len=4; cap=5" data-out="[a c d e] 4 5">Length drops to 4, capacity stays 5. No allocation happened.</li>
+      <li data-lines="5-6" data-state="tmp=[X d e]; s=[a c X d e]">To insert "X" at index 2: build <code>[X d e]</code> (a new slice, which copies the tail so it isn't overwritten), then append it to <code>s[:2]</code>.</li>
+      <li data-lines="7" data-state="s=[a c X d e]" data-out="[a c X d e]">Inserted. This version allocates a temporary slice, which is why <code>slices.Insert</code> is nicer.</li>
+      <li data-lines="8-10" data-state="s[0]=e; s=[e c X d]; len=4">If order doesn't matter, "swap-remove" is O(1): copy the last element over the one you're removing, then shrink by one.</li>
+      <li data-lines="11" data-state="s=[e c X d]" data-out="[e c X d]">Index 0 is gone and nothing had to shift.</li>
+    </ol>
+  </div>
+
+  <p>With the <code>slices</code> package (Go 1.21+) it's clearer and safer. Note that <code>slices.Delete</code> also <strong>zeroes</strong> the now-unused tail (since Go 1.22), so stale pointers don't keep objects alive:</p>
+  <div class="live" data-title="slices.Delete, Insert, DeleteFunc and in-place filtering">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"slices"
+)
+
+func main() {
+	s := []int{0, 1, 2, 3, 4, 5}
+
+	// Delete removes s[i:j] and zeroes the vacated tail (Go 1.22+).
+	s = slices.Delete(s, 1, 3) // removes 1 and 2
+	fmt.Println(s)
+
+	// Insert values at index i, shifting the rest right.
+	s = slices.Insert(s, 1, 10, 20)
+	fmt.Println(s)
+
+	// Remove every element matching a predicate.
+	s = slices.DeleteFunc(s, func(n int) bool { return n%2 == 0 })
+	fmt.Println(s)
+
+	// Filter in place without allocating: reuse the backing array.
+	words := []string{"go", "", "is", "", "fun"}
+	kept := words[:0]
+	for _, w := range words {
+		if w != "" {
+			kept = append(kept, w)
+		}
+	}
+	fmt.Println(kept, len(kept))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="s=[0 1 2 3 4 5]; len(s)=6; cap(s)=6">Six ints, no spare capacity.</li>
+      <li data-lines="12" data-state="s=[0 3 4 5]; len(s)=4; cap(s)=6; backing=[0 3 4 5 0 0]"><code>slices.Delete(s, 1, 3)</code> removes indexes 1 and 2 by shifting 3, 4, 5 left. Since Go 1.22 it also <strong>zeroes</strong> the two vacated slots at the end.</li>
+      <li data-lines="13" data-state="s=[0 3 4 5]; len(s)=4; cap(s)=6" data-out="[0 3 4 5]">Always reassign: the returned slice has a new length.</li>
+      <li data-lines="16" data-state="s=[0 10 20 3 4 5]; len(s)=6; cap(s)=6"><code>slices.Insert(s, 1, 10, 20)</code> shifts 3, 4, 5 right by two and drops 10 and 20 into the gap. The two spare slots were enough, so no new array was needed.</li>
+      <li data-lines="17" data-state="s=[0 10 20 3 4 5]" data-out="[0 10 20 3 4 5]">Inserted at index 1.</li>
+      <li data-lines="20-21" data-state="s=[3 5]; len(s)=2" data-out="[3 5]"><code>DeleteFunc</code> removes every element the predicate matches: all the even numbers (0, 10, 20 and 4) go.</li>
+      <li data-lines="24-25" data-state="words=[go  is  fun]; kept=[]; len(kept)=0; cap(kept)=5"><code>words[:0]</code> is an empty slice that shares <code>words</code>' backing array, with all five slots of capacity.</li>
+      <li data-lines="26-28" data-state="w=go; kept=[go]">"go" is kept: <code>append</code> writes it into slot 0, which we have already read.</li>
+      <li data-lines="26-27" data-state="w=&quot;&quot;; kept=[go]">Empty strings are skipped, so the write position falls behind the read position.</li>
+      <li data-lines="26-28" data-state="w=fun; kept=[go is fun]">"is" lands in slot 1 and "fun" in slot 2. We only write behind where we read, so nothing unread gets overwritten.</li>
+      <li data-lines="31" data-state="kept=[go is fun]; len(kept)=3" data-out="[go is fun] 3">Filtered in place, no allocation.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[0 3 4 5]
+[0 10 20 3 4 5]
+[3 5]
+[go is fun] 3</pre></div>
+  <p>The <code>words[:0]</code> idiom at the end is a classic: it creates a zero-length slice that shares <code>words</code>' backing array, then appends the keepers. Since we only ever write behind where we're reading, it filters in place with no allocation. (This is exactly what <code>slices.DeleteFunc</code> does internally.)</p>
+
+  <table>
+    <thead><tr><th>Task</th><th>Classic idiom</th><th>slices package</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr><td>Remove index i (keep order)</td><td><code>append(s[:i], s[i+1:]...)</code></td><td><code>slices.Delete(s, i, i+1)</code></td><td>O(n) shift</td></tr>
+      <tr><td>Remove index i (any order)</td><td><code>s[i] = s[len(s)-1]; s = s[:len(s)-1]</code></td><td>(none)</td><td>O(1)</td></tr>
+      <tr><td>Insert at i</td><td><code>append(s[:i], append([]T{v}, s[i:]...)...)</code></td><td><code>slices.Insert(s, i, v)</code></td><td>O(n) shift</td></tr>
+      <tr><td>Filter in place</td><td><code>out := s[:0]</code> + append loop</td><td><code>slices.DeleteFunc(s, pred)</code></td><td>O(n), no alloc</td></tr>
+      <tr><td>Copy</td><td><code>append([]T(nil), s...)</code></td><td><code>slices.Clone(s)</code></td><td>O(n), 1 alloc</td></tr>
+      <tr><td>Pop last</td><td><code>v, s = s[len(s)-1], s[:len(s)-1]</code></td><td>(none)</td><td>O(1)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>The slices package</h2>
+  <p>Since Go 1.21 the standard library's <code>slices</code> package provides generic helpers that work on any slice type. Before it existed, every codebase had its own <code>containsString</code>, <code>containsInt</code> and so on. Now there's one well-tested version of each.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+	"slices"
+	"strings"
+)
+
+type Person struct {
+	Name string
+	Age  int
+}
+
+func main() {
+	nums := []int{5, 2, 8, 2, 9, 1}
+
+	fmt.Println(slices.Contains(nums, 8), slices.Index(nums, 2), slices.Index(nums, 42))
+	fmt.Println(slices.Max(nums), slices.Min(nums))
+
+	sorted := slices.Clone(nums)
+	slices.Sort(sorted)
+	fmt.Println(sorted)
+
+	// BinarySearch needs a sorted slice. Returns (position, found).
+	pos, found := slices.BinarySearch(sorted, 8)
+	fmt.Println(pos, found)
+	pos, found = slices.BinarySearch(sorted, 3)
+	fmt.Println(pos, found) // where 3 WOULD go
+
+	// Compact removes CONSECUTIVE duplicates (sort first to dedupe).
+	fmt.Println(slices.Compact(sorted))
+
+	slices.Reverse(nums)
+	fmt.Println(nums)
+
+	fmt.Println(slices.Equal([]int{1, 2}, []int{1, 2}))
+
+	// SortFunc with a comparator: negative, zero, positive.
+	people := []Person{{"Zoe", 31}, {"Adam", 25}, {"Mia", 31}}
+	slices.SortFunc(people, func(a, b Person) int {
+		return cmp.Or(
+			-cmp.Compare(a.Age, b.Age),      // age descending
+			strings.Compare(a.Name, b.Name), // then name ascending
+		)
+	})
+	fmt.Println(people)
+
+	// IndexFunc finds the first element matching a predicate.
+	idx := slices.IndexFunc(people, func(p Person) bool { return p.Name == "Adam" })
+	fmt.Println("Adam at", idx)
+
+	// Iterators (Go 1.23): Sorted collects any iter.Seq into a sorted slice.
+	fmt.Println(slices.Sorted(slices.Values([]string{"c", "a", "b"})))
+	for i, v := range slices.Backward([]string{"x", "y", "z"}) {
+		fmt.Print(i, v, " ")
+	}
+	fmt.Println()
+	fmt.Println(slices.Repeat([]int{0, 1}, 3))
+	for chunk := range slices.Chunk([]int{1, 2, 3, 4, 5}, 2) {
+		fmt.Print(chunk, " ")
+	}
+	fmt.Println()
+}</code></pre></div>
+  <div class="output"><pre>true 1 -1
+9 1
+[1 2 2 5 8 9]
+4 true
+3 false
+[1 2 5 8 9]
+[1 9 2 8 2 5]
+true
+[{Mia 31} {Zoe 31} {Adam 25}]
+Adam at 2
+[a b c]
+2z 1y 0x 
+[0 1 0 1 0 1]
+[1 2] [3 4] [5] </pre></div>
+  <p>Some notes on what you just saw:</p>
+  <ul>
+    <li><code>Sort</code> works on any <strong>ordered</strong> type (numbers, strings). <code>SortFunc</code> takes a comparator returning negative/zero/positive, like <code>cmp.Compare</code>. <code>cmp.Or</code> returns its first non-zero argument, which makes multi-key sorts read naturally.</li>
+    <li><code>SortFunc</code> is not stable: equal elements may be reordered. Use <code>SortStableFunc</code> when the original order of ties matters.</li>
+    <li><code>BinarySearch</code> is O(log n) but requires a sorted slice. When the value isn't found it returns the index where it <em>would</em> be inserted, which pairs perfectly with <code>slices.Insert</code> to keep a slice sorted.</li>
+    <li><code>Compact</code> only removes <em>adjacent</em> duplicates. Sort first to dedupe completely.</li>
+    <li><code>Contains</code>, <code>Index</code>, <code>Max</code>, <code>Min</code> are linear scans (O(n)). <code>Max</code>/<code>Min</code> panic on an empty slice.</li>
+    <li>Go 1.23 added iterator functions: <code>All</code> (index, value), <code>Values</code>, <code>Backward</code>, <code>Chunk</code>, plus <code>Collect</code> and <code>Sorted</code> to turn any iterator into a slice.</li>
+  </ul>
+
+  <div class="callout tip"><p>Most <code>slices</code> functions that change length (<code>Delete</code>, <code>Insert</code>, <code>Compact</code>, <code>DeleteFunc</code>) return the new slice, just like <code>append</code>. Always use the return value: <code>s = slices.Compact(s)</code>. Calling them and ignoring the result is a bug.</p></div>
+
+  <h2>Maps: key-value lookup</h2>
+  <p>A <strong>map</strong> is an unordered collection of key-value pairs with fast lookup, insertion and deletion: on average O(1), meaning the time doesn't grow with the size of the map. It's a <em>hash table</em>: Go runs the key through a hash function to decide which bucket to store it in, so finding it later is a jump, not a search. Since Go 1.24 the implementation is based on "Swiss tables", a modern design that's faster and uses memory better.</p>
+  <p>The type is written <code>map[KeyType]ValueType</code>. The key type must be <strong>comparable</strong> with <code>==</code>: numbers, strings, booleans, pointers, channels, arrays and structs made of comparable things. Slices, maps and functions can't be keys.</p>
+  <div class="live" data-title="Map basics: insert, lookup, comma-ok, delete">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	// Create with a literal...
+	ages := map[string]int{
+		"alice": 31,
+		"bob":   25,
+	}
+	// ...or with make (optionally with a size hint).
+	scores := make(map[string][]int, 10)
+
+	ages["carol"] = 40 // insert
+	ages["bob"] = 26   // update
+	fmt.Println(ages, len(ages))
+
+	// Reading a missing key returns the ZERO value, not an error.
+	fmt.Println("dave:", ages["dave"])
+
+	// The comma-ok idiom tells "missing" apart from "present but zero".
+	if age, ok := ages["dave"]; !ok {
+		fmt.Println("dave not found")
+	} else {
+		fmt.Println("dave is", age)
+	}
+
+	delete(ages, "alice")
+	delete(ages, "nobody") // deleting a missing key is a no-op
+	fmt.Println(ages)
+
+	// Zero values make some code beautifully short:
+	scores["ann"] = append(scores["ann"], 90) // nil slice + append = fine
+	scores["ann"] = append(scores["ann"], 75)
+	counts := map[rune]int{}
+	for _, r := range "hello" {
+		counts[r]++ // missing -&gt; 0, then ++
+	}
+	fmt.Println(scores, counts['l'])
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="7-10" data-state="ages=map[alice:31 bob:25]">A map literal with two entries.</li>
+      <li data-lines="12" data-state="ages=map[alice:31 bob:25]; scores=map[]"><code>make</code> with a size hint pre-sizes the table for about 10 entries. It's still empty.</li>
+      <li data-lines="14-15" data-state="ages=map[alice:31 bob:26 carol:40]">The same syntax inserts a new key and updates an existing one.</li>
+      <li data-lines="16" data-state="ages=map[alice:31 bob:26 carol:40]; len(ages)=3" data-out="map[alice:31 bob:26 carol:40] 3"><code>fmt</code> prints map keys sorted, so the output is stable.</li>
+      <li data-lines="19" data-state="ages[&quot;dave&quot;]=0 (missing)" data-out="dave: 0">Reading a missing key does <strong>not</strong> fail: you silently get the zero value. Is dave 0 years old, or absent? You can't tell.</li>
+      <li data-lines="22-23" data-state="age=0; ok=false" data-out="dave not found">The comma-ok form answers that: <code>ok</code> is <code>false</code> because the key isn't there.</li>
+      <li data-lines="28-30" data-state="ages=map[bob:26 carol:40]" data-out="map[bob:26 carol:40]"><code>delete</code> removes alice. Deleting a key that doesn't exist is simply a no-op.</li>
+      <li data-lines="33" data-state="scores=map[ann:[90]]"><code>scores["ann"]</code> is missing, so it reads as a <code>nil</code> slice, and <code>append</code> on nil works. No "if absent, initialise" needed.</li>
+      <li data-lines="34" data-state="scores=map[ann:[90 75]]">The second append extends the stored slice. Note we must store the result back with <code>=</code>.</li>
+      <li data-lines="35-38" data-state="r=l; counts=map[e:1 h:1 l:2 o:1]">Counting characters: each missing rune starts at 0, so <code>counts[r]++</code> just works. After "hello", <code>'l'</code> has been seen twice.</li>
+      <li data-lines="39" data-state="scores=map[ann:[90 75]]; counts['l']=2" data-out="map[ann:[90 75]] 2">Zero values make map code short and safe.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>map[alice:31 bob:26 carol:40] 3
+dave: 0
+dave not found
+map[bob:26 carol:40]
+map[ann:[90 75]] 2</pre></div>
+  <p>The <strong>comma-ok idiom</strong> (<code>v, ok := m[k]</code>) is how you ask "is this key present?". Without it, you can't tell a missing key from a key whose value happens to be zero. And thanks to zero values, patterns like <code>counts[r]++</code> and <code>m[k] = append(m[k], v)</code> just work with no "if not present, initialise" dance.</p>
+
+  <h3>Iteration order is random</h3>
+  <p>Ranging over a map visits every entry, but in <strong>no particular order</strong>, and the order can change from one loop to the next. Go deliberately randomises it so programs can't accidentally depend on an order that might change. The first three lines of this output will differ every time you run it:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+func main() {
+	m := map[string]int{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
+
+	for run := range 3 {
+		fmt.Print("run ", run, ": ")
+		for k := range m {
+			fmt.Print(k, " ")
+		}
+		fmt.Println()
+	}
+
+	// Need a stable order? Sort the keys.
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		fmt.Print(k, "=", m[k], " ")
+	}
+	fmt.Println()
+
+	// fmt prints maps with sorted keys, to make output testable.
+	fmt.Println(m)
+}</code></pre></div>
+  <div class="output" data-label="Output (order varies between runs)"><pre>run 0: d e a b c 
+run 1: d e a b c 
+run 2: c d e a b 
+a=1 b=2 c=3 d=4 e=5 
+map[a:1 b:2 c:3 d:4 e:5]</pre></div>
+  <p>If you need a stable order, collect and sort the keys: <code>slices.Sorted(maps.Keys(m))</code>. Interestingly, <code>fmt.Println</code> prints maps with sorted keys, purely to make output predictable for tests and logs.</p>
+
+  <h3>The map-of-structs gotcha</h3>
+  <p>Map values are not <strong>addressable</strong>: you can't take their address or modify a field in place. The reason is that the map may move entries around in memory as it grows, so a pointer into it could become invalid. So this doesn't compile:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+type Player struct {
+	Name  string
+	Score int
+}
+
+func main() {
+	team := map[string]Player{"p1": {"Ann", 0}}
+	team["p1"].Score = 10
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre>./main.go:10:2: cannot assign to struct field team["p1"].Score in map</pre></div>
+  <p>Two fixes, plus the same "you're editing a copy" trap with <code>range</code> over a slice of structs:</p>
+  <div class="live" data-title="Updating structs inside maps and slices">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Player struct {
+	Name  string
+	Score int
+}
+
+func main() {
+	// Fix 1: copy out, modify, write back.
+	team := map[string]Player{"p1": {"Ann", 0}}
+	p := team["p1"]
+	p.Score = 10
+	team["p1"] = p
+	fmt.Println(team["p1"])
+
+	// Fix 2: store pointers, then modify through them.
+	team2 := map[string]*Player{"p1": {"Bob", 0}}
+	team2["p1"].Score += 5
+	fmt.Println(*team2["p1"])
+
+	// The same "copy" rule bites when ranging over a slice of structs.
+	players := []Player{{"Cy", 1}, {"Di", 2}}
+	for _, pl := range players {
+		pl.Score *= 100 // modifies a COPY
+	}
+	fmt.Println(players)
+	for i := range players {
+		players[i].Score *= 100 // modifies the element
+	}
+	fmt.Println(players)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-13" data-state="team=map[p1:{Ann 0}]; p={Ann 0}">Map values aren't addressable, so we read a <strong>copy</strong> of the struct into <code>p</code>.</li>
+      <li data-lines="14" data-state="team=map[p1:{Ann 0}]; p={Ann 10}">Changing <code>p</code> changes only the copy. The map still holds <code>{Ann 0}</code>.</li>
+      <li data-lines="15-16" data-state="team=map[p1:{Ann 10}]; p={Ann 10}" data-out="{Ann 10}">Writing the whole struct back with <code>team["p1"] = p</code> is what updates the map.</li>
+      <li data-lines="19" data-state="team2=map[p1:&amp;{Bob 0}]">Fix 2: the map stores <em>pointers</em>. The pointer is still copied out, but it points at the one shared <code>Player</code>.</li>
+      <li data-lines="20-21" data-state="team2=map[p1:&amp;{Bob 5}]" data-out="{Bob 5}">So <code>team2["p1"].Score += 5</code> compiles and changes the real struct.</li>
+      <li data-lines="24-27" data-state="players=[{Cy 1} {Di 2}]; pl={Di 200}">Same trap with slices: <code>pl</code> is a copy of each element. Multiplying it changes the copy, which is thrown away each iteration.</li>
+      <li data-lines="28" data-state="players=[{Cy 1} {Di 2}]" data-out="[{Cy 1} {Di 2}]">The slice is unchanged.</li>
+      <li data-lines="29-31" data-state="i=1; players=[{Cy 100} {Di 200}]">Ranging by index and writing <code>players[i].Score</code> modifies the element itself. Slice elements <em>are</em> addressable.</li>
+      <li data-lines="32" data-state="players=[{Cy 100} {Di 200}]" data-out="[{Cy 100} {Di 200}]">This time it sticks.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>{Ann 10}
+{Bob 5}
+[{Cy 1} {Di 2}]
+[{Cy 100} {Di 200}]</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">for _, u := range users {
+	u.Active = true // modifies a copy, lost
+}
+
+if m[key] != 0 { // can't tell missing from zero
+	...
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">for i := range users {
+	users[i].Active = true // modifies the element
+}
+
+if v, ok := m[key]; ok { // explicit presence check
+	...
+}</code></pre></div></div>
+  </div>
+
+  <h3>Sets with map[T]struct{}</h3>
+  <p>Go has no built-in set type. The idiom is a map whose values carry no information. <code>struct{}</code>, the empty struct, takes <strong>zero bytes</strong>, so <code>map[string]struct{}</code> stores only keys. <code>map[string]bool</code> also works and reads more simply (<code>if seen[x]</code>), at the cost of a byte per entry; both are common.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+// Set is a set of strings. struct{} takes zero bytes.
+type Set map[string]struct{}
+
+func (s Set) Add(v string)      { s[v] = struct{}{} }
+func (s Set) Has(v string) bool { _, ok := s[v]; return ok }
+func (s Set) Sorted() []string  { return slices.Sorted(maps.Keys(s)) }
+func (s Set) Union(o Set) Set   { u := maps.Clone(s); maps.Copy(u, o); return u }
+func (s Set) Intersect(o Set) Set {
+	out := Set{}
+	for k := range s {
+		if o.Has(k) {
+			out.Add(k)
+		}
+	}
+	return out
+}
+
+func main() {
+	a, b := Set{}, Set{}
+	for _, v := range []string{"go", "rust", "zig", "go"} {
+		a.Add(v)
+	}
+	for _, v := range []string{"go", "c", "zig"} {
+		b.Add(v)
+	}
+	fmt.Println(len(a), a.Has("go"), a.Has("java"))
+	fmt.Println("union:", a.Union(b).Sorted())
+	fmt.Println("intersect:", a.Intersect(b).Sorted())
+
+	// Quick dedupe of a slice using a set.
+	seen := map[int]bool{}
+	var uniq []int
+	for _, n := range []int{3, 1, 3, 2, 1} {
+		if !seen[n] {
+			seen[n] = true
+			uniq = append(uniq, n)
+		}
+	}
+	fmt.Println(uniq)
+}</code></pre></div>
+  <div class="output"><pre>3 true false
+union: [c go rust zig]
+intersect: [go zig]
+[3 1 2]</pre></div>
+
+  <h2>The maps package and clear</h2>
+  <p>The <code>maps</code> package (Go 1.21+, with iterator functions since 1.23) gives you generic helpers for maps. <code>maps.Keys</code> and <code>maps.Values</code> return <strong>iterators</strong> (<code>iter.Seq</code>), not slices. You can range over them directly, or feed them into <code>slices.Sorted</code> or <code>slices.Collect</code> to get a slice.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+func main() {
+	stock := map[string]int{"apple": 5, "pear": 0, "kiwi": 12}
+
+	// Keys and Values return iterators (iter.Seq), not slices.
+	keys := slices.Sorted(maps.Keys(stock))
+	vals := slices.Sorted(maps.Values(stock))
+	fmt.Println(keys, vals)
+
+	// Range directly over the iterator:
+	n := 0
+	for range maps.Keys(stock) {
+		n++
+	}
+	fmt.Println("keys counted:", n)
+
+	// Clone makes a shallow copy; Equal compares contents.
+	backup := maps.Clone(stock)
+	fmt.Println(maps.Equal(stock, backup))
+	backup["kiwi"] = 0
+	fmt.Println(maps.Equal(stock, backup), stock["kiwi"])
+
+	// DeleteFunc removes entries matching a predicate.
+	maps.DeleteFunc(stock, func(k string, v int) bool { return v == 0 })
+	fmt.Println(stock)
+
+	// Collect builds a map from an iter.Seq2 (e.g. slices.All gives index,value).
+	byIndex := maps.Collect(slices.All([]string{"zero", "one"}))
+	fmt.Println(byIndex)
+
+	// Insert copies pairs from an iterator into an existing map.
+	maps.Insert(stock, maps.All(map[string]int{"plum": 3}))
+	fmt.Println(stock)
+}</code></pre></div>
+  <div class="output"><pre>[apple kiwi pear] [0 5 12]
+keys counted: 3
+true
+false 12
+map[apple:5 kiwi:12]
+map[0:zero 1:one]
+map[apple:5 kiwi:12 plum:3]</pre></div>
+  <p><code>maps.Clone</code> is a <strong>shallow</strong> copy: if values are pointers or slices, the clone shares what they point to. <code>maps.Equal</code> needs comparable values; use <code>maps.EqualFunc</code> otherwise.</p>
+
+  <h3>The clear builtin</h3>
+  <p>Go 1.21 added <code>clear</code>. On a map it deletes every entry (the map stays allocated and usable, which is great for reusing one map in a loop). On a slice it sets every element to its zero value but keeps the length.</p>
+  <div class="live" data-title="clear on a map vs clear on a slice">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	m := map[string]int{"a": 1, "b": 2}
+	clear(m) // deletes every entry; the map stays usable
+	fmt.Println(m, len(m))
+	m["c"] = 3
+	fmt.Println(m)
+
+	s := []int{1, 2, 3}
+	clear(s) // sets every element to its zero value; len unchanged
+	fmt.Println(s, len(s))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="m=map[a:1 b:2]; len(m)=2">A map with two entries.</li>
+      <li data-lines="7-8" data-state="m=map[]; len(m)=0" data-out="map[] 0"><code>clear(m)</code> deletes every entry. The map itself is not nil; it stays allocated.</li>
+      <li data-lines="9-10" data-state="m=map[c:3]; len(m)=1" data-out="map[c:3]">So we can keep using it straight away. Handy for reusing one map across loop iterations.</li>
+      <li data-lines="12" data-state="s=[1 2 3]; len(s)=3">Now a slice.</li>
+      <li data-lines="13-14" data-state="s=[0 0 0]; len(s)=3" data-out="[0 0 0] 3">On a slice, <code>clear</code> does something different: it zeroes every element but keeps the length. Nothing is removed.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>map[] 0
+map[c:3]
+[0 0 0] 3</pre></div>
+
+  <h2>Maps are reference-like, and not thread-safe</h2>
+  <p>A map variable is really a pointer to the runtime's hash table structure. Copying the variable or passing it to a function copies that pointer, so <strong>everyone sees the same map</strong>. There's no "copy on assign". The zero value of a map is <code>nil</code>: you can read from it (always zero values) but writing panics.</p>
+  <div class="live" data-title="Maps are shared by reference; nil maps panic on write">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func addBonus(m map[string]int) {
+	for k := range m {
+		m[k] += 10 // changes the caller's map
+	}
+	m["new"] = 1 // also visible to the caller
+}
+
+func main() {
+	pay := map[string]int{"ann": 100}
+	addBonus(pay)
+	fmt.Println(pay)
+
+	alias := pay
+	alias["ann"] = 0
+	fmt.Println(pay["ann"]) // same map
+
+	var nilMap map[string]int
+	fmt.Println(nilMap["x"], len(nilMap)) // reading a nil map is fine
+
+	defer func() { fmt.Println("recovered:", recover()) }()
+	nilMap["x"] = 1 // writing to a nil map panics
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13" data-state="pay=map[ann:100]"><code>pay</code> holds a reference to a runtime hash table.</li>
+      <li data-lines="14,5-7" data-state="pay=map[ann:110]; m=same table as pay">Passing <code>pay</code> copies only that reference. <code>m</code> and <code>pay</code> are two names for one table, so <code>m[k] += 10</code> changes the caller's data.</li>
+      <li data-lines="9" data-state="pay=map[ann:110 new:1]">Unlike <code>append</code> on a slice, adding a key inside the function is visible to the caller too.</li>
+      <li data-lines="15" data-state="pay=map[ann:110 new:1]" data-out="map[ann:110 new:1]">Both changes show up in <code>main</code>.</li>
+      <li data-lines="17-19" data-state="pay=map[ann:0 new:1]; alias=same table" data-out="0">Assignment doesn't copy a map either. Writing through <code>alias</code> changes <code>pay</code>. Use <code>maps.Clone</code> when you want a real copy.</li>
+      <li data-lines="21-22" data-state="nilMap=nil" data-out="0 0">The zero value of a map is <code>nil</code>. Reading from it is fine: every lookup returns the zero value and <code>len</code> is 0.</li>
+      <li data-lines="24" data-state="nilMap=nil">We set up a deferred <code>recover</code> before trying something dangerous.</li>
+      <li data-lines="25" data-state="nilMap=nil; panic=assignment to entry in nil map">Writing to a nil map <strong>panics</strong>: there is no table to put the entry in. Always <code>make</code> maps (or use a literal) before writing.</li>
+      <li data-lines="24,26" data-state="recovered=assignment to entry in nil map" data-out="recovered: assignment to entry in nil map">The deferred function catches the panic as <code>main</code> unwinds.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>map[ann:110 new:1]
+0
+0 0
+recovered: assignment to entry in nil map</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: always make your maps</div><p><code>var m map[string]int</code> followed by <code>m["x"] = 1</code> panics with "assignment to entry in nil map". This is especially common with map fields in structs: <code>type Cache struct{ items map[string]int }</code> needs a constructor that does <code>items: make(map[string]int)</code>.</p></div>
+
+  <h3>Concurrent map access crashes the program</h3>
+  <p>Maps are <strong>not safe for concurrent use</strong>. If one goroutine writes while another reads or writes, the internal structure can be corrupted. Rather than let that happen silently, the runtime detects it on a best-effort basis and kills the program with a <code>fatal error</code>. This isn't a <code>panic</code>: <code>recover</code> can't catch it.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "sync"
+
+func main() {
+	m := map[int]int{}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 100_000 {
+				m[j] = i // UNSAFE: concurrent writes
+			}
+		}()
+	}
+	wg.Wait()
+}</code></pre></div>
+  <div class="output error" data-label="Runtime crash (goroutine numbers and addresses vary)"><pre>fatal error: concurrent map writes
+
+goroutine 21 [running]:
+internal/runtime/maps.fatal({0x102bcb980?, 0x0?})
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/runtime/panic.go:1195 +0x20
+main.main.func1()
+	/home/you/app/main.go:13 +0x68
+created by main.main in goroutine 1
+	/home/you/app/main.go:10 +0x50
+exit status 2</pre></div>
+  <p>The fixes, covered in depth in Chapters 12 and 13:</p>
+  <ul>
+    <li>Guard the map with a <code>sync.Mutex</code> (or <code>sync.RWMutex</code> when reads dominate). This is the default choice.</li>
+    <li>Give ownership of the map to a single goroutine and talk to it over channels.</li>
+    <li><code>sync.Map</code> for two narrow cases: keys written once and read many times, or goroutines working on disjoint keys. It is <em>not</em> a general replacement.</li>
+  </ul>
+  <p>Run your tests with <code>go test -race</code>: the race detector catches these bugs reliably, including the ones that don't crash.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>When you design a type that holds a map, decide up front whether it's safe for concurrent use and say so in the doc comment ("A Registry is safe for concurrent use by multiple goroutines."). The standard library does this consistently. Callers can then reason about it without reading your code.</p></div>
+
+  <h2>Performance: preallocate when you know the size</h2>
+  <p>Every time a slice outgrows its capacity, Go allocates a new array and copies everything. Maps similarly rehash into bigger tables as they grow. If you know (even roughly) how many elements you'll add, tell Go up front: <code>make([]T, 0, n)</code> for slices, <code>make(map[K]V, n)</code> for maps. Here's a benchmark (Chapter 15 explains how benchmarks work):</p>
+  <div class="code" data-file="prealloc_test.go"><pre><code class="language-go">package main
+
+import "testing"
+
+const N = 10_000
+
+func BenchmarkAppendGrow(b *testing.B) {
+	for b.Loop() {
+		var s []int
+		for i := range N {
+			s = append(s, i)
+		}
+	}
+}
+
+func BenchmarkAppendPrealloc(b *testing.B) {
+	for b.Loop() {
+		s := make([]int, 0, N)
+		for i := range N {
+			s = append(s, i)
+		}
+	}
+}
+
+func BenchmarkMapGrow(b *testing.B) {
+	for b.Loop() {
+		m := map[int]int{}
+		for i := range N {
+			m[i] = i
+		}
+	}
+}
+
+func BenchmarkMapSizeHint(b *testing.B) {
+	for b.Loop() {
+		m := make(map[int]int, N)
+		for i := range N {
+			m[i] = i
+		}
+	}
+}</code></pre></div>
+  <div class="output" data-label="go test -bench . -benchmem (timings vary by machine)"><pre>BenchmarkAppendGrow-8       	   25861	     45344 ns/op	  357626 B/op	      19 allocs/op
+BenchmarkAppendPrealloc-8   	   48580	     24741 ns/op	   81920 B/op	       1 allocs/op
+BenchmarkMapGrow-8          	    3588	    334358 ns/op	  591483 B/op	      79 allocs/op
+BenchmarkMapSizeHint-8      	   12992	     92328 ns/op	  295554 B/op	      33 allocs/op
+PASS
+ok  	ch05/a20	5.259s</pre></div>
+  <p>Reading the results: preallocating the slice did <strong>1 allocation instead of 19</strong>, used about a quarter of the memory, and ran nearly twice as fast. The map with a size hint did less than half the allocations and ran over three times faster. The exact nanoseconds will differ on your machine, but the shape of the result won't.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>The most common preallocation in real code is transforming one slice into another: <code>out := make([]Result, 0, len(in))</code>. Make it a habit. But don't go further than that without a benchmark. Over-allocating "just in case" wastes memory, and guessing at sizes clutters code. Measure, then optimise.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Which of these is true about Go maps?</div>
+    <div class="quiz-opts"><button>Iteration order is the insertion order</button><button>Reading a missing key returns the value type's zero value</button><button>You can write to a nil map; it allocates automatically</button><button>Concurrent reads and writes are safe without locking</button></div>
+    <div class="quiz-explain">Missing keys give the zero value (use comma-ok to detect absence). Iteration order is randomised, writing to a nil map panics, and concurrent writes are a fatal error.</div>
+  </div>
+
+  <h2>Practice</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1: dedupe a slice, keeping the original order</summary>
+    <p>Write a generic <code>Dedupe[T comparable](in []T) []T</code> that keeps the <em>first</em> occurrence of each value, in order. (Sorting plus <code>slices.Compact</code> would lose the order.) Hint: a set built from <code>map[T]struct{}</code>, and preallocate both the map and the output.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// Dedupe returns the unique elements of in, keeping first-seen order.
+func Dedupe[T comparable](in []T) []T {
+	seen := make(map[T]struct{}, len(in))
+	out := make([]T, 0, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+func main() {
+	fmt.Println(Dedupe([]int{3, 1, 3, 2, 1, 4}))
+	fmt.Println(Dedupe([]string{"b", "a", "b"}))
+}</code></pre></div>
+    <div class="output"><pre>[3 1 2 4]
+[b a]</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: group words by length</summary>
+    <p>Write <code>groupByLength(words []string) map[int][]string</code>, then print the groups in increasing length order. Hint: <code>m[k] = append(m[k], v)</code> works even when <code>m[k]</code> doesn't exist yet, and <code>slices.Sorted(maps.Keys(m))</code> gives a stable order.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+func groupByLength(words []string) map[int][]string {
+	groups := make(map[int][]string)
+	for _, w := range words {
+		groups[len(w)] = append(groups[len(w)], w) // nil + append works
+	}
+	return groups
+}
+
+func main() {
+	g := groupByLength([]string{"go", "map", "is", "fun", "slice", "to"})
+	for _, n := range slices.Sorted(maps.Keys(g)) {
+		fmt.Println(n, g[n])
+	}
+}</code></pre></div>
+    <div class="output"><pre>2 [go is to]
+3 [map fun]
+5 [slice]</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: rotate a slice in place</summary>
+    <p>Write <code>RotateLeft[T any](s []T, k int)</code> that rotates the slice left by <code>k</code> positions without allocating a new slice. Handle <code>k</code> larger than the length. Hint: reversing the first k elements, then the rest, then the whole slice gives a rotation.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"slices"
+)
+
+// RotateLeft rotates s in place by k positions using three reversals.
+func RotateLeft[T any](s []T, k int) {
+	if len(s) == 0 {
+		return
+	}
+	k %= len(s)
+	slices.Reverse(s[:k])
+	slices.Reverse(s[k:])
+	slices.Reverse(s)
+}
+
+func main() {
+	s := []int{1, 2, 3, 4, 5}
+	RotateLeft(s, 2)
+	fmt.Println(s)
+	RotateLeft(s, 8) // 8 % 5 = 3
+	fmt.Println(s)
+}</code></pre></div>
+    <div class="output"><pre>[3 4 5 1 2]
+[1 2 3 4 5]</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Arrays have a fixed size that's part of their type, and they're copied on assignment. You'll mostly meet them as the storage behind slices.</li>
+      <li>A slice is a 24-byte header: <strong>ptr, len, cap</strong>. Slicing creates new headers over the <em>same</em> backing array.</li>
+      <li><code>append</code> writes in place when there's spare capacity and reallocates when there isn't. Always write <code>s = append(s, ...)</code>.</li>
+      <li>Two slices sharing a backing array can overwrite each other. Use <code>slices.Clone</code> or a full slice expression <code>s[a:b:b]</code> to isolate them.</li>
+      <li>Functions that grow a slice must return it. Use <code>len(s) == 0</code>, not <code>s == nil</code>, to test for emptiness.</li>
+      <li>The <code>slices</code> and <code>maps</code> packages replace most hand-written helpers; many return iterators in Go 1.23+.</li>
+      <li>Maps: use comma-ok to detect missing keys, never rely on iteration order, and remember map values aren't addressable.</li>
+      <li>Maps are reference-like, must be <code>make</code>d before writing, and are not safe for concurrent writes (it's a fatal crash).</li>
+      <li>Preallocate with <code>make([]T, 0, n)</code> / <code>make(map[K]V, n)</code> when you know the size; measure before going further.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

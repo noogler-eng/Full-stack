@@ -1,0 +1,1278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 06 · Strings, Bytes &amp; Runes — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="06">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part II · Chapter 06</div>
+  <h1>Strings, Bytes &amp; Runes</h1>
+  <p class="lead">Text is everywhere: names, logs, JSON, URLs, user input. Go's strings are simple on the surface but have one twist that trips everyone up at first: a string is a sequence of <em>bytes</em>, not characters. Once you understand bytes, runes and UTF-8, the rest of Go's text tools (the <code>strings</code>, <code>strconv</code>, <code>fmt</code> and <code>unicode</code> packages) fall neatly into place.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Beginner → Intermediate</span>
+    <span class="pill">▶ 13 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What a Go string really is: an immutable sequence of bytes, usually UTF-8</li>
+      <li>Why <code>len("é")</code> is 2, why indexing gives bytes, and why <code>range</code> gives runes</li>
+      <li>The <code>byte</code> and <code>rune</code> types, and converting to and from <code>[]byte</code> and <code>[]rune</code></li>
+      <li>Raw string literals, and a guided tour of the <code>strings</code> package</li>
+      <li>Why <code>+=</code> in a loop is slow, and how <code>strings.Builder</code> fixes it</li>
+      <li>The <code>bytes</code>, <code>strconv</code> and <code>unicode</code> packages</li>
+      <li>Every <code>fmt</code> verb you'll actually use, with width and precision</li>
+      <li>A taste of <code>text/template</code> and <code>regexp</code>, and a complete word-frequency counter</li>
+    </ul>
+  </div>
+
+  <h2>What a string really is</h2>
+  <p>In Go, a <strong>string</strong> is a read-only sequence of bytes. That's it. Under the hood it's a tiny two-word header, much like a slice header but without capacity: a pointer to the bytes and a length.</p>
+  <p>Two consequences follow straight away:</p>
+  <ul>
+    <li><strong>Strings are immutable.</strong> Once created, the bytes can never change. You can't do <code>s[0] = 'H'</code>. Every "modification" (<code>ToUpper</code>, <code>Replace</code>, <code>+</code>) creates a brand-new string.</li>
+    <li><strong>Copying a string is cheap.</strong> Assigning or passing a string copies only the 16-byte header. Because nobody can change the bytes, it's perfectly safe for many strings to share them. Slicing a string (<code>s[2:5]</code>) also shares the bytes, with no copying.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+func main() {
+	s := "hello"
+	s[0] = 'H'
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre>./main.go:5:2: cannot assign to s[0] (neither addressable nor a map index expression)</pre></div>
+  <p>If you need to change text in place, convert to a <code>[]byte</code> or <code>[]rune</code> (which makes a mutable copy), change it, then convert back.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A string is like a printed page: you can read it, photocopy it, or cut out a section to look at, but you can't erase a letter. To edit, you retype the page (build a new string). That restriction is what lets Go share string memory freely and safely between goroutines.</p></div>
+
+  <h3>UTF-8 in one minute</h3>
+  <p>Computers store numbers, so text needs an <strong>encoding</strong>: a rule for turning characters into bytes. <strong>Unicode</strong> gives every character in every writing system a number called a <strong>code point</strong>, written like <code>U+0041</code> for "A" or <code>U+1F439</code> for 🐹. <strong>UTF-8</strong> is the encoding that turns those numbers into 1 to 4 bytes:</p>
+  <table>
+    <thead><tr><th>Code point range</th><th>Bytes</th><th>Examples</th></tr></thead>
+    <tbody>
+      <tr><td>U+0000 – U+007F</td><td>1</td><td>ASCII: <code>A</code>, <code>z</code>, <code>7</code>, <code>{</code></td></tr>
+      <tr><td>U+0080 – U+07FF</td><td>2</td><td>Accented Latin, Greek, Cyrillic: <code>é</code>, <code>Ω</code>, <code>ж</code></td></tr>
+      <tr><td>U+0800 – U+FFFF</td><td>3</td><td>Most CJK, symbols: <code>中</code>, <code>€</code>, <code>✓</code></td></tr>
+      <tr><td>U+10000 – U+10FFFF</td><td>4</td><td>Emoji, rare scripts: <code>🐹</code>, <code>𝄞</code></td></tr>
+    </tbody>
+  </table>
+  <p>UTF-8's genius is that plain ASCII text is <em>already</em> valid UTF-8, byte for byte. Go source code is defined to be UTF-8, so string literals in your code are UTF-8 too. (Fun fact: UTF-8 was designed by Ken Thompson and Rob Pike, two of Go's creators.)</p>
+
+  <figure class="diagram"><svg viewBox="0 0 660 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect x="0" y="0" width="660" height="230" rx="10" fill="#262624"/>
+    <text x="24" y="30" fill="#a8a49a" font-size="12">s := "café"     len(s) = 5 bytes,  utf8.RuneCountInString(s) = 4 runes</text>
+    <text x="24" y="64" fill="#a8a49a" font-size="12">runes</text>
+    <g font-family="JetBrains Mono, monospace" font-size="16">
+      <rect x="90" y="44" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#7fa6d9"/><text x="128" y="67" fill="#ece9e1">c</text>
+      <rect x="180" y="44" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#7fa6d9"/><text x="218" y="67" fill="#ece9e1">a</text>
+      <rect x="270" y="44" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#7fa6d9"/><text x="308" y="67" fill="#ece9e1">f</text>
+      <rect x="360" y="44" width="180" height="34" rx="6" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/><text x="444" y="67" fill="#d97757">é</text>
+    </g>
+    <g fill="#a8a49a" font-family="JetBrains Mono, monospace" font-size="11">
+      <text x="110" y="96">U+0063</text><text x="200" y="96">U+0061</text><text x="290" y="96">U+0066</text><text x="428" y="96">U+00E9</text>
+    </g>
+    <text x="24" y="140" fill="#a8a49a" font-size="12">bytes</text>
+    <g font-family="JetBrains Mono, monospace" font-size="15">
+      <rect x="90" y="118" width="90" height="38" fill="#2e2d2a" stroke="#3a3936"/><text x="124" y="143" fill="#ece9e1">63</text>
+      <rect x="180" y="118" width="90" height="38" fill="#2e2d2a" stroke="#3a3936"/><text x="214" y="143" fill="#ece9e1">61</text>
+      <rect x="270" y="118" width="90" height="38" fill="#2e2d2a" stroke="#3a3936"/><text x="304" y="143" fill="#ece9e1">66</text>
+      <rect x="360" y="118" width="90" height="38" fill="#2e2d2a" stroke="#e0b45c"/><text x="394" y="143" fill="#e0b45c">c3</text>
+      <rect x="450" y="118" width="90" height="38" fill="#2e2d2a" stroke="#e0b45c"/><text x="484" y="143" fill="#e0b45c">a9</text>
+    </g>
+    <g fill="#a8a49a" font-family="JetBrains Mono, monospace" font-size="11">
+      <text x="122" y="174">s[0]</text><text x="212" y="174">s[1]</text><text x="302" y="174">s[2]</text><text x="392" y="174">s[3]</text><text x="482" y="174">s[4]</text>
+    </g>
+    <text x="24" y="206" fill="#8fbf7f" font-size="12">range s yields (0,'c') (1,'a') (2,'f') (3,'é'): the index jumps from 3 to the end, because é is 2 bytes.</text>
+  </svg><figcaption>One string, two views. Indexing and <code>len</code> see bytes; <code>range</code> and <code>[]rune</code> see runes (code points).</figcaption></figure>
+
+  <h2>Bytes vs runes: len, indexing and range</h2>
+  <p>Because a string is bytes, the built-in operations work on bytes:</p>
+  <div class="live" data-title="len, indexing and slicing all work on bytes">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unicode/utf8"
+)
+
+func main() {
+	ascii := "Go"
+	accented := "café"
+	emoji := "Go🐹"
+
+	// len counts BYTES, not characters.
+	fmt.Println(len(ascii), len(accented), len(emoji))
+
+	// Count characters (runes) with utf8.RuneCountInString.
+	fmt.Println(utf8.RuneCountInString(ascii),
+		utf8.RuneCountInString(accented),
+		utf8.RuneCountInString(emoji))
+
+	// Indexing gives a single BYTE (type byte = uint8).
+	fmt.Println(accented[0], accented[3], accented[4])
+	fmt.Printf("%c %T\n", accented[0], accented[0])
+
+	// Slicing is by byte offsets too. Cutting inside é breaks it.
+	fmt.Println(accented[:3], accented[:4], accented[:5])
+
+	// The bytes behind the text:
+	fmt.Printf("% x\n", accented)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-11" data-state="ascii=&quot;Go&quot;; accented=&quot;café&quot;; emoji=&quot;Go🐹&quot;">Three strings. Each one is just a read-only sequence of UTF-8 bytes.</li>
+      <li data-lines="14" data-state="len(ascii)=2; len(accented)=5; len(emoji)=6" data-out="2 5 6"><code>len</code> counts <strong>bytes</strong>. "é" needs 2 bytes and the hamster needs 4.</li>
+      <li data-lines="17-19" data-state="runes(ascii)=2; runes(accented)=4; runes(emoji)=3" data-out="2 4 3"><code>utf8.RuneCountInString</code> decodes the bytes and counts code points: the number you'd call "characters".</li>
+      <li data-lines="22" data-state="accented[0]=99; accented[3]=195; accented[4]=169" data-out="99 195 169">Indexing returns one <strong>byte</strong>, printed as a number. Bytes 3 and 4 are the two halves of é (0xc3 0xa9).</li>
+      <li data-lines="23" data-state="accented[0]='c' (uint8)" data-out="c uint8"><code>%c</code> shows byte 99 as 'c', and <code>%T</code> confirms its type is <code>uint8</code> (that's what <code>byte</code> is).</li>
+      <li data-lines="26" data-state="accented[:3]=caf; accented[:4]=caf + 0xc3; accented[:5]=café" data-out="caf caf� café">Slicing is by byte offsets. <code>[:4]</code> cuts é in half, leaving a lone 0xc3 that prints as the replacement character.</li>
+      <li data-lines="29" data-state="bytes=63 61 66 c3 a9" data-out="63 61 66 c3 a9"><code>% x</code> prints the raw bytes in hex with spaces: c, a, f, then é's two bytes.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>2 5 6
+2 4 3
+99 195 169
+c uint8
+caf caf� café
+63 61 66 c3 a9</pre></div>
+  <p>Read that output carefully, because it's the heart of this chapter:</p>
+  <ul>
+    <li><code>len("café")</code> is <strong>5</strong>, not 4: "é" takes two bytes (<code>c3 a9</code>). The hamster emoji takes four.</li>
+    <li><code>accented[3]</code> is <strong>195</strong> (<code>0xc3</code>), the first <em>half</em> of é. Indexing gives a <code>byte</code> (an alias for <code>uint8</code>), never a character.</li>
+    <li><code>accented[:4]</code> slices through the middle of é, leaving an invalid byte that prints as the replacement character <code>�</code>.</li>
+  </ul>
+  <p>To work with characters, use <code>for range</code>. On a string, <code>range</code> decodes UTF-8 for you and yields each rune together with the <strong>byte offset</strong> where it starts:</p>
+
+  <div class="live" data-title="Byte loop vs range loop over the same string">
+    <pre><code class="language-go">s := "héy"
+for i := 0; i &lt; len(s); i++ {
+	fmt.Print(s[i], " ")
+}
+fmt.Println()
+for i, r := range s {
+	fmt.Printf("%d:%c ", i, r)
+}
+fmt.Println()</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="s=&quot;héy&quot;; len(s)=4">Three characters, but é is 2 bytes, so <code>len(s)</code> is 4.</li>
+      <li data-lines="2-3" data-state="i=0; s[i]=104 ('h'); printed=104">A classic index loop goes byte by byte. <code>s[0]</code> is 104, the byte for 'h'. Printing a byte prints the number.</li>
+      <li data-lines="2-3" data-state="i=1; s[i]=195 (0xc3); printed=104 195">Byte 1 is 0xc3: the first half of é. Not a character on its own.</li>
+      <li data-lines="2-3" data-state="i=2; s[i]=169 (0xa9); printed=104 195 169">Byte 2 is 0xa9: the second half of é.</li>
+      <li data-lines="2-5" data-state="i=3; s[i]=121 ('y'); printed=104 195 169 121" data-out="104 195 169 121 ">Byte 3 is 'y'. Four iterations for three characters; <code>Println</code> ends the line.</li>
+      <li data-lines="6-7" data-state="i=0; r='h' (U+0068); printed=0:h">Now <code>range</code>. It decodes one rune at a time. First: offset 0, rune 'h'.</li>
+      <li data-lines="6-7" data-state="i=1; r='é' (U+00E9); printed=0:h 1:é">Offset 1. range read <em>two</em> bytes and decoded them into the single rune é.</li>
+      <li data-lines="6-9" data-state="i=3; r='y'; printed=0:h 1:é 3:y" data-out="0:h 1:é 3:y ">Offset jumps to 3 (skipping 2). Three iterations for three characters.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Real output"><pre>104 195 169 121 
+0:h 1:é 3:y </pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: "character" is fuzzier than you think</div><p>A rune is a Unicode <em>code point</em>, which is usually but not always what a human calls a character. "é" can also be written as "e" plus a combining accent (two runes), and many emoji like 👍🏽 or family emoji are several runes joined together. If you need true user-perceived characters ("grapheme clusters"), for example to truncate a display name, use a library such as <code>github.com/rivo/uniseg</code>. For most backend work, runes are the right unit.</p></div>
+
+  <h3>The byte and rune types</h3>
+  <p>Go has two aliases for working with text:</p>
+  <ul>
+    <li><strong><code>byte</code></strong> is exactly <code>uint8</code>: one raw byte.</li>
+    <li><strong><code>rune</code></strong> is exactly <code>int32</code>: one Unicode code point. A <em>rune literal</em> is written in single quotes: <code>'a'</code>, <code>'é'</code>, <code>'\n'</code>, <code>'é'</code>.</li>
+  </ul>
+  <p>Single quotes make a rune (a number). Double quotes make a string. <code>'a'</code> and <code>"a"</code> are different types.</p>
+  <div class="live" data-title="byte, rune, []byte and []rune conversions">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var b byte = 'A' // byte is an alias for uint8
+	var r rune = 'é' // rune is an alias for int32: one Unicode code point
+	fmt.Println(b, r)
+	fmt.Printf("%c %c %U\n", b, r, r)
+
+	s := "naïve"
+
+	// []byte: a mutable copy of the raw bytes.
+	bs := []byte(s)
+	bs[0] = 'N'
+	fmt.Println(string(bs), len(bs))
+
+	// []rune: decode into code points. Safe for per-character work.
+	rs := []rune(s)
+	rs[2] = 'i'
+	fmt.Println(string(rs), len(rs))
+
+	// A single rune to string:
+	fmt.Println(string(rune(0x1F439)), string('x'))
+
+	// Reverse by runes (bytes would break multi-byte characters).
+	for i, j := 0, len(rs)-1; i &lt; j; i, j = i+1, j-1 {
+		rs[i], rs[j] = rs[j], rs[i]
+	}
+	fmt.Println(string(rs))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6-7" data-state="b=65; r=233">Rune literals are numbers. <code>'A'</code> fits in a <code>byte</code> (65); <code>'é'</code> is code point 233, stored in an <code>int32</code>.</li>
+      <li data-lines="8" data-state="b=65; r=233" data-out="65 233"><code>Println</code> shows them as plain numbers.</li>
+      <li data-lines="9" data-state="b=65; r=233" data-out="A é U+00E9"><code>%c</code> prints the character and <code>%U</code> the Unicode notation.</li>
+      <li data-lines="11,14" data-state="s=naïve; bs=[110 97 195 175 118 101]; len(bs)=6"><code>[]byte(s)</code> copies the raw UTF-8 bytes into a new, mutable slice. "ï" takes two of them.</li>
+      <li data-lines="15-16" data-state="s=naïve; bs=Naïve; len(bs)=6" data-out="Naïve 6">Changing <code>bs[0]</code> is safe because 'n' is a single byte. The original <code>s</code> is untouched: strings are immutable.</li>
+      <li data-lines="19" data-state="rs=[n a ï v e]; len(rs)=5"><code>[]rune(s)</code> decodes into code points instead: one element per character, 5 in total.</li>
+      <li data-lines="20-21" data-state="rs=[n a i v e]; len(rs)=5" data-out="naive 5">Now index 2 really is "ï", so replacing it with 'i' works cleanly.</li>
+      <li data-lines="24" data-state="rs=[n a i v e]" data-out="🐹 x"><code>string(rune(...))</code> encodes one code point back to UTF-8.</li>
+      <li data-lines="27-28" data-state="i=0; j=4; rs=[e a i v n]">Reversing by runes: swap the ends. First swap: 'n' and 'e'.</li>
+      <li data-lines="27-28" data-state="i=1; j=3; rs=[e v i a n]">Second swap: 'a' and 'v'. Next, <code>i</code> and <code>j</code> both become 2, so the loop stops.</li>
+      <li data-lines="30" data-state="rs=[e v i a n]" data-out="evian">Reversing <em>bytes</em> instead would have split multi-byte characters and produced garbage.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>65 233
+A é U+00E9
+Naïve 6
+naive 5
+🐹 x
+evian</pre></div>
+  <p>The conversions to remember:</p>
+  <table>
+    <thead><tr><th>Conversion</th><th>What it does</th><th>Cost</th></tr></thead>
+    <tbody>
+      <tr><td><code>[]byte(s)</code></td><td>Copies the bytes into a new, mutable slice</td><td>Allocation + copy (the compiler sometimes avoids it)</td></tr>
+      <tr><td><code>string(b)</code></td><td>Copies a <code>[]byte</code> into a new string</td><td>Allocation + copy</td></tr>
+      <tr><td><code>[]rune(s)</code></td><td>Decodes UTF-8 into code points (4 bytes each)</td><td>Allocation + decode</td></tr>
+      <tr><td><code>string(rs)</code></td><td>Encodes runes back to UTF-8</td><td>Allocation + encode</td></tr>
+      <tr><td><code>string(r)</code> for a rune</td><td>The UTF-8 encoding of that one code point</td><td>Small allocation</td></tr>
+      <tr><td><code>string(65)</code> for an int</td><td><strong>"A"</strong>, not "65"! Use <code>strconv.Itoa</code></td><td>Flagged by <code>go vet</code></td></tr>
+    </tbody>
+  </table>
+  <p>That last row is a classic mistake. Go treats an integer-to-string conversion as "the character with this code point". <code>go vet</code> (which runs automatically as part of <code>go test</code>) catches it:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	n := 65
+	fmt.Println(string(n))
+}</code></pre></div>
+  <div class="output error" data-label="go vet"><pre>main.go:7:14: conversion from int to string yields a string of one rune, not a string of digits</pre></div>
+
+  <h3>Invalid UTF-8</h3>
+  <p>A Go string can hold <em>any</em> bytes, not just valid UTF-8, for example data read from a binary file. When <code>range</code> hits a byte that isn't valid UTF-8, it yields the special rune <code>U+FFFD</code> (the replacement character <code>�</code>) and moves forward one byte. The <code>unicode/utf8</code> package helps you check and decode:</p>
+  <div class="live" data-title="Invalid UTF-8 and the replacement rune">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+func main() {
+	bad := "ok\xffok" // \xff is not valid UTF-8
+	fmt.Println(utf8.ValidString(bad), utf8.ValidString("héllo"))
+
+	for i, r := range bad {
+		fmt.Printf("%d:%q ", i, r) // invalid bytes decode as U+FFFD
+	}
+	fmt.Println()
+
+	fmt.Println(strings.ToValidUTF8(bad, "?"))
+
+	// Decode one rune at a time and learn its size in bytes.
+	s := "€5"
+	r, size := utf8.DecodeRuneInString(s)
+	fmt.Println(string(r), size, utf8.RuneLen('€'))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="bad=&quot;ok\xffok&quot;; len(bad)=5">A string can hold any bytes. <code>\xff</code> is a single byte that is never valid UTF-8.</li>
+      <li data-lines="11" data-state="bad=&quot;ok\xffok&quot;" data-out="false true"><code>utf8.ValidString</code> checks the whole string: <code>bad</code> fails, "héllo" passes.</li>
+      <li data-lines="13-14" data-state="i=1; r='k'; printed=0:'o' 1:'k'"><code>range</code> decodes the first two bytes as normal runes.</li>
+      <li data-lines="13-14" data-state="i=2; r='�'; printed=0:'o' 1:'k' 2:'�'">At byte 2 it can't decode anything, so it yields the replacement rune U+FFFD and advances by exactly <strong>one</strong> byte. No panic.</li>
+      <li data-lines="13-16" data-state="i=4; r='k'; printed=0:'o' 1:'k' 2:'�' 3:'o' 4:'k'" data-out="0:'o' 1:'k' 2:'�' 3:'o' 4:'k' ">The rest decodes normally, and <code>Println</code> ends the line.</li>
+      <li data-lines="18" data-state="bad=&quot;ok\xffok&quot;" data-out="ok?ok"><code>strings.ToValidUTF8</code> replaces each run of invalid bytes with the string you choose.</li>
+      <li data-lines="21-22" data-state="s=€5; r='€'; size=3"><code>utf8.DecodeRuneInString</code> decodes just the first rune and tells you how many bytes it used: 3 for €.</li>
+      <li data-lines="23" data-state="r='€'; size=3; RuneLen('€')=3" data-out="€ 3 3"><code>utf8.RuneLen</code> answers the reverse question: how many bytes would this rune need?</li>
+    </ol>
+  </div>
+  <div class="output"><pre>false true
+0:'o' 1:'k' 2:'�' 3:'o' 4:'k' 
+ok?ok
+€ 3 3</pre></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">Given <code>s := "Go🐹"</code>, what are <code>len(s)</code> and the number of iterations of <code>for range s</code>?</div>
+    <div class="quiz-opts"><button>3 and 3</button><button>6 and 6</button><button>6 and 3</button><button>3 and 6</button></div>
+    <div class="quiz-explain"><code>len</code> counts bytes: G and o are 1 byte each and 🐹 is 4, so 6. <code>range</code> decodes runes, so it runs 3 times (offsets 0, 1 and 2).</div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Be explicit about units whenever a limit involves text. "Username max 20" should say whether it means bytes (what your database column may count), runes, or displayed characters. Truncating with <code>s[:20]</code> can cut a character in half and store invalid UTF-8. To truncate safely by runes, walk with <code>range</code> and cut at a byte offset it gives you, or use <code>utf8.ValidString</code> to check after cutting.</p></div>
+
+  <h2>String literals: interpreted and raw</h2>
+  <p>Go has two kinds of string literal:</p>
+  <ul>
+    <li><strong>Interpreted</strong> literals use double quotes. Backslash escapes are processed: <code>\n</code> (newline), <code>\t</code> (tab), <code>\"</code>, <code>\\</code>, <code>é</code> (a code point), <code>\xff</code> (a raw byte).</li>
+    <li><strong>Raw</strong> literals use backticks. Everything between them is taken literally, including backslashes and newlines. The only thing you can't put inside is a backtick.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"regexp"
+)
+
+func main() {
+	// Interpreted literal: escape sequences are processed.
+	a := "line one\nline two\t(tabbed) \"quoted\" \u00e9"
+	fmt.Println(a)
+
+	// Raw literal (backticks): exactly what you type, across lines.
+	b := `C:\Users\gopher\n is not a newline here
+second line, "quotes" need no escaping`
+	fmt.Println(b)
+
+	// Raw strings shine for regexps, JSON, SQL and templates.
+	re := regexp.MustCompile(`^\d{3}-\d{4}$`)
+	fmt.Println(re.MatchString("555-1234"))
+
+	query := `
+SELECT id, name
+FROM users
+WHERE active = true`
+	fmt.Println(len(query) &gt; 0)
+}</code></pre></div>
+  <div class="output"><pre>line one
+line two	(tabbed) "quoted" é
+C:\Users\gopher\n is not a newline here
+second line, "quotes" need no escaping
+true
+true</pre></div>
+
+  <div class="callout tip"><p>Use raw strings for regular expressions (no double-escaping <code>\\d</code>), Windows paths, multi-line SQL, JSON test fixtures, and templates. One small trap: a raw string spanning multiple lines includes the leading newline and the indentation of each line, exactly as typed.</p></div>
+
+  <h2>A tour of the strings package</h2>
+  <p>The <code>strings</code> package is where you'll spend most of your text-processing time. All its functions take strings and return <em>new</em> strings (remember, strings are immutable). Here's a big sampler. Don't memorise it; skim it so you know what exists:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
+func main() {
+	s := "  The quick brown fox  "
+
+	// Searching
+	fmt.Println(strings.Contains(s, "quick"), strings.ContainsAny(s, "xyz"))
+	fmt.Println(strings.HasPrefix("main.go", "main"), strings.HasSuffix("main.go", ".go"))
+	fmt.Println(strings.Index("chicken", "ken"), strings.LastIndex("go gopher", "go"))
+	fmt.Println(strings.Count("cheese", "e"), strings.EqualFold("Go", "GO"))
+
+	// Cleaning up
+	fmt.Printf("%q\n", strings.TrimSpace(s))
+	fmt.Printf("%q\n", strings.Trim("--x--", "-"))
+	fmt.Println(strings.TrimPrefix("v1.2.3", "v"), strings.TrimSuffix("app.log", ".log"))
+
+	// Splitting and joining
+	fmt.Printf("%q\n", strings.Split("a,b,,c", ","))
+	fmt.Printf("%q\n", strings.Fields(s)) // splits on any run of whitespace
+	fmt.Printf("%q\n", strings.SplitN("k=v=w", "=", 2))
+	fmt.Println(strings.Join([]string{"usr", "local", "bin"}, "/"))
+
+	// Cut (Go 1.18+): split around the FIRST separator.
+	key, val, found := strings.Cut("timeout=30s", "=")
+	fmt.Println(key, val, found)
+	before, found := strings.CutPrefix("Bearer abc123", "Bearer ")
+	fmt.Println(before, found)
+
+	// Transforming
+	fmt.Println(strings.ToUpper("gopher"), strings.ToLower("GoLang"))
+	fmt.Println(strings.Replace("oink oink oink", "k", "ky", 2))
+	fmt.Println(strings.ReplaceAll("oink oink", "oink", "moo"))
+	fmt.Println(strings.Repeat("ab", 3) + strings.Repeat("-", 5))
+	r := strings.NewReplacer("&lt;", "&amp;lt;", "&gt;", "&amp;gt;")
+	fmt.Println(r.Replace("&lt;b&gt;hi&lt;/b&gt;"))
+	fmt.Println(strings.Map(func(r rune) rune {
+		if unicode.IsDigit(r) {
+			return -1 // drop the rune
+		}
+		return r
+	}, "a1b2c3"))
+
+	// Iterators (Go 1.24): no intermediate slice.
+	for part := range strings.SplitSeq("x|y|z", "|") {
+		fmt.Print(part, " ")
+	}
+	fmt.Println()
+
+	// strings.Title is deprecated. A simple ASCII-friendly alternative:
+	fmt.Println(titleWords("hello wide world"))
+}
+
+func titleWords(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		r, size := utf8.DecodeRuneInString(w)
+		words[i] = string(unicode.ToTitle(r)) + w[size:]
+	}
+	return strings.Join(words, " ")
+}</code></pre></div>
+  <div class="output"><pre>true true
+true true
+4 3
+3 true
+"The quick brown fox"
+"x"
+1.2.3 app
+["a" "b" "" "c"]
+["The" "quick" "brown" "fox"]
+["k" "v=w"]
+usr/local/bin
+timeout 30s true
+abc123 true
+GOPHER golang
+oinky oinky oink
+moo moo
+ababab-----
+&amp;lt;b&amp;gt;hi&amp;lt;/b&amp;gt;
+abc
+x y z 
+Hello Wide World</pre></div>
+  <p>Highlights and things to watch for:</p>
+  <ul>
+    <li><strong><code>Split</code> vs <code>Fields</code></strong>: <code>Split(s, ",")</code> splits on an exact separator and keeps empty pieces (note the <code>""</code> from <code>,,</code>). <code>Fields(s)</code> splits on any run of whitespace and never returns empty pieces. For user input, <code>Fields</code> is usually what you want.</li>
+    <li><strong><code>Cut</code></strong> is the cleanest way to split "key=value" pairs. It returns before, after and whether the separator was found. Prefer it over <code>Split</code> + index juggling.</li>
+    <li><strong><code>EqualFold</code></strong> compares case-insensitively and Unicode-correctly. It's better than <code>ToLower(a) == ToLower(b)</code>, which allocates two strings.</li>
+    <li><strong><code>Trim</code> vs <code>TrimPrefix</code></strong>: <code>Trim(s, "-")</code> removes any of the <em>characters</em> in the cutset from both ends, repeatedly. <code>TrimPrefix(s, "v")</code> removes one exact prefix once. Mixing them up is a common bug: <code>strings.Trim("version", "version.")</code> leaves nothing.</li>
+    <li><strong><code>NewReplacer</code></strong> does many replacements in a single pass, and is safe to reuse across goroutines.</li>
+    <li><strong><code>SplitSeq</code>, <code>FieldsSeq</code>, <code>Lines</code></strong> (Go 1.24) return iterators, so you can loop over pieces without allocating a slice.</li>
+    <li><strong><code>strings.Title</code> is deprecated</strong>: it doesn't handle Unicode word boundaries properly. For real-world title casing use <code>golang.org/x/text/cases</code> (<code>cases.Title(language.English).String(s)</code>). For simple ASCII-ish cases, the small <code>titleWords</code> helper above works.</li>
+  </ul>
+
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">What does <code>strings.Split("a,,b", ",")</code> return?</div>
+    <div class="quiz-opts"><button><code>["a" "b"]</code></button><button><code>["a,,b"]</code></button><button><code>["a" "," "b"]</code></button><button><code>["a" "" "b"]</code></button></div>
+    <div class="quiz-explain"><code>Split</code> keeps empty strings between consecutive separators. If you want to drop empties, filter them out, or use <code>Fields</code>/<code>FieldsFunc</code> when splitting on whitespace-like characters.</div>
+  </div>
+
+  <h3>Parsing a line: Cut, TrimSpace and strconv together</h3>
+  <p>Parsing config lines, headers or simple protocols is one of the most common string jobs. Here's the bread-and-butter combination:</p>
+  <div class="live" data-title="Parsing &quot;key = value&quot;">
+    <pre><code class="language-go">line := " port = 8080 "
+key, val, ok := strings.Cut(line, "=")
+key = strings.TrimSpace(key)
+val = strings.TrimSpace(val)
+fmt.Printf("%q %q %t\n", key, val, ok)
+port, err := strconv.Atoi(val)
+fmt.Println(port+1, err)
+_, err = strconv.Atoi("80a")
+fmt.Println(err)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="line=&quot; port = 8080 &quot;">Messy input with spaces around everything.</li>
+      <li data-lines="2" data-state="key=&quot; port &quot;; val=&quot; 8080 &quot;; ok=true"><code>Cut</code> splits around the <em>first</em> "=". Both halves still carry spaces. No allocation: they are sub-slices of <code>line</code>.</li>
+      <li data-lines="3-4" data-state="key=&quot;port&quot;; val=&quot;8080&quot;"><code>TrimSpace</code> strips leading and trailing whitespace (spaces, tabs, newlines). Again just re-slicing.</li>
+      <li data-lines="5" data-state="key=&quot;port&quot;; val=&quot;8080&quot;; ok=true" data-out="&quot;port&quot; &quot;8080&quot; true"><code>%q</code> prints with quotes, so stray whitespace would be visible. Great for debugging.</li>
+      <li data-lines="6-7" data-state="port=8080; err=nil" data-out="8081 &lt;nil&gt;"><code>strconv.Atoi</code> turns the text into an <code>int</code>. Now we can do arithmetic.</li>
+      <li data-lines="8-9" data-state="err=*strconv.NumError" data-out="strconv.Atoi: parsing &quot;80a&quot;: invalid syntax">Bad input gives a descriptive error instead of a crash. Always check it.</li>
+    </ol>
+  </div>
+
+  <h2>Building strings efficiently</h2>
+  <p>Since strings are immutable, <code>s += "x"</code> can't append in place. It allocates a <em>new</em> string big enough for both parts and copies everything into it. Do that in a loop and you copy the growing string over and over: 1 byte, then 2, then 3... For <em>n</em> additions that's about n²/2 bytes copied. This is called <strong>quadratic</strong> behaviour, and it gets slow fast.</p>
+  <p><strong><code>strings.Builder</code></strong> fixes this. It keeps a growable <code>[]byte</code> internally (growing like a slice, by doubling) and only turns it into a string at the very end, without a final copy. Let's measure:</p>
+  <div class="code" data-file="concat_test.go"><pre><code class="language-go">package main
+
+import (
+	"strings"
+	"testing"
+)
+
+const n = 1000
+
+func BenchmarkPlusEquals(b *testing.B) {
+	for b.Loop() {
+		s := ""
+		for range n {
+			s += "x"
+		}
+		_ = s
+	}
+}
+
+func BenchmarkBuilder(b *testing.B) {
+	for b.Loop() {
+		var sb strings.Builder
+		for range n {
+			sb.WriteString("x")
+		}
+		_ = sb.String()
+	}
+}
+
+func BenchmarkBuilderGrow(b *testing.B) {
+	for b.Loop() {
+		var sb strings.Builder
+		sb.Grow(n)
+		for range n {
+			sb.WriteString("x")
+		}
+		_ = sb.String()
+	}
+}</code></pre></div>
+  <div class="output" data-label="go test -bench . -benchmem (timings vary by machine)"><pre>BenchmarkPlusEquals-8    	   18693	     63117 ns/op	  530278 B/op	     999 allocs/op
+BenchmarkBuilder-8       	  488454	      2423 ns/op	    3320 B/op	       9 allocs/op
+BenchmarkBuilderGrow-8   	  564110	      2127 ns/op	    1024 B/op	       1 allocs/op
+PASS
+ok  	ch06/b06	4.011s</pre></div>
+  <p>For just 1,000 one-byte additions, <code>+=</code> made <strong>999 allocations</strong> and copied about half a megabyte. The Builder did 9 allocations (as its buffer doubled), and with <code>Grow</code> to pre-size it, just <strong>1</strong>. That's roughly 25–30× faster, and the gap widens as <em>n</em> grows.</p>
+
+  <div class="live" data-title="strings.Builder step by step">
+    <pre><code class="language-go">var sb strings.Builder
+sb.Grow(16)
+sb.WriteString("id=")
+sb.WriteByte('7')
+sb.WriteRune('✓')
+fmt.Fprintf(&amp;sb, " n=%d", 42)
+fmt.Println(sb.Len(), sb.Cap())
+s := sb.String()
+fmt.Println(s)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="buf=[]; len=0; cap=0">The zero value of a Builder is ready to use. No constructor needed.</li>
+      <li data-lines="2" data-state="buf=[]; len=0; cap=16"><code>Grow(16)</code> reserves room for 16 bytes up front, so the next writes won't need to reallocate.</li>
+      <li data-lines="3" data-state="buf=&quot;id=&quot;; len=3; cap=16"><code>WriteString</code> appends bytes into the buffer. Nothing is copied into a string yet.</li>
+      <li data-lines="4" data-state="buf=&quot;id=7&quot;; len=4"><code>WriteByte</code> adds one byte.</li>
+      <li data-lines="5" data-state="buf=&quot;id=7✓&quot;; len=7"><code>WriteRune</code> encodes ✓ (U+2713) as UTF-8: three bytes. Length jumps by 3.</li>
+      <li data-lines="6" data-state="buf=&quot;id=7✓ n=42&quot;; len=12">Builder implements <code>io.Writer</code>, so <code>fmt.Fprintf</code> can format straight into it.</li>
+      <li data-lines="7" data-state="len=12; cap=16" data-out="12 16">12 bytes used, still within the 16 we reserved. Zero reallocations.</li>
+      <li data-lines="8-9" data-state="s=&quot;id=7✓ n=42&quot;" data-out="id=7✓ n=42"><code>String()</code> returns the result <strong>without copying</strong> the buffer (it's safe because the Builder never modifies bytes it has already handed out).</li>
+    </ol>
+  </div>
+
+  <p>A realistic use, building a small text table:</p>
+  <div class="live" data-title="Building a text table with Builder and Fprintf">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+type Item struct {
+	Name  string
+	Price float64
+}
+
+func renderTable(items []Item) string {
+	var sb strings.Builder
+	sb.WriteString("NAME       PRICE\n")
+	for _, it := range items {
+		// fmt.Fprintf writes into any io.Writer, including a Builder.
+		fmt.Fprintf(&amp;sb, "%-10s %5.2f\n", it.Name, it.Price)
+	}
+	sb.WriteString(strings.Repeat("-", 16))
+	return sb.String()
+}
+
+func main() {
+	fmt.Println(renderTable([]Item{{"coffee", 3.5}, {"bagel", 2.25}, {"juice", 4}}))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="25,13" data-state="items=[{coffee 3.5} {bagel 2.25} {juice 4}]"><code>main</code> calls <code>renderTable</code> with three items. Nothing prints until the whole table is built.</li>
+      <li data-lines="14-15" data-state="sb.Len()=17">A zero-value Builder is ready to use. The header line goes in first: 16 characters plus a newline.</li>
+      <li data-lines="16-18" data-state="it={coffee 3.5}; row=&quot;coffee      3.50&quot;"><code>Fprintf</code> formats straight into the Builder. <code>%-10s</code> left-aligns the name in 10 columns; <code>%5.2f</code> right-aligns the price with 2 decimals.</li>
+      <li data-lines="16-18" data-state="it={bagel 2.25}; row=&quot;bagel       2.25&quot;">Same format for every row, so the columns line up.</li>
+      <li data-lines="16-18" data-state="it={juice 4}; row=&quot;juice       4.00&quot;"><code>4</code> becomes <code>4.00</code> because of the <code>.2</code> precision.</li>
+      <li data-lines="20-21" data-state="sb.Len()=84">A ruler of 16 dashes, then <code>String()</code> hands back the result without copying the buffer.</li>
+      <li data-lines="25" data-state="table=5 lines" data-out="NAME       PRICE\ncoffee      3.50\nbagel       2.25\njuice       4.00\n----------------">Back in <code>main</code>, a single <code>Println</code> writes the finished table.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>NAME       PRICE
+coffee      3.50
+bagel       2.25
+juice       4.00
+----------------</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">out := ""
+for _, row := range rows {
+	out += row.Name + "," + row.Email + "\n"
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">var sb strings.Builder
+for _, row := range rows {
+	sb.WriteString(row.Name)
+	sb.WriteByte(',')
+	sb.WriteString(row.Email)
+	sb.WriteByte('\n')
+}
+out := sb.String()</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Don't over-correct: <code>a + " " + b</code> on one line is perfectly fine. The compiler joins a single expression in one allocation. The Builder matters in <em>loops</em> or when assembling many pieces. Also, if you're building output that goes to a file, a socket or an HTTP response, skip the string entirely and write straight to the <code>io.Writer</code> (wrapped in a <code>bufio.Writer</code> for many small writes). And never copy a non-zero <code>strings.Builder</code> by value; it panics, by design.</p></div>
+
+  <h3>The bytes package</h3>
+  <p>The <code>bytes</code> package is the twin of <code>strings</code>, for <code>[]byte</code>. It has <code>Contains</code>, <code>Split</code>, <code>Fields</code>, <code>TrimSpace</code>, <code>ToUpper</code> and friends with the same names and behaviour. Use it when your data is already bytes (file contents, network buffers, HTTP bodies), to avoid converting to a string and back. It also has <strong><code>bytes.Buffer</code></strong>, a growable buffer you can both write to and read from:</p>
+  <div class="live" data-title="bytes functions and a readable bytes.Buffer">
+    <pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+)
+
+func main() {
+	data := []byte("  Hello, Bytes!  ")
+
+	// The bytes package mirrors strings, for []byte.
+	fmt.Println(bytes.Contains(data, []byte("Bytes")))
+	fmt.Printf("%q\n", bytes.TrimSpace(data))
+	fmt.Printf("%q\n", bytes.ToUpper(data))
+	fmt.Println(bytes.Equal([]byte("a"), []byte("a"))) // slices can't use ==
+
+	fields := bytes.Fields([]byte("a b  c"))
+	fmt.Println(len(fields), string(bytes.Join(fields, []byte("+"))))
+
+	// bytes.Buffer: a growable buffer you can write to AND read from.
+	var buf bytes.Buffer
+	buf.WriteString("first line\n")
+	fmt.Fprintf(&amp;buf, "number %d\n", 7)
+	line, _ := buf.ReadString('\n') // read consumes from the front
+	fmt.Printf("read %q, %d bytes left\n", line, buf.Len())
+	buf.WriteTo(os.Stdout)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="data=&quot;  Hello, Bytes!  &quot;">Our data is already a <code>[]byte</code>, as if read from a file or socket.</li>
+      <li data-lines="13" data-state="data=&quot;  Hello, Bytes!  &quot;" data-out="true"><code>bytes.Contains</code> works like <code>strings.Contains</code>, without converting to a string first.</li>
+      <li data-lines="14-15" data-state="data=&quot;  Hello, Bytes!  &quot;" data-out="&quot;Hello, Bytes!&quot;\n&quot;  HELLO, BYTES!  &quot;"><code>TrimSpace</code> and <code>ToUpper</code> have the same names and behaviour as in <code>strings</code>.</li>
+      <li data-lines="16" data-state="a=[97]; b=[97]" data-out="true">Slices can't be compared with <code>==</code>, so <code>bytes.Equal</code> compares contents.</li>
+      <li data-lines="18-19" data-state="fields=[a b c]; len(fields)=3" data-out="3 a+b+c"><code>Fields</code> splits on runs of whitespace (the double space makes no empty piece); <code>Join</code> glues them back.</li>
+      <li data-lines="22-24" data-state="buf=&quot;first line\nnumber 7\n&quot;; buf.Len()=20">A zero-value <code>bytes.Buffer</code> is ready to write to. <code>Fprintf</code> works because it's an <code>io.Writer</code>.</li>
+      <li data-lines="25" data-state="line=&quot;first line\n&quot;; buf=&quot;number 7\n&quot;; buf.Len()=9">Unlike a Builder, a Buffer can be <strong>read</strong>. <code>ReadString('\n')</code> consumes bytes from the front up to and including the newline.</li>
+      <li data-lines="26" data-state="line=&quot;first line\n&quot;; buf.Len()=9" data-out="read &quot;first line\\n&quot;, 9 bytes left"><code>%q</code> shows the newline as <code>\n</code>. 9 unread bytes remain.</li>
+      <li data-lines="27" data-state="buf=&quot;&quot;; buf.Len()=0" data-out="number 7"><code>WriteTo</code> drains what's left straight into <code>os.Stdout</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>true
+"Hello, Bytes!"
+"  HELLO, BYTES!  "
+true
+3 a+b+c
+read "first line\n", 9 bytes left
+number 7</pre></div>
+  <p>Slices can't be compared with <code>==</code>, so use <code>bytes.Equal</code>. And when should you use <code>bytes.Buffer</code> vs <code>strings.Builder</code>? Builder when the final product is a string. Buffer when you need to read back out of it, or when the consumer wants bytes or an <code>io.Reader</code>.</p>
+
+  <h2>strconv: converting to and from text</h2>
+  <p>The <code>strconv</code> ("string conversion") package converts between strings and basic types. It's faster and stricter than <code>fmt.Sscanf</code>, and its error messages tell you exactly what went wrong.</p>
+  <div class="live" data-title="strconv: parse, format and quote">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	// String -&gt; number
+	n, err := strconv.Atoi("123")
+	fmt.Println(n+1, err)
+
+	_, err = strconv.Atoi("12a")
+	fmt.Println(err)
+
+	f, _ := strconv.ParseFloat("3.14159", 64)
+	fmt.Println(f * 2)
+
+	b, _ := strconv.ParseBool("true")
+	fmt.Println(b)
+
+	// ParseInt lets you choose the base and bit size.
+	hex, _ := strconv.ParseInt("ff", 16, 64)
+	bin, _ := strconv.ParseInt("-1010", 2, 64)
+	fmt.Println(hex, bin)
+	_, err = strconv.ParseInt("300", 10, 8) // doesn't fit in int8
+	fmt.Println(err)
+
+	// Number -&gt; string
+	fmt.Println(strconv.Itoa(42) + "!")
+	fmt.Println(strconv.FormatInt(255, 2), strconv.FormatInt(255, 16))
+	fmt.Println(strconv.FormatFloat(1.5, 'f', 3, 64), strconv.FormatFloat(1234567.0, 'e', 2, 64))
+
+	// Quote / Unquote: Go-syntax string literals.
+	q := strconv.Quote("tab\there \"hi\" é")
+	fmt.Println(q)
+	fmt.Println(strconv.QuoteToASCII("é🐹"))
+	u, _ := strconv.Unquote(q)
+	fmt.Println(u)
+
+	// Common mistake: string(n) is NOT a number conversion.
+	fmt.Println(string(rune(65)), strconv.Itoa(65))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-11" data-state="n=123; err=nil" data-out="124 &lt;nil&gt;"><code>Atoi</code> parses a decimal <code>int</code>. With <code>err == nil</code> we can safely do arithmetic.</li>
+      <li data-lines="13-14" data-state="err=strconv.Atoi: parsing &quot;12a&quot;: invalid syntax" data-out="strconv.Atoi: parsing &quot;12a&quot;: invalid syntax">One stray letter and the whole parse fails, with a message naming the function and the input. No partial "12".</li>
+      <li data-lines="16-20" data-state="f=3.14159; b=true" data-out="6.28318\ntrue"><code>ParseFloat</code> and <code>ParseBool</code> follow the same <code>(value, error)</code> shape. Here we ignore the errors with <code>_</code> only because the inputs are constants.</li>
+      <li data-lines="23-25" data-state="hex=255; bin=-10" data-out="255 -10"><code>ParseInt</code> takes a base: "ff" in base 16 is 255, "-1010" in base 2 is -10.</li>
+      <li data-lines="26-27" data-state="err=strconv.ParseInt: parsing &quot;300&quot;: value out of range" data-out="strconv.ParseInt: parsing &quot;300&quot;: value out of range">The bit size 8 means "must fit in an int8" (-128..127). 300 doesn't, so we get a range error. The returned number would be clamped to 127, which is why you never use it without checking <code>err</code>.</li>
+      <li data-lines="30-31" data-state="Itoa(42)=&quot;42&quot;" data-out="42!\n11111111 ff">Going the other way: <code>Itoa</code> for decimal, <code>FormatInt</code> for any base.</li>
+      <li data-lines="32" data-state="fixed=1.500; sci=1.23e+06" data-out="1.500 1.23e+06"><code>FormatFloat</code> takes a format byte (<code>'f'</code>, <code>'e'</code>, <code>'g'</code>) and a precision: 3 decimals, then 2-digit scientific notation.</li>
+      <li data-lines="35-36" data-state="q=&quot;tab\there \&quot;hi\&quot; é&quot;" data-out="&quot;tab\\there \\&quot;hi\\&quot; é&quot;"><code>Quote</code> produces a Go string literal: quotes around it, the tab and inner quotes escaped. Handy for logging untrusted text.</li>
+      <li data-lines="37" data-state="ascii=&quot;\u00e9\U0001f439&quot;" data-out="&quot;\\u00e9\\U0001f439&quot;"><code>QuoteToASCII</code> also escapes every non-ASCII rune.</li>
+      <li data-lines="38-39" data-state="u=tab⇥here &quot;hi&quot; é" data-out="tab&#9;here &quot;hi&quot; é"><code>Unquote</code> reverses it, so the real tab character comes back.</li>
+      <li data-lines="42" data-state="string(rune(65))=A; Itoa(65)=65" data-out="A 65">The classic mix-up: <code>string(rune(65))</code> is the character with code point 65, "A". For digits you want <code>strconv.Itoa</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>124 &lt;nil&gt;
+strconv.Atoi: parsing "12a": invalid syntax
+6.28318
+true
+255 -10
+strconv.ParseInt: parsing "300": value out of range
+42!
+11111111 ff
+1.500 1.23e+06
+"tab\there \"hi\" é"
+"\u00e9\U0001f439"
+tab	here "hi" é
+A 65</pre></div>
+  <table>
+    <thead><tr><th>Function</th><th>Direction</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>Atoi(s)</code> / <code>Itoa(i)</code></td><td>string ↔ int</td><td>The everyday pair. "a to i" = ASCII to integer.</td></tr>
+      <tr><td><code>ParseInt(s, base, bits)</code></td><td>string → int64</td><td>Base 2–36, or 0 to detect <code>0x</code>/<code>0o</code>/<code>0b</code> prefixes. <code>bits</code> checks range.</td></tr>
+      <tr><td><code>ParseUint</code>, <code>ParseFloat</code>, <code>ParseBool</code></td><td>string → value</td><td><code>ParseBool</code> accepts 1, t, T, TRUE, true, True, 0, f, F...</td></tr>
+      <tr><td><code>FormatInt(i, base)</code></td><td>int64 → string</td><td>Binary, hex, any base up to 36.</td></tr>
+      <tr><td><code>FormatFloat(f, fmt, prec, bits)</code></td><td>float → string</td><td>fmt is <code>'f'</code>, <code>'e'</code>, <code>'g'</code>; prec −1 means "shortest exact".</td></tr>
+      <tr><td><code>Quote</code> / <code>Unquote</code></td><td>string ↔ Go literal</td><td>Safe for logging untrusted text: control characters become visible escapes.</td></tr>
+      <tr><td><code>AppendInt</code>, <code>AppendQuote</code>...</td><td>append to []byte</td><td>Zero-allocation variants for hot paths.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: Atoi returns int, ParseInt returns int64</div><p><code>strconv.ParseInt(s, 10, 32)</code> still returns an <code>int64</code>; the <code>32</code> only checks that the value <em>fits</em> in 32 bits. You must convert it yourself: <code>int32(v)</code>. Also, on error the returned number is not always 0: for out-of-range input it's the max or min value, so never use the number without checking <code>err</code>.</p></div>
+
+  <h2>fmt: formatting verbs</h2>
+  <p>The <code>fmt</code> package formats values using <strong>verbs</strong>: placeholders starting with <code>%</code> inside a format string. You've used <code>Println</code>, which needs no verbs. <code>Printf</code>, <code>Sprintf</code>, <code>Fprintf</code> and <code>Errorf</code> all take a format string. Here's every verb you'll realistically need, each printed next to its result:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Point struct {
+	X, Y int
+}
+
+func main() {
+	p := Point{1, 2}
+	fmt.Printf("%%v   %v\n", p)
+	fmt.Printf("%%+v  %+v\n", p)
+	fmt.Printf("%%#v  %#v\n", p)
+	fmt.Printf("%%T   %T\n", p)
+
+	fmt.Printf("%%d %d | %%b %b | %%o %o | %%x %x | %%X %X\n", 42, 42, 42, 42, 42)
+	fmt.Printf("%%c %c | %%q %q | %%U %U\n", 'G', 'G', 'G')
+
+	fmt.Printf("%%f %f | %%.2f %.2f | %%e %e | %%g %g\n", 3.14159, 3.14159, 3.14159, 3.14159)
+	fmt.Printf("[%%08.3f] [%08.3f]\n", 3.14159)
+
+	fmt.Printf("%%s %s | %%q %q | %%x %x\n", "go", "go", "go")
+
+	// Width and alignment
+	fmt.Printf("[%%5d]   [%5d]\n", 42)
+	fmt.Printf("[%%-5d]  [%-5d]\n", 42)
+	fmt.Printf("[%%05d]  [%05d]\n", 42)
+	fmt.Printf("[%%10s]  [%10s]\n", "right")
+	fmt.Printf("[%%-10s] [%-10s]\n", "left")
+	fmt.Printf("[%%.3s]  [%.3s]\n", "truncate")
+	fmt.Printf("[%%*d]   [%*d]\n", 6, 7) // width from an argument
+
+	fmt.Printf("%%t %t | %%v of nil %v\n", true, nil)
+
+	// Slices and maps
+	fmt.Printf("%v %q %v\n", []int{1, 2}, []string{"a", "b"}, map[string]int{"k": 1})
+
+	// Explicit argument indexes
+	fmt.Printf("%[1]d %[1]x %[1]o %[2]s\n", 64, "again")
+
+	// Mistakes are reported in the output, not as panics:
+	fmt.Printf("%d %s\n", "oops", 5)
+	fmt.Printf("%d\n")
+}</code></pre></div>
+  <div class="output"><pre>%v   {1 2}
+%+v  {X:1 Y:2}
+%#v  main.Point{X:1, Y:2}
+%T   main.Point
+%d 42 | %b 101010 | %o 52 | %x 2a | %X 2A
+%c G | %q 'G' | %U U+0047
+%f 3.141590 | %.2f 3.14 | %e 3.141590e+00 | %g 3.14159
+[%08.3f] [0003.142]
+%s go | %q "go" | %x 676f
+[%5d]   [   42]
+[%-5d]  [42   ]
+[%05d]  [00042]
+[%10s]  [     right]
+[%-10s] [left      ]
+[%.3s]  [tru]
+[%*d]   [     7]
+%t true | %v of nil &lt;nil&gt;
+[1 2] ["a" "b"] map[k:1]
+64 40 100 again
+%!d(string=oops) %!s(int=5)
+%!d(MISSING)</pre></div>
+
+  <table>
+    <thead><tr><th>Verb</th><th>Meaning</th><th>Example → output</th></tr></thead>
+    <tbody>
+      <tr><td><code>%v</code></td><td>Default format for any value</td><td><code>{1 2}</code></td></tr>
+      <tr><td><code>%+v</code></td><td>Like %v, plus struct field names</td><td><code>{X:1 Y:2}</code> (great for logs)</td></tr>
+      <tr><td><code>%#v</code></td><td>Go-syntax representation</td><td><code>main.Point{X:1, Y:2}</code></td></tr>
+      <tr><td><code>%T</code></td><td>The value's type</td><td><code>main.Point</code></td></tr>
+      <tr><td><code>%d</code> <code>%b</code> <code>%o</code> <code>%x</code> <code>%X</code></td><td>Integer in base 10, 2, 8, 16</td><td><code>42 101010 52 2a 2A</code></td></tr>
+      <tr><td><code>%c</code> <code>%U</code></td><td>Rune as character / as U+ code point</td><td><code>G</code> / <code>U+0047</code></td></tr>
+      <tr><td><code>%q</code></td><td>Quoted string or rune, escaped</td><td><code>"go"</code>, <code>'G'</code></td></tr>
+      <tr><td><code>%s</code></td><td>Plain string (or anything with a String method)</td><td><code>go</code></td></tr>
+      <tr><td><code>%x</code> on a string</td><td>Hex dump of the bytes (<code>% x</code> adds spaces)</td><td><code>676f</code></td></tr>
+      <tr><td><code>%f</code> <code>%.2f</code> <code>%e</code> <code>%g</code></td><td>Float: decimal, 2 decimals, scientific, compact</td><td><code>3.141590 3.14 3.141590e+00 3.14159</code></td></tr>
+      <tr><td><code>%08.3f</code></td><td>Width 8, zero-padded, 3 decimals</td><td><code>0003.142</code></td></tr>
+      <tr><td><code>%5d</code> / <code>%-5d</code> / <code>%05d</code></td><td>Width 5: right-aligned / left-aligned / zero-padded</td><td><code>"   42"</code> <code>"42   "</code> <code>"00042"</code></td></tr>
+      <tr><td><code>%-10s</code> / <code>%10s</code></td><td>Pad a string to 10, left / right aligned</td><td><code>"left      "</code></td></tr>
+      <tr><td><code>%.3s</code></td><td>Precision on a string = max characters</td><td><code>tru</code></td></tr>
+      <tr><td><code>%*d</code></td><td>Width taken from an argument</td><td><code>"     7"</code></td></tr>
+      <tr><td><code>%t</code></td><td>Boolean</td><td><code>true</code></td></tr>
+      <tr><td><code>%p</code></td><td>Pointer address</td><td><code>0xc000012345</code></td></tr>
+      <tr><td><code>%w</code></td><td>Wrap an error (only in <code>Errorf</code>)</td><td>see below</td></tr>
+      <tr><td><code>%%</code></td><td>A literal percent sign</td><td><code>%</code></td></tr>
+      <tr><td><code>%[1]d</code></td><td>Use argument #1 (reuse arguments)</td><td><code>64 40 100</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>Notice the last two lines of output: a wrong verb or a missing argument doesn't crash, it prints a <code>%!</code> marker inline. That's easy to miss in production logs, which is why <code>go vet</code> checks <code>Printf</code>-style calls at compile time:</p>
+  <div class="output error" data-label="go vet"><pre>./main.go:42:14: fmt.Printf format %d has arg "oops" of wrong type string
+./main.go:43:14: fmt.Printf format %d reads arg #1, but call has 0 args</pre></div>
+
+  <div class="callout tip"><p>The general shape of a verb is <code>%[flags][width][.precision]verb</code>. Flags are <code>-</code> (left-align), <code>0</code> (zero-pad), <code>+</code> (always show sign), space (leave room for sign) and <code>#</code> (alternate form, e.g. <code>%#x</code> → <code>0x2a</code>). Once you know that shape you can read any format string.</p></div>
+
+  <h3>Sprintf, Fprintf and Errorf</h3>
+  <p>The <code>fmt</code> functions come in families. The prefix says where the output goes, the suffix says how it's formatted:</p>
+  <ul>
+    <li><code>Print</code>/<code>Println</code>/<code>Printf</code>: to standard output.</li>
+    <li><code>Sprint</code>/<code>Sprintln</code>/<code>Sprintf</code>: return a <strong>s</strong>tring.</li>
+    <li><code>Fprint</code>/<code>Fprintln</code>/<code>Fprintf</code>: to any <code>io.Writer</code> (<strong>f</strong>ile, buffer, HTTP response...).</li>
+    <li><code>Errorf</code>: returns an <code>error</code>; supports <code>%w</code> to wrap another error.</li>
+  </ul>
+  <div class="live" data-title="The Sprintf, Fprintf and Errorf families">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+)
+
+func main() {
+	// Sprintf returns the formatted string.
+	msg := fmt.Sprintf("user %q has %d items", "ann", 3)
+	fmt.Println(msg)
+
+	// Fprintf writes to any io.Writer: a file, a network conn, a buffer...
+	fmt.Fprintf(os.Stdout, "to stdout: %.1f%%\n", 99.5)
+	fmt.Fprintln(os.Stderr, "this goes to stderr")
+
+	// Errorf builds errors; %w wraps an underlying error.
+	_, err := os.Open("/no/such/file")
+	wrapped := fmt.Errorf("loading config: %w", err)
+	fmt.Println(wrapped)
+	fmt.Println(errors.Is(wrapped, fs.ErrNotExist))
+
+	// Sprint / Sprintln: no verbs, just values.
+	fmt.Println(fmt.Sprint("a", 1, 2, "b"), fmt.Sprintln("x", 1) == "x 1\n")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-13" data-state="msg=user &quot;ann&quot; has 3 items" data-out="user &quot;ann&quot; has 3 items"><code>Sprintf</code> doesn't print anything: it <em>returns</em> the formatted string. <code>%q</code> adds the quotes around ann.</li>
+      <li data-lines="16" data-state="w=os.Stdout" data-out="to stdout: 99.5%"><code>Fprintf</code> writes to whatever <code>io.Writer</code> you give it. <code>%.1f</code> keeps one decimal, and <code>%%</code> is a literal percent sign.</li>
+      <li data-lines="17" data-state="w=os.Stderr" data-out="this goes to stderr">Same family, different destination: standard error. (The terminal shows both streams, which is why it appears in the combined output.)</li>
+      <li data-lines="20" data-state="err=open /no/such/file: no such file or directory">Opening a missing file returns an <code>*fs.PathError</code>.</li>
+      <li data-lines="21-22" data-state="wrapped=loading config: open /no/such/file: no such file or directory" data-out="loading config: open /no/such/file: no such file or directory"><code>Errorf</code> with <code>%w</code> builds a new error whose message adds context in front of the original.</li>
+      <li data-lines="23" data-state="errors.Is(wrapped, fs.ErrNotExist)=true" data-out="true">Because <code>%w</code> <em>wraps</em> rather than just formats, <code>errors.Is</code> can still find the underlying "not exist" error inside. With <code>%v</code> this would be <code>false</code>.</li>
+      <li data-lines="26" data-state="Sprint=&quot;a1 2b&quot;; Sprintln=&quot;x 1\n&quot;" data-out="a1 2b true"><code>Sprint</code> adds a space only between two non-string operands (1 and 2), giving <code>a1 2b</code>. <code>Sprintln</code> always adds spaces and a trailing newline.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Output (stdout and stderr combined)"><pre>user "ann" has 3 items
+to stdout: 99.5%
+this goes to stderr
+loading config: open /no/such/file: no such file or directory
+true
+a1 2b true</pre></div>
+  <p>A subtle point about <code>Sprint("a", 1, 2, "b")</code>: it adds a space only between two operands when <em>neither</em> is a string, which is why you get <code>a1 2b</code>. <code>Sprintln</code> always adds spaces. When in doubt, use <code>Sprintf</code> and be explicit.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Implement <code>String() string</code> on your important types (that makes them <code>fmt.Stringer</code>) so <code>%v</code> and <code>%s</code> print something meaningful. But be careful with types that hold secrets: a <code>Password</code> or <code>APIKey</code> type with <code>func (APIKey) String() string { return "[redacted]" }</code> stops keys leaking into logs. For structured production logging, prefer <code>log/slog</code> over <code>Printf</code>-style messages (Chapter 16).</p></div>
+
+  <h2>unicode, text/template and regexp</h2>
+
+  <h3>The unicode package</h3>
+  <p>The <code>unicode</code> package classifies runes: is it a letter, a digit, whitespace, upper case? It knows about every script, not just English, so use it instead of hand-written checks like <code>r &gt;= 'a' &amp;&amp; r &lt;= 'z'</code>.</p>
+  <div class="live" data-title="Classifying runes with the unicode package">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unicode"
+)
+
+func main() {
+	for _, r := range "aZ9 _é!\tΩ" {
+		fmt.Printf("%q letter=%-5t digit=%-5t space=%-5t upper=%-5t punct=%t\n",
+			r, unicode.IsLetter(r), unicode.IsDigit(r), unicode.IsSpace(r),
+			unicode.IsUpper(r), unicode.IsPunct(r))
+	}
+	fmt.Println(string(unicode.ToUpper('é')), string(unicode.ToLower('Ω')))
+	fmt.Println(unicode.Is(unicode.Greek, 'Ω'), unicode.In('ж', unicode.Cyrillic, unicode.Latin))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-12" data-state="r='a'" data-out="'a' letter=true  digit=false space=false upper=false punct=false"><code>range</code> over the string yields runes. Each one is run through five classifiers. <code>%-5t</code> pads the booleans so the columns line up.</li>
+      <li data-lines="9-12" data-state="r='Z'" data-out="'Z' letter=true  digit=false space=false upper=true  punct=false">'Z' is a letter and upper case.</li>
+      <li data-lines="9-12" data-state="r='9'" data-out="'9' letter=false digit=true  space=false upper=false punct=false">'9' is a digit, not a letter.</li>
+      <li data-lines="9-12" data-state="r=' '" data-out="' ' letter=false digit=false space=true  upper=false punct=false">A space is whitespace.</li>
+      <li data-lines="9-12" data-state="r='_'" data-out="'_' letter=false digit=false space=false upper=false punct=true">Underscore counts as punctuation in Unicode, not as a letter. Watch out if you're validating identifiers.</li>
+      <li data-lines="9-12" data-state="r='é'" data-out="'é' letter=true  digit=false space=false upper=false punct=false">'é' is a letter. A hand-written <code>r &gt;= 'a' &amp;&amp; r &lt;= 'z'</code> check would have missed it.</li>
+      <li data-lines="9-12" data-state="r='!'" data-out="'!' letter=false digit=false space=false upper=false punct=true">'!' is punctuation.</li>
+      <li data-lines="9-12" data-state="r='\t'" data-out="'\\t' letter=false digit=false space=true  upper=false punct=false">A tab is whitespace too. <code>%q</code> shows it as an escape so it stays visible.</li>
+      <li data-lines="9-12" data-state="r='Ω'" data-out="'Ω' letter=true  digit=false space=false upper=true  punct=false">Greek capital omega: a letter and upper case. The package knows every script.</li>
+      <li data-lines="14" data-state="ToUpper('é')='É'; ToLower('Ω')='ω'" data-out="É ω">Case mapping works beyond ASCII too.</li>
+      <li data-lines="15" data-state="Is(Greek, 'Ω')=true; In('ж', Cyrillic, Latin)=true" data-out="true true"><code>unicode.Is</code> tests one script table; <code>unicode.In</code> tests whether the rune is in <em>any</em> of several.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>'a' letter=true  digit=false space=false upper=false punct=false
+'Z' letter=true  digit=false space=false upper=true  punct=false
+'9' letter=false digit=true  space=false upper=false punct=false
+' ' letter=false digit=false space=true  upper=false punct=false
+'_' letter=false digit=false space=false upper=false punct=true
+'é' letter=true  digit=false space=false upper=false punct=false
+'!' letter=false digit=false space=false upper=false punct=true
+'\t' letter=false digit=false space=true  upper=false punct=false
+'Ω' letter=true  digit=false space=false upper=true  punct=false
+É ω
+true true</pre></div>
+
+  <h3>text/template, briefly</h3>
+  <p>When you need to generate text with a fixed shape (emails, config files, code, reports), <code>text/template</code> separates the shape from the data. Actions inside <code>{{ }}</code> pull fields from the data (<code>.Customer</code>), loop (<code>range</code>), branch (<code>if</code>), and call functions. A <code>-</code> inside the braces (<code>{{-</code>) trims whitespace next to the action.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"os"
+	"strings"
+	"text/template"
+)
+
+type Order struct {
+	Customer string
+	Items    []string
+	Total    float64
+	Paid     bool
+}
+
+const tmpl = `Hello {{.Customer | upper}},
+You ordered {{len .Items}} item(s):
+{{- range $i, $it := .Items}}
+  {{$i}}. {{$it}}
+{{- end}}
+Total: ${{printf "%.2f" .Total}}
+{{if .Paid}}Thanks for paying!{{else}}Payment pending.{{end}}
+`
+
+func main() {
+	funcs := template.FuncMap{"upper": strings.ToUpper}
+	t := template.Must(template.New("order").Funcs(funcs).Parse(tmpl))
+	o := Order{Customer: "ann", Items: []string{"book", "pen"}, Total: 23.5}
+	if err := t.Execute(os.Stdout, o); err != nil {
+		panic(err)
+	}
+}</code></pre></div>
+  <div class="output"><pre>Hello ANN,
+You ordered 2 item(s):
+  0. book
+  1. pen
+Total: $23.50
+Payment pending.</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: HTML needs html/template</div><p>For anything that ends up in a web page, use <code>html/template</code> instead. It has the same API but automatically escapes values based on context, preventing cross-site scripting (XSS) attacks. <code>text/template</code> does no escaping at all.</p></div>
+
+  <h3>regexp basics</h3>
+  <p>The <code>regexp</code> package implements regular expressions using Google's RE2 syntax. RE2 guarantees matching in time linear in the input size, so a malicious pattern or input can't hang your server (a real risk in some other languages' regex engines). The trade-off is that it doesn't support backreferences or lookarounds.</p>
+  <div class="live" data-title="regexp: match, find, capture and replace">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"regexp"
+)
+
+// Compile once, at package level. MustCompile panics on a bad pattern.
+var (
+	emailRe = regexp.MustCompile(`^[\w.+-]+@[\w-]+\.[\w.]+$`)
+	dateRe  = regexp.MustCompile(`(\d{4})-(\d{2})-(\d{2})`)
+	kvRe    = regexp.MustCompile(`(?P&lt;key&gt;\w+)=(?P&lt;val&gt;\w+)`)
+)
+
+func main() {
+	fmt.Println(emailRe.MatchString("ann@example.com"), emailRe.MatchString("not-an-email"))
+
+	log := "deploys on 2024-03-01 and 2025-12-24"
+	fmt.Println(dateRe.FindString(log))
+	fmt.Println(dateRe.FindAllString(log, -1))
+
+	m := dateRe.FindStringSubmatch(log)
+	fmt.Println("year:", m[1], "month:", m[2], "day:", m[3])
+
+	// Rewrite using capture groups: $1, $2 ...
+	fmt.Println(dateRe.ReplaceAllString(log, "$3/$2/$1"))
+
+	// Named groups
+	sm := kvRe.FindStringSubmatch("user=ann")
+	fmt.Println(sm[kvRe.SubexpIndex("key")], "-&gt;", sm[kvRe.SubexpIndex("val")])
+
+	// Bad patterns return an error from Compile.
+	_, err := regexp.Compile(`a(b`)
+	fmt.Println(err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-13" data-state="emailRe=compiled; dateRe=compiled; kvRe=compiled">Before <code>main</code> runs, the package-level vars are initialised: each pattern is compiled exactly once. A typo here would panic at start-up, not in the middle of a request.</li>
+      <li data-lines="16,10" data-state="emailRe=compiled" data-out="true false"><code>^</code> and <code>$</code> anchor the pattern to the whole string. The first input matches; "not-an-email" has no <code>@</code>.</li>
+      <li data-lines="18-19,11" data-state="log=deploys on 2024-03-01 and 2025-12-24" data-out="2024-03-01"><code>FindString</code> returns only the <strong>first</strong> match.</li>
+      <li data-lines="20" data-state="log=deploys on 2024-03-01 and 2025-12-24" data-out="[2024-03-01 2025-12-24]"><code>FindAllString</code> with <code>-1</code> means "no limit": every match.</li>
+      <li data-lines="22-23" data-state="m=[2024-03-01 2024 03 01]" data-out="year: 2024 month: 03 day: 01"><code>FindStringSubmatch</code> returns the full match at index 0, then one entry per capture group <code>( )</code>.</li>
+      <li data-lines="26" data-state="template=$3/$2/$1" data-out="deploys on 01/03/2024 and 24/12/2025"><code>ReplaceAllString</code> rewrites every match; <code>$1</code>, <code>$2</code>, <code>$3</code> refer to the captured groups, so we can reorder the date parts.</li>
+      <li data-lines="29-30,12" data-state="sm=[user=ann user ann]; SubexpIndex(key)=1; SubexpIndex(val)=2" data-out="user -&gt; ann">Named groups <code>(?P&lt;key&gt;...)</code> let you look up a group's index by name instead of counting parentheses.</li>
+      <li data-lines="33-34" data-state="err=missing closing )" data-out="error parsing regexp: missing closing ): `a(b`">For patterns that come from users, use <code>regexp.Compile</code>, which returns an error instead of panicking.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>true false
+2024-03-01
+[2024-03-01 2025-12-24]
+year: 2024 month: 03 day: 01
+deploys on 01/03/2024 and 24/12/2025
+user -&gt; ann
+error parsing regexp: missing closing ): `a(b`</pre></div>
+  <ul>
+    <li><strong>Compile once.</strong> Compiling a pattern is expensive. Store it in a package-level <code>var</code> with <code>MustCompile</code> (which panics on a bad pattern, so you find out at start-up), not inside a function that runs per request.</li>
+    <li>A compiled <code>*regexp.Regexp</code> is safe for concurrent use by many goroutines.</li>
+    <li>Method names follow a pattern: <code>Find</code> / <code>FindAll</code>, plus <code>String</code> (string input), <code>Submatch</code> (capture groups), <code>Index</code> (positions).</li>
+  </ul>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Reach for the <code>strings</code> package first. <code>strings.HasPrefix</code>, <code>Contains</code> and <code>Cut</code> are clearer and dramatically faster than an equivalent regex. Use <code>regexp</code> when the pattern is genuinely a pattern (varying digits, optional parts, alternatives), and for validation keep in mind that real-world email or URL validation is better done with <code>net/mail</code> or <code>net/url</code>.</p></div>
+
+  <h2>Putting it together: a word-frequency counter</h2>
+  <p>Let's combine everything into a small but realistic program: count how often each word appears in a text, ignoring case and punctuation, and print the top five with a little bar chart. It uses <code>bufio.Scanner</code> to split into words, <code>unicode</code> to trim punctuation, a map to count, and <code>slices.SortFunc</code> to rank.</p>
+  <p>The core idea is a map from word to count. Here it is in miniature first:</p>
+  <div class="live" data-title="Counting with a map">
+    <pre><code class="language-go">counts := map[string]int{}
+for _, w := range strings.Fields("the cat the hat") {
+	counts[w]++
+}
+fmt.Println(counts, len(counts))</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="counts=map[]">An empty map. Any missing key reads as 0.</li>
+      <li data-lines="2-3" data-state="w=&quot;the&quot;; counts=map[the:1]"><code>Fields</code> gives <code>["the" "cat" "the" "hat"]</code>. First word: <code>counts["the"]</code> was 0, <code>++</code> makes it 1.</li>
+      <li data-lines="2-3" data-state="w=&quot;cat&quot;; counts=map[cat:1 the:1]">"cat" is new: 0 → 1.</li>
+      <li data-lines="2-3" data-state="w=&quot;the&quot;; counts=map[cat:1 the:2]">"the" again: the existing 1 becomes 2. No "if it exists" check needed.</li>
+      <li data-lines="2-3" data-state="w=&quot;hat&quot;; counts=map[cat:1 hat:1 the:2]">"hat" is new: 0 → 1.</li>
+      <li data-lines="5" data-state="len(counts)=3" data-out="map[cat:1 hat:1 the:2] 3">Three distinct words. fmt prints map keys sorted, so the output is stable.</li>
+    </ol>
+  </div>
+
+  <p>And the full program:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"bufio"
+	"cmp"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"unicode"
+)
+
+const text = `Go is expressive, concise, clean, and efficient. Its concurrency
+mechanisms make it easy to write programs that get the most out of multicore
+and networked machines. Go compiles quickly to machine code yet has the
+convenience of garbage collection. Go is fast; go is fun! It's "Go".`
+
+type wordCount struct {
+	word  string
+	count int
+}
+
+func countWords(input string) map[string]int {
+	counts := make(map[string]int)
+	sc := bufio.NewScanner(strings.NewReader(input))
+	sc.Split(bufio.ScanWords) // split on whitespace
+	for sc.Scan() {
+		// Trim punctuation from both ends, keep inner apostrophes.
+		w := strings.TrimFunc(sc.Text(), func(r rune) bool {
+			return !unicode.IsLetter(r) &amp;&amp; !unicode.IsNumber(r)
+		})
+		if w == "" {
+			continue
+		}
+		counts[strings.ToLower(w)]++
+	}
+	return counts
+}
+
+func topN(counts map[string]int, n int) []wordCount {
+	list := make([]wordCount, 0, len(counts))
+	for w, c := range counts {
+		list = append(list, wordCount{w, c})
+	}
+	slices.SortFunc(list, func(a, b wordCount) int {
+		return cmp.Or(cmp.Compare(b.count, a.count), cmp.Compare(a.word, b.word))
+	})
+	return list[:min(n, len(list))]
+}
+
+func main() {
+	counts := countWords(text)
+	fmt.Println("distinct words:", len(counts))
+	for i, wc := range topN(counts, 5) {
+		bar := strings.Repeat("█", wc.count)
+		fmt.Printf("%d. %-6s %2d %s\n", i+1, wc.word, wc.count, bar)
+	}
+	fmt.Println("first alphabetically:", slices.Sorted(maps.Keys(counts))[:3])
+}</code></pre></div>
+  <div class="output"><pre>distinct words: 37
+1. go      5 █████
+2. is      3 ███
+3. and     2 ██
+4. of      2 ██
+5. the     2 ██
+first alphabetically: [and clean code]</pre></div>
+  <p>Some details worth pointing out:</p>
+  <ul>
+    <li><code>bufio.Scanner</code> with <code>ScanWords</code> reads from any <code>io.Reader</code>, so the same function would work on a huge file or a network stream without loading it all into memory.</li>
+    <li><code>strings.TrimFunc</code> removes punctuation only from the <em>ends</em>, so "It's" keeps its apostrophe while <code>"Go".</code> becomes <code>Go</code>.</li>
+    <li>Lowercasing before counting makes "Go" and "go" the same word.</li>
+    <li>The sort uses <code>cmp.Or</code> to rank by count descending and break ties alphabetically, so the output is deterministic even though map iteration isn't.</li>
+    <li><code>min(n, len(list))</code> uses the built-in <code>min</code> (Go 1.21) to avoid slicing past the end.</li>
+  </ul>
+
+  <h2>Practice</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1: reverse a string correctly</summary>
+    <p>Write <code>Reverse(s string) string</code> that reverses a string by <em>characters</em>, so <code>"añejo 🐹"</code> reverses without producing garbage bytes. Hint: reversing the bytes would split multi-byte characters. Convert to <code>[]rune</code> first.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func Reverse(s string) string {
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i &lt; j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
+}
+
+func main() {
+	fmt.Println(Reverse("hello"))
+	fmt.Println(Reverse("añejo 🐹"))
+}</code></pre></div>
+    <div class="output"><pre>olleh
+🐹 ojeña</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: a Unicode-aware palindrome checker</summary>
+    <p>Write <code>IsPalindrome(s string) bool</code> that ignores case, spaces and punctuation. "A man, a plan, a canal: Panama!" should be true. Hint: range over the string, keep only letters and digits (lower-cased) in a <code>[]rune</code>, then compare from both ends.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unicode"
+)
+
+// IsPalindrome ignores case, spaces and punctuation.
+func IsPalindrome(s string) bool {
+	var rs []rune
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			rs = append(rs, unicode.ToLower(r))
+		}
+	}
+	for i, j := 0, len(rs)-1; i &lt; j; i, j = i+1, j-1 {
+		if rs[i] != rs[j] {
+			return false
+		}
+	}
+	return true
+}
+
+func main() {
+	for _, s := range []string{"A man, a plan, a canal: Panama!", "Go hang a salami, I'm a lasagna hog.", "gopher"} {
+		fmt.Printf("%-40q %t\n", s, IsPalindrome(s))
+	}
+}</code></pre></div>
+    <div class="output"><pre>"A man, a plan, a canal: Panama!"        true
+"Go hang a salami, I'm a lasagna hog."   true
+"gopher"                                 false</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: parse a query string</summary>
+    <p>Write <code>ParseQuery(q string) map[string]string</code> that turns <code>"name=ann&amp;age=31&amp;debug"</code> into a map. A key with no <code>=</code> maps to an empty string; skip empty pairs; trim spaces. Hint: <code>strings.SplitSeq</code> for the pairs, <code>strings.Cut</code> for each one. (In real code, use <code>net/url.ParseQuery</code>, which also handles percent-encoding.)</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ParseQuery parses "a=1&amp;b=two&amp;flag" into a map. Keys without "=" map to "".
+func ParseQuery(q string) map[string]string {
+	out := make(map[string]string)
+	for pair := range strings.SplitSeq(q, "&amp;") {
+		if pair == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(pair, "=")
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
+}
+
+func main() {
+	fmt.Println(ParseQuery("name=ann&amp;age=31&amp;debug&amp;&amp;x = y "))
+}</code></pre></div>
+    <div class="output"><pre>map[age:31 debug: name:ann x:y]</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>A Go string is an <strong>immutable sequence of bytes</strong>, conventionally UTF-8. Copying and slicing strings is cheap because bytes are shared.</li>
+      <li><code>len(s)</code> counts bytes; <code>utf8.RuneCountInString(s)</code> counts runes. Indexing <code>s[i]</code> gives a byte; <code>for i, r := range s</code> gives runes and byte offsets.</li>
+      <li><code>byte</code> = <code>uint8</code>, <code>rune</code> = <code>int32</code> (a code point). Convert to <code>[]rune</code> for character-level work, <code>[]byte</code> for mutation or I/O.</li>
+      <li><code>string(65)</code> is <code>"A"</code>; use <code>strconv.Itoa</code> for numbers. Let <code>go vet</code> catch it.</li>
+      <li>Learn the <code>strings</code> package: <code>Cut</code>, <code>Fields</code>, <code>TrimSpace</code>, <code>EqualFold</code>, <code>HasPrefix</code> and <code>Builder</code> cover most needs.</li>
+      <li><code>+=</code> in a loop is quadratic; use <code>strings.Builder</code> (with <code>Grow</code> if you know the size), or write straight to an <code>io.Writer</code>.</li>
+      <li><code>strconv</code> converts text to numbers strictly and with good errors; always check them.</li>
+      <li>Know the core <code>fmt</code> verbs (<code>%v %+v %#v %T %q %x %d %s %f</code>) and the <code>[flags][width][.precision]</code> shape; <code>go vet</code> checks format strings.</li>
+      <li>Use <code>html/template</code> for HTML, compile regexps once, and prefer plain <code>strings</code> functions over regex when they suffice.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

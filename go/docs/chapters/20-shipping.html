@@ -1,0 +1,1617 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 20 · Shipping Go to Production — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="20">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part VI · Chapter 20</div>
+  <h1>Shipping Go to Production</h1>
+  <p class="lead">Writing the code is half the job. The other half is turning it into a small, versioned, observable binary that starts fast, configures itself from the environment, tells you when it's sick, shuts down politely and gets rebuilt and checked by CI on every commit. Go is famously good at this part. Let's see why, and how.</p>
+  <div class="meta">
+    <span class="pill">⏱ 50 min read</span>
+    <span class="pill">◆ Advanced</span>
+    <span class="pill">▶ 13 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What <code>go build</code> flags like <code>-trimpath</code> and <code>-ldflags "-s -w -X ..."</code> do, measured on real binaries</li>
+      <li>How to embed and read version info, including <code>debug.ReadBuildInfo</code> and VCS stamping</li>
+      <li>Cross-compiling with <code>GOOS</code>/<code>GOARCH</code>, and what <code>CGO_ENABLED=0</code> really changes</li>
+      <li>Small, secure multi-stage Docker images on distroless or scratch</li>
+      <li>12-factor configuration from env vars and flags, with clear precedence</li>
+      <li>Observability: structured logs with <code>slog</code>, metrics with <code>expvar</code> and Prometheus, tracing with OpenTelemetry</li>
+      <li>Health vs readiness endpoints and a graceful shutdown that load balancers love</li>
+      <li>A Makefile, a GitHub Actions pipeline, <code>govulncheck</code>, goreleaser, and runtime tuning with <code>GOMAXPROCS</code> and <code>GOMEMLIMIT</code></li>
+    </ul>
+  </div>
+
+  <h2>Why Go is great at shipping</h2>
+  <p>Before containers were everywhere, deploying a Python or Java service meant installing the right interpreter or JVM, the right libraries, the right system packages, on every server. Go took a different path: <code>go build</code> produces <strong>one self-contained executable file</strong>. The Go runtime (scheduler, garbage collector) and every library you use are compiled into it. Copy the file to a machine with the same OS and CPU type, run it, done.</p>
+  <ul>
+    <li><strong>Single static binary</strong>: no runtime to install, tiny container images.</li>
+    <li><strong>Cross-compiling is built in</strong>: from a Mac you can build for Linux on ARM with two environment variables.</li>
+    <li><strong>Fast startup</strong>: milliseconds, which matters for autoscaling and serverless.</li>
+    <li><strong>Batteries included</strong>: HTTP server, TLS, JSON, structured logging, metrics (<code>expvar</code>) and profiling (<code>pprof</code>) all live in the standard library.</li>
+  </ul>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 150" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <defs><marker id="a20" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <rect x="0" y="0" width="720" height="150" rx="10" fill="#262624"/>
+      <g font-size="12" fill="#ece9e1" text-anchor="middle">
+        <rect x="14" y="40" width="100" height="56" rx="8" fill="#2e2d2a" stroke="#3a3936"/><text x="64" y="64" font-weight="600">git push</text><text x="64" y="82" fill="#a8a49a" font-size="10">tag v1.5.0</text>
+        <rect x="134" y="40" width="100" height="56" rx="8" fill="#2e2d2a" stroke="#7fa6d9"/><text x="184" y="64" font-weight="600">CI checks</text><text x="184" y="82" fill="#a8a49a" font-size="10">fmt vet test race lint</text>
+        <rect x="254" y="40" width="100" height="56" rx="8" fill="#2e2d2a" stroke="#e0b45c"/><text x="304" y="64" font-weight="600">govulncheck</text><text x="304" y="82" fill="#a8a49a" font-size="10">known CVEs</text>
+        <rect x="374" y="40" width="100" height="56" rx="8" fill="#2e2d2a" stroke="#d97757"/><text x="424" y="64" font-weight="600">go build</text><text x="424" y="82" fill="#a8a49a" font-size="10">-trimpath -ldflags</text>
+        <rect x="494" y="40" width="100" height="56" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/><text x="544" y="64" font-weight="600">image</text><text x="544" y="82" fill="#a8a49a" font-size="10">distroless ~10 MB</text>
+        <rect x="614" y="40" width="94" height="56" rx="8" fill="#2e2d2a" stroke="#8fbf7f"/><text x="661" y="64" font-weight="600">deploy</text><text x="661" y="82" fill="#a8a49a" font-size="10">/readyz gates traffic</text>
+      </g>
+      <g stroke="#d97757" stroke-width="1.6" marker-end="url(#a20)">
+        <line x1="114" y1="68" x2="132" y2="68"/><line x1="234" y1="68" x2="252" y2="68"/><line x1="354" y1="68" x2="372" y2="68"/><line x1="474" y1="68" x2="492" y2="68"/><line x1="594" y1="68" x2="612" y2="68"/>
+      </g>
+      <text x="360" y="130" fill="#a8a49a" font-size="12" text-anchor="middle">Every section of this chapter is one of these boxes.</text>
+    </svg>
+    <figcaption>The path from a commit to a running service.</figcaption>
+  </figure>
+
+  <h2>Build flags and version embedding</h2>
+  <p>Here's a tiny program we'll ship. It has three package-level variables, <code>version</code>, <code>commit</code> and <code>date</code>, that default to placeholder values. We'll overwrite them at build time.</p>
+  <div class="live" data-title="A release binary reports itself">
+    <pre><code class="language-go">package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"runtime/debug"
+)
+
+// Set at build time with: -ldflags "-X main.version=1.4.2 -X main.commit=abc123"
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+func main() {
+	showBuild := flag.Bool("buildinfo", false, "print embedded build info")
+	flag.Parse()
+
+	fmt.Printf("hello %s (commit %s, built %s)\n", version, commit, date)
+
+	if !*showBuild {
+		return
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		fmt.Fprintln(os.Stderr, "no build info")
+		return
+	}
+	fmt.Println("go version:", info.GoVersion)
+	fmt.Println("module:    ", info.Main.Path, info.Main.Version)
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "-ldflags", "-trimpath", "CGO_ENABLED", "GOOS", "GOARCH",
+			"vcs", "vcs.revision", "vcs.time", "vcs.modified":
+			fmt.Printf("  %-12s = %s\n", s.Key, s.Value)
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11-15" data-state="version=&quot;v1.4.2&quot;; commit=&quot;d585c74&quot;; date=&quot;2026-10-16&quot;">We run the binary built with <code>-X main.version=... -X main.commit=... -X main.date=...</code>. The linker already replaced the defaults, before <code>main</code> starts.</li>
+      <li data-lines="18-19" data-state="showBuild=true" data-out="$ ./bin/hello-release -buildinfo">The <code>-buildinfo</code> flag is set on the command line.</li>
+      <li data-lines="21" data-out="hello v1.4.2 (commit d585c74, built 2026-10-16)">The stamped strings print. A plain <code>go build</code> would print <code>hello dev (commit none, built unknown)</code>.</li>
+      <li data-lines="23-26" data-state="ok=true"><code>*showBuild</code> is true, so we keep going. <code>debug.ReadBuildInfo</code> reads data the Go toolchain embeds in every binary.</li>
+      <li data-lines="31" data-state="info.GoVersion=go1.27.1" data-out="go version: go1.27.1">The exact Go version that compiled this binary.</li>
+      <li data-lines="32" data-state="info.Main.Version=v1.4.2" data-out="module:     example.com/hello v1.4.2">Go 1.24+ fills the main module's version from the git tag automatically.</li>
+      <li data-lines="33-37" data-state="s.Key=-trimpath">We loop over the build settings and print only the interesting keys. The <code>switch</code> skips the rest.</li>
+      <li data-lines="33-37" data-state="s.Key=-trimpath…GOOS" data-out="  -trimpath    = true\n  CGO_ENABLED  = 1\n  GOARCH       = arm64\n  GOOS         = darwin">Build flags and target platform. <code>-ldflags</code> is missing: with <code>-trimpath</code>, Go leaves linker flags out of the build info.</li>
+      <li data-lines="33-37" data-state="s.Key=vcs…" data-out="  vcs          = git\n  vcs.revision = d585c749c0099a0fef276a9ed9cf83fb4ce974c0\n  vcs.time     = 2026-10-16T18:06:56Z\n  vcs.modified = false">The VCS stamp: full commit hash, commit time, and whether the tree had uncommitted changes. <code>vcs.modified = false</code> means the binary matches the commit exactly.</li>
+    </ol>
+  </div>
+  <p>A plain build prints the defaults:</p>
+<div class="output" data-label="terminal"><pre>$ go build -o bin/hello .
+$ ./bin/hello
+hello dev (commit none, built unknown)</pre></div>
+
+  <h3>The flags that matter</h3>
+  <table>
+    <thead><tr><th>Flag</th><th>What it does</th><th>Why you want it</th></tr></thead>
+    <tbody>
+      <tr><td><code>-o path</code></td><td>Output file name</td><td>Put binaries in <code>bin/</code> or <code>dist/</code></td></tr>
+      <tr><td><code>-trimpath</code></td><td>Removes your machine's file paths from the binary</td><td>Reproducible builds; doesn't leak <code>/Users/you/...</code> in stack traces</td></tr>
+      <tr><td><code>-ldflags "-s -w"</code></td><td><code>-s</code> drops the symbol table, <code>-w</code> drops DWARF debug info</td><td>~35% smaller binary. Panics still show function names and line numbers (Go keeps its own tables)</td></tr>
+      <tr><td><code>-ldflags "-X pkg.var=value"</code></td><td>Sets a package-level <strong>string</strong> variable at link time</td><td>Stamp version, commit and date into the binary</td></tr>
+      <tr><td><code>-race</code></td><td>Builds with the race detector</td><td>Tests only. About 5–10× slower, never ship it</td></tr>
+      <tr><td><code>-tags name</code></td><td>Enables files with <code>//go:build name</code></td><td>Optional features, integration tests</td></tr>
+      <tr><td><code>-pgo=auto</code> (default)</td><td>Uses <code>default.pgo</code> in the main package for profile-guided optimisation</td><td>2–14% faster hot paths for free (Chapter 18)</td></tr>
+    </tbody>
+  </table>
+
+  <p>Now a release build. <code>git describe --tags</code> gives us the version from the latest git tag:</p>
+<div class="output" data-label="terminal"><pre>$ go build -trimpath -ldflags "-s -w -X main.version=$(git describe --tags) -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%d)" -o bin/hello-release .
+$ ./bin/hello-release
+hello v1.4.2 (commit d585c74, built 2026-10-16)</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p><code>-X</code> only works on package-level <strong>variables</strong> of type <code>string</code>. <code>var version = "dev"</code> works (and with current toolchains even <code>var version = getVersion()</code> is overwritten); <code>const version = "dev"</code> silently doesn't, and a non-string variable is a link error. The path must be the full import path: <code>-X main.version</code> for package main, <code>-X example.com/app/internal/build.Version</code> for anything else. A typo produces no error, just the default value.</p></div>
+
+  <p>Let's test those rules. We build this program with <code>go run -ldflags "-X main.version=1.4.2 -X main.Commit=abc123 -X main.release=1.4.2 -X main.built=2026-10-16" .</code>, where <code>main.Commit</code> is a deliberate typo:</p>
+  <div class="live" data-title="Which -X flags actually land?">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+var version = "dev" // plain string var: -X sets it
+
+var commit = "none" // we will misspell this one on purpose
+
+const release = "dev" // a constant: -X cannot touch it
+
+var built = today() // function initialiser: the -X value still wins
+
+func today() string { return "unknown" }
+
+func main() {
+	fmt.Println("version:", version)
+	fmt.Println("commit: ", commit)
+	fmt.Println("release:", release)
+	fmt.Println("built:  ", built)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5" data-state="version=&quot;1.4.2&quot;">The linker finds a package-level <code>string</code> variable named <code>main.version</code> and replaces its initial value. This happens at link time, before any code runs.</li>
+      <li data-lines="7" data-state="commit=&quot;none&quot;">We asked for <code>main.Commit</code> with a capital C. No such symbol exists, and the linker <strong>ignores it without a warning</strong>, so <code>commit</code> keeps its default.</li>
+      <li data-lines="9" data-state="release=&quot;dev&quot; (constant)">A <code>const</code> has no storage in the binary to patch; it is folded into the code at compile time. <code>-X main.release</code> also does nothing.</li>
+      <li data-lines="11,13" data-state="built=&quot;2026-10-16&quot;"><code>built</code> has a function initialiser. The toolchain sees that <code>-X</code> targets it and uses the flag's value; <code>today()</code> does not overwrite it.</li>
+      <li data-lines="16" data-state="version=&quot;1.4.2&quot;" data-out="version: 1.4.2">The good case.</li>
+      <li data-lines="17" data-state="commit=&quot;none&quot;" data-out="commit:  none">The typo. In CI this ships a binary that claims commit "none". Check the output of <code>-version</code> in your release pipeline.</li>
+      <li data-lines="18" data-state="release=&quot;dev&quot;" data-out="release: dev">The constant never changes.</li>
+      <li data-lines="19" data-state="built=&quot;2026-10-16&quot;" data-out="built:   2026-10-16">The linker value won. (Passing <code>-X</code> for an <code>int</code> variable would fail the build: "cannot set with -X: not a var of type string".)</li>
+    </ol>
+  </div>
+<div class="output"><pre>version: 1.4.2
+commit:  none
+release: dev
+built:   2026-10-16</pre></div>
+  <h3>Free version info: <code>debug.ReadBuildInfo</code></h3>
+  <p>Even without <code>-X</code>, Go embeds a lot of information into every binary: the Go version, the module path, every dependency with its version, the build settings, and (when built inside a git checkout) the commit hash, commit time and whether the working tree had uncommitted changes. Since Go 1.24, <code>go build</code> also stamps the <strong>main module's version</strong> from the git tag. You can read all of it at runtime:</p>
+<div class="output" data-label="terminal"><pre>$ ./bin/hello-release -buildinfo
+hello v1.4.2 (commit d585c74, built 2026-10-16)
+go version: go1.27.1
+module:     example.com/hello v1.4.2
+  -trimpath    = true
+  CGO_ENABLED  = 1
+  GOARCH       = arm64
+  GOOS         = darwin
+  vcs          = git
+  vcs.revision = d585c749c0099a0fef276a9ed9cf83fb4ce974c0
+  vcs.time     = 2026-10-16T18:06:56Z
+  vcs.modified = false</pre></div>
+  <p>And from the outside, with no code at all, <code>go version -m</code> reads the same data out of any Go binary, which is a lifesaver when someone asks "what exactly is running in production?":</p>
+<div class="output" data-label="terminal"><pre>$ go version -m bin/hello-release
+bin/hello-release: go1.27.1
+	path	example.com/hello
+	mod	example.com/hello	v1.4.2	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	CGO_ENABLED=1
+	build	GOARCH=arm64
+	build	GOOS=darwin
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=d585c749c0099a0fef276a9ed9cf83fb4ce974c0
+	build	vcs.time=2026-10-16T18:06:56Z
+	build	vcs.modified=false</pre></div>
+  <p>Notice <code>-ldflags</code> isn't listed: when you build with <code>-trimpath</code>, Go leaves linker flags out of the build info, because they could contain local paths.</p>
+
+  <div class="callout senior"><p>Expose build info on an endpoint (<code>GET /version</code>) and as a metric label (<code>build_info{version="v1.5.0",commit="b359c72"} 1</code>). During an incident, the first question is always "which version is deployed where?". Make that a one-second answer. And log the version in the very first log line at startup.</p></div>
+
+  <h3>How much do the flags save?</h3>
+<div class="output" data-label="terminal"><pre>$ go build -trimpath -o bin/hello-trim .
+$ ls -lh bin/
+total 13320
+-rwxr-xr-x@ 1 sharadpoddar  staff   2.5M Oct 16 23:36 hello
+-rwxr-xr-x@ 1 sharadpoddar  staff   1.6M Oct 16 23:36 hello-release
+-rwxr-xr-x@ 1 sharadpoddar  staff   2.4M Oct 16 23:36 hello-trim</pre></div>
+  <p>For a hello-world, <code>-s -w</code> took the binary from 2.5 MB to 1.6 MB. <code>-trimpath</code> alone barely changes the size; it's about reproducibility and privacy, not bytes.</p>
+
+  <h2>Cross-compilation and static binaries</h2>
+  <p>Go's compiler can produce code for many operating systems and CPU types from any machine. You pick the target with two environment variables: <code>GOOS</code> (the operating system) and <code>GOARCH</code> (the CPU architecture). No extra toolchains, no Docker, no VMs. These builds were run on an Apple Silicon Mac:</p>
+<div class="output" data-label="terminal"><pre>$ go tool dist list | wc -l
+      47
+$ go tool dist list | grep -E '^(linux|darwin|windows)/' | paste -sd' ' -
+darwin/amd64 darwin/arm64 linux/386 linux/amd64 linux/arm linux/arm64 linux/loong64 linux/mips linux/mips64 linux/mips64le linux/mipsle linux/ppc64 linux/ppc64le linux/riscv64 linux/s390x windows/386 windows/amd64 windows/arm64
+$ GOOS=linux GOARCH=amd64 go build -o dist/hello-linux-amd64 .
+$ GOOS=linux GOARCH=arm64 go build -o dist/hello-linux-arm64 .
+$ GOOS=windows GOARCH=amd64 go build -o dist/hello-windows-amd64.exe .
+$ file dist/* | cut -c1-110
+dist/hello-linux-amd64:       ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go Build
+dist/hello-linux-arm64:       ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go 
+dist/hello-windows-amd64.exe: PE32+ executable (console) x86-64, for MS Windows</pre></div>
+  <p>Three platforms from one laptop, with no extra tools installed. <code>file</code> confirms each one is a native executable for its target. Common pairs: <code>linux/amd64</code> (most servers), <code>linux/arm64</code> (AWS Graviton, Raspberry Pi, Apple-silicon Docker), <code>darwin/arm64</code> (M-series Macs), <code>windows/amd64</code>.</p>
+
+  <h3>What <code>CGO_ENABLED=0</code> means</h3>
+  <p><strong>cgo</strong> is the feature that lets Go call C code. A few standard packages <em>optionally</em> use it: <code>net</code> (to ask the system's C library for DNS lookups) and <code>os/user</code> (to read user accounts). When cgo is on, your binary dynamically links against the system's C library (<code>libc</code>), so it only runs where a compatible libc exists. Alpine Linux, for example, uses <code>musl</code> instead of <code>glibc</code>, and a cgo binary built on Ubuntu may fail there with a confusing "not found" error.</p>
+  <p>With <code>CGO_ENABLED=0</code>, Go uses its pure-Go DNS resolver and user lookup, and the result is a <strong>fully static</strong> binary that depends on nothing but the kernel.</p>
+<div class="output" data-label="terminal"><pre>$ go env CGO_ENABLED
+1
+$ otool -L bin/hello
+bin/hello:
+	/usr/lib/libSystem.B.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/libresolv.9.dylib (compatibility version 0.0.0, current version 0.0.0)
+$ GOOS=linux go env CGO_ENABLED
+0
+$ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/static-linux .
+$ file dist/static-linux
+dist/static-linux: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=960go599dY7CwmOVmQC8/f10jMpIPnzyHd-SN634O/QBWn4NOwxIufXbj8AB7T/-HGG0jDNqRGGxMBePcf8, BuildID[sha1]=66e55917833f291e57aba80b3261df1d492128a5, stripped</pre></div>
+  <p>Note two things. On this Mac, a native build has cgo on (it links <code>libSystem</code>, which is mandatory on macOS anyway). And when you cross-compile, Go automatically turns cgo <em>off</em> unless you set up a C cross-compiler, which is why the Linux builds above were already static. Setting <code>CGO_ENABLED=0</code> explicitly makes it independent of the machine you build on, so always set it in CI and Dockerfiles.</p>
+
+  <div class="callout tip"><p>If you truly need cgo (SQLite via <code>mattn/go-sqlite3</code>, image libraries), cross-compiling gets hard: you need a C cross-compiler (<code>zig cc</code> is a popular trick) or you build inside a container for each target. Prefer pure-Go alternatives when they exist, such as <code>modernc.org/sqlite</code>.</p></div>
+
+  <h2>Containers: multi-stage Dockerfiles</h2>
+  <p>A <strong>multi-stage build</strong> uses one big image that has the Go toolchain to <em>build</em>, then copies just the binary into a tiny image to <em>run</em>. The final image doesn't contain the compiler, your source code, or a shell. Smaller images download faster, start faster, and give attackers almost nothing to work with.</p>
+<div class="code" data-file="Dockerfile"><pre><code class="language-docker"># syntax=docker/dockerfile:1
+
+# ---------- stage 1: build ----------
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+WORKDIR /src
+
+# Download modules first: this layer is cached until go.mod/go.sum change.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+ARG TARGETOS TARGETARCH VERSION=dev
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/app ./cmd/api
+
+# ---------- stage 2: run ----------
+# distroless/static: CA certs, tzdata, /etc/passwd, no shell, no package manager.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/app /app
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/app"]</code></pre></div>
+  <p>Line by line, the important ideas:</p>
+  <ul>
+    <li><strong>Copy <code>go.mod</code>/<code>go.sum</code> first, then <code>go mod download</code></strong>: Docker caches each layer. Your dependencies change rarely, your code changes constantly, so this ordering means most builds skip the download entirely.</li>
+    <li><strong><code>--mount=type=cache</code></strong> (BuildKit) keeps Go's module and build caches between builds, so rebuilds are incremental.</li>
+    <li><strong><code>--platform=$BUILDPLATFORM</code> plus <code>TARGETOS</code>/<code>TARGETARCH</code></strong>: the build stage runs natively on your machine and <em>cross-compiles</em> for the target. <code>docker buildx build --platform linux/amd64,linux/arm64 .</code> then builds a multi-arch image without slow CPU emulation. This is where Go's cross-compiling really pays off.</li>
+    <li><strong>distroless/static:nonroot</strong>: about 2 MB, containing only CA certificates (for HTTPS calls), timezone data and a non-root user. Your final image is typically 10–20 MB.</li>
+    <li><strong><code>USER nonroot</code></strong>: never run as root inside the container.</li>
+  </ul>
+  <p>If you want the absolute minimum, use <code>scratch</code>, a completely empty image. Then you must bring CA certificates and timezone data yourself:</p>
+<div class="code" data-file="Dockerfile"><pre><code class="language-docker">FROM golang:1.27 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /app ./cmd/api
+
+FROM scratch
+# scratch is truly empty: bring your own CA certificates and timezone data.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=build /app /app
+USER 65534:65534
+ENTRYPOINT ["/app"]</code></pre></div>
+  <p>And always add a <code>.dockerignore</code> so <code>COPY . .</code> doesn't ship your <code>.git</code> folder or local secrets into the build context:</p>
+<div class="code" data-file=".dockerignore"><pre><code class="language-bash">.git
+bin/
+dist/
+*.test
+coverage.out
+.env</code></pre></div>
+
+  <table>
+    <thead><tr><th>Base image</th><th>Approx. size</th><th>Has shell?</th><th>Use when</th></tr></thead>
+    <tbody>
+      <tr><td><code>golang:1.27</code></td><td>~800 MB</td><td>yes</td><td>Build stage only, never for running</td></tr>
+      <tr><td><code>alpine</code></td><td>~8 MB</td><td>yes</td><td>You need a shell for debugging, or apk packages</td></tr>
+      <tr><td><code>gcr.io/distroless/static</code></td><td>~2 MB</td><td>no</td><td>Default choice for pure-Go binaries</td></tr>
+      <tr><td><code>scratch</code></td><td>0 MB</td><td>no</td><td>Smallest possible; you supply certs and tzdata</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip"><p>Need timezone data without copying <code>/usr/share/zoneinfo</code>? Add <code>import _ "time/tzdata"</code> to <code>main</code> (or build with <code>-tags timetzdata</code>). It embeds about 450 KB of zone data into the binary.</p></div>
+  <div class="callout tip"><div class="callout-title">Where to build these images</div><p>You don't need Docker on your laptop. Build these Dockerfiles wherever is convenient:</p><ul><li><strong>Locally:</strong> Docker Desktop, OrbStack, Colima or Podman, with <code>docker build -t myapp .</code></li><li><strong>In the cloud:</strong> Docker Build Cloud, Google Cloud Build (<code>gcloud builds submit --tag …</code>), AWS CodeBuild, or a GitHub Actions job using <code>docker/build-push-action</code>.</li></ul><p>Chapter 21 uses the same Dockerfile for the capstone project.</p></div>
+
+  <h2>Configuration the 12-factor way</h2>
+  <p>The <strong>12-factor app</strong> is a well-known set of principles for cloud services. Factor III says: <em>store config in the environment</em>. The same binary (the same Docker image) should run in dev, staging and production. Only the environment variables differ. That means no <code>config.prod.yaml</code> baked into the image and no "if env == production" branches.</p>
+  <p>A good config loader in Go:</p>
+  <ol>
+    <li>Has <strong>sensible defaults</strong> so the app runs locally with zero setup.</li>
+    <li>Reads <strong>environment variables</strong> (what Kubernetes, Docker and every PaaS give you).</li>
+    <li>Lets <strong>command-line flags</strong> override everything (handy for local experiments).</li>
+    <li><strong>Validates everything at startup</strong> and refuses to start with bad config. Failing fast at boot is far better than failing at 3 a.m. on the first request that needs the value.</li>
+    <li>Builds one typed <code>Config</code> struct that's passed to the rest of the program. Nothing else calls <code>os.Getenv</code>.</li>
+  </ol>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+
+type Config struct {
+	Addr            string
+	LogLevel        string
+	ShutdownTimeout time.Duration
+	MaxWorkers      int
+}
+
+// env returns the environment variable or a fallback.
+func env(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return fallback
+}
+
+// Load builds config with precedence: defaults &lt; environment &lt; flags.
+func Load(args []string) (Config, error) {
+	var c Config
+	fs := flag.NewFlagSet("app", flag.ContinueOnError)
+	fs.StringVar(&amp;c.Addr, "addr", env("APP_ADDR", ":8080"), "listen address (env APP_ADDR)")
+	fs.StringVar(&amp;c.LogLevel, "log-level", env("APP_LOG_LEVEL", "info"), "debug|info|warn|error (env APP_LOG_LEVEL)")
+
+	timeout, err := time.ParseDuration(env("APP_SHUTDOWN_TIMEOUT", "10s"))
+	if err != nil {
+		return c, fmt.Errorf("APP_SHUTDOWN_TIMEOUT: %w", err)
+	}
+	fs.DurationVar(&amp;c.ShutdownTimeout, "shutdown-timeout", timeout, "graceful shutdown limit")
+
+	workers, err := strconv.Atoi(env("APP_MAX_WORKERS", "4"))
+	if err != nil {
+		return c, fmt.Errorf("APP_MAX_WORKERS: %w", err)
+	}
+	fs.IntVar(&amp;c.MaxWorkers, "max-workers", workers, "worker pool size")
+
+	if err := fs.Parse(args); err != nil {
+		return c, err
+	}
+	if c.MaxWorkers &lt; 1 {
+		return c, fmt.Errorf("max-workers must be &gt;= 1, got %d", c.MaxWorkers)
+	}
+	return c, nil
+}
+
+func main() {
+	cfg, err := Load(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(2)
+	}
+	fmt.Printf("%+v\n", cfg)
+}</code></pre></div>
+
+  <div class="live" data-title="Config precedence: defaults, then env, then flags">
+    <pre><code class="language-go">func Load(args []string) (Config, error) {
+	var c Config
+	fs := flag.NewFlagSet("app", flag.ContinueOnError)
+	fs.StringVar(&amp;c.Addr, "addr", env("APP_ADDR", ":8080"), "listen address (env APP_ADDR)")
+	fs.StringVar(&amp;c.LogLevel, "log-level", env("APP_LOG_LEVEL", "info"), "debug|info|warn|error (env APP_LOG_LEVEL)")
+
+	timeout, err := time.ParseDuration(env("APP_SHUTDOWN_TIMEOUT", "10s"))
+	if err != nil {
+		return c, fmt.Errorf("APP_SHUTDOWN_TIMEOUT: %w", err)
+	}
+	fs.DurationVar(&amp;c.ShutdownTimeout, "shutdown-timeout", timeout, "graceful shutdown limit")
+
+	workers, err := strconv.Atoi(env("APP_MAX_WORKERS", "4"))
+	if err != nil {
+		return c, fmt.Errorf("APP_MAX_WORKERS: %w", err)
+	}
+	fs.IntVar(&amp;c.MaxWorkers, "max-workers", workers, "worker pool size")
+
+	if err := fs.Parse(args); err != nil {
+		return c, err
+	}
+	if c.MaxWorkers &lt; 1 {
+		return c, fmt.Errorf("max-workers must be &gt;= 1, got %d", c.MaxWorkers)
+	}
+	return c, nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="env APP_ADDR=:9000; args=[-addr :7000 -max-workers 16]">We run <code>APP_ADDR=:9000 app -addr :7000 -max-workers 16</code>. <code>Load</code> receives the arguments after the program name.</li>
+      <li data-lines="2-3" data-state="c={Addr: LogLevel: ShutdownTimeout:0s MaxWorkers:0}">An empty <code>Config</code> and a fresh <code>FlagSet</code>. <code>ContinueOnError</code> makes bad flags return an error instead of exiting, which makes <code>Load</code> testable.</li>
+      <li data-lines="4" data-state="c.Addr=:9000">The flag's <em>default</em> comes from <code>env("APP_ADDR", ":8080")</code>. The env var is set, so the default becomes <code>:9000</code>. <code>StringVar</code> writes that default into <code>c.Addr</code> straight away.</li>
+      <li data-lines="5" data-state="c.Addr=:9000; c.LogLevel=info"><code>APP_LOG_LEVEL</code> isn't set, so we fall back to <code>info</code>.</li>
+      <li data-lines="7-11" data-state="c.ShutdownTimeout=10s">Non-string values need parsing. A bad duration in the env returns a clear error naming the variable.</li>
+      <li data-lines="13-17" data-state="c.MaxWorkers=4">Same for the integer: default <code>4</code>.</li>
+      <li data-lines="19-21" data-state="c.Addr=:7000; c.LogLevel=info; c.ShutdownTimeout=10s; c.MaxWorkers=16"><code>fs.Parse</code> applies the flags last, so they win: <code>-addr :7000</code> beats the env var, <code>-max-workers 16</code> beats the default.</li>
+      <li data-lines="22-24" data-state="valid=true">Validation runs on the final values. 16 is ≥ 1, so we're fine.</li>
+      <li data-lines="25" data-out="{Addr::7000 LogLevel:info ShutdownTimeout:10s MaxWorkers:16}">We return the finished config, and <code>main</code> prints it.</li>
+    </ol>
+  </div>
+
+<div class="output" data-label="terminal"><pre>$ go run ./config
+{Addr::8080 LogLevel:info ShutdownTimeout:10s MaxWorkers:4}
+$ APP_ADDR=:9000 APP_LOG_LEVEL=debug go run ./config
+{Addr::9000 LogLevel:debug ShutdownTimeout:10s MaxWorkers:4}
+$ APP_ADDR=:9000 go run ./config -addr :7000 -max-workers 16
+{Addr::7000 LogLevel:info ShutdownTimeout:10s MaxWorkers:16}
+$ APP_MAX_WORKERS=lots go run ./config
+config error: APP_MAX_WORKERS: strconv.Atoi: parsing "lots": invalid syntax
+exit status 2</pre></div>
+
+  <p>The happy path is only half the story. A config loader earns its keep by <strong>refusing</strong> bad values at startup, with a message that names the culprit. This trimmed-down <code>Load</code> runs three times in one process:</p>
+  <div class="live" data-title="Three Load calls: one good, two rejected">
+    <pre><code class="language-go">package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strconv"
+)
+
+type Config struct {
+	Addr       string
+	MaxWorkers int
+}
+
+func env(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return fallback
+}
+
+// Load: defaults &lt; environment &lt; flags.
+func Load(args []string) (Config, error) {
+	var c Config
+	fs := flag.NewFlagSet("app", flag.ContinueOnError)
+	fs.StringVar(&amp;c.Addr, "addr", env("APP_ADDR", ":8080"), "listen address")
+	workers, err := strconv.Atoi(env("APP_MAX_WORKERS", "4"))
+	if err != nil {
+		return c, fmt.Errorf("APP_MAX_WORKERS: %w", err)
+	}
+	fs.IntVar(&amp;c.MaxWorkers, "max-workers", workers, "pool size")
+	if err := fs.Parse(args); err != nil {
+		return c, err
+	}
+	if c.MaxWorkers &lt; 1 {
+		return c, fmt.Errorf("max-workers must be &gt;= 1, got %d", c.MaxWorkers)
+	}
+	return c, nil
+}
+
+func main() {
+	os.Setenv("APP_ADDR", ":9000")
+	os.Setenv("APP_MAX_WORKERS", "8")
+	cfg, err := Load([]string{"-addr", ":7000"})
+	fmt.Printf("1) %+v err=%v\n", cfg, err)
+
+	os.Setenv("APP_MAX_WORKERS", "eight")
+	_, err = Load(nil)
+	fmt.Println("2) err:", err)
+
+	os.Setenv("APP_MAX_WORKERS", "8")
+	_, err = Load([]string{"-max-workers", "0"})
+	fmt.Println("3) err:", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="42-44" data-state="env APP_ADDR=:9000; env APP_MAX_WORKERS=8; args=[-addr :7000]">Run 1: both env vars set, plus one flag. <code>os.Setenv</code> stands in for the real environment.</li>
+      <li data-lines="26,15-18" data-state="c.Addr=:9000">The flag default comes from <code>env</code>, which finds <code>APP_ADDR</code>: the default is now <code>:9000</code> instead of <code>:8080</code>.</li>
+      <li data-lines="27-31" data-state="c.Addr=:9000; workers=8; c.MaxWorkers=8"><code>APP_MAX_WORKERS=8</code> parses fine and becomes the default for <code>-max-workers</code>.</li>
+      <li data-lines="32" data-state="c.Addr=:7000; c.MaxWorkers=8"><code>fs.Parse</code> runs last and applies <code>-addr :7000</code>, overriding the env value. No <code>-max-workers</code> flag, so 8 stays.</li>
+      <li data-lines="35-38,45" data-state="cfg={Addr::7000 MaxWorkers:8}; err=nil" data-out="1) {Addr::7000 MaxWorkers:8} err=&lt;nil&gt;">Validation passes. Precedence in one line: default <code>:8080</code> &lt; env <code>:9000</code> &lt; flag <code>:7000</code>.</li>
+      <li data-lines="47-48,27" data-state="env APP_MAX_WORKERS=eight">Run 2: someone typed a word in the deployment manifest. <code>strconv.Atoi("eight")</code> fails.</li>
+      <li data-lines="28-29" data-state="err=APP_MAX_WORKERS: strconv.Atoi: …">We wrap with <code>%w</code> and prefix the variable name. Without the prefix the operator would only see "invalid syntax" and have to guess which setting.</li>
+      <li data-lines="49" data-out="2) err: APP_MAX_WORKERS: strconv.Atoi: parsing &quot;eight&quot;: invalid syntax">In <code>main</code> of the real program this is <code>os.Exit(2)</code>: the pod crash-loops with a clear log line instead of running half-configured.</li>
+      <li data-lines="51-52,31-32" data-state="c.MaxWorkers=0">Run 3: the env is valid again, but the flag <code>-max-workers 0</code> overrides it with a value that parses but makes no sense.</li>
+      <li data-lines="35-36" data-state="c.MaxWorkers=0; err=max-workers must be &gt;= 1…">Parsing is not validation. The range check runs on the <em>final</em> merged value, after all sources are applied.</li>
+      <li data-lines="53" data-out="3) err: max-workers must be &gt;= 1, got 0">A zero-worker pool would accept jobs and never process them. Failing fast at startup is far cheaper than finding that out in production.</li>
+    </ol>
+  </div>
+<div class="output"><pre>1) {Addr::7000 MaxWorkers:8} err=&lt;nil&gt;
+2) err: APP_MAX_WORKERS: strconv.Atoi: parsing "eight": invalid syntax
+3) err: max-workers must be &gt;= 1, got 0</pre></div>
+  <div class="callout senior"><p>Treat secrets (database passwords, API keys) as config too, but never log them, never put them in flags (flags show up in <code>ps</code> output) and never bake them into images. Read them from env vars injected by your platform's secret manager, or from a mounted file (<code>DB_PASSWORD_FILE=/run/secrets/db</code>). Libraries like <code>github.com/caarlos0/env</code> or <code>kelseyhightower/envconfig</code> fill a struct from env vars using tags, but the hand-written version above is often all a service needs.</p></div>
+
+  <h2>Observability: logs, metrics and traces</h2>
+  <p><strong>Observability</strong> means being able to answer "what is my service doing right now, and why?" from the outside, without adding new code. It rests on three pillars:</p>
+  <table>
+    <thead><tr><th>Pillar</th><th>Answers</th><th>Go tool</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Logs</strong></td><td>What happened, in detail, for this one event?</td><td><code>log/slog</code> (stdlib)</td></tr>
+      <tr><td><strong>Metrics</strong></td><td>How much / how fast / how many errors, over time?</td><td><code>expvar</code> (stdlib), Prometheus client</td></tr>
+      <tr><td><strong>Traces</strong></td><td>Where did the time go for this request, across services?</td><td>OpenTelemetry</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Structured logging with <code>slog</code></h3>
+  <p>A plain log line like <code>charging card for user 42 took 12ms</code> is easy for humans to read but painful for machines: to find all slow charges you'd need a regex. A <strong>structured</strong> log is a set of key/value pairs, usually JSON, that log systems (Loki, Elasticsearch, CloudWatch, Datadog) can index and query: <code>took_ms &gt; 500 AND msg = "charging card"</code>.</p>
+  <p><code>log/slog</code> (standard library since Go 1.21) gives you leveled, structured logging with zero dependencies:</p>
+  <div class="live" data-title="Following each slog call">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"time"
+)
+
+// Secret never prints its value, even by accident.
+type Secret string
+
+func (Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
+
+func main() {
+	var level slog.LevelVar // can be changed at runtime
+	level.Set(slog.LevelInfo)
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &amp;slog.HandlerOptions{
+		Level:     &amp;level,
+		AddSource: false,
+	})).With("service", "billing", "version", "v1.4.2")
+	slog.SetDefault(logger) // log.Printf and slog.Info now go here too
+
+	slog.Info("server starting", "addr", ":8080")
+	slog.Debug("this is hidden at info level")
+
+	reqLog := logger.With(slog.Group("req", "id", "r-42", "method", "POST", "path", "/charge"))
+	reqLog.Info("charging card",
+		"amount_cents", 1999,
+		"api_key", Secret("sk_live_abc123"),
+		"took", 12*time.Millisecond,
+	)
+	reqLog.Error("charge failed", "err", errors.New("card declined"))
+
+	level.Set(slog.LevelDebug) // e.g. flipped by an admin endpoint
+	slog.DebugContext(context.Background(), "debug now visible", "cache_hits", 17)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17-18" data-state="level=INFO">A <code>slog.LevelVar</code> is a level you can change while the program runs. We start at INFO.</li>
+      <li data-lines="20-23" data-state="level=INFO; attrs=service,version">A JSON handler writing to stdout, filtered by <code>&amp;level</code>. <code>.With(...)</code> returns a child logger that adds <code>service</code> and <code>version</code> to <strong>every</strong> record.</li>
+      <li data-lines="24" data-state="default=logger"><code>slog.SetDefault</code> makes the top-level <code>slog.Info</code> functions (and the old <code>log</code> package) use our logger.</li>
+      <li data-lines="26" data-state="level=INFO" data-out="$ go run ./slogdemo\n{&quot;time&quot;:&quot;2026-10-16T23:37:41.786902+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;server starting&quot;,&quot;service&quot;:&quot;billing&quot;,&quot;version&quot;:&quot;v1.4.2&quot;,&quot;addr&quot;:&quot;:8080&quot;}">One JSON object per line: time, level, message, the <code>With</code> attributes, then this call's key-value pairs.</li>
+      <li data-lines="27" data-state="level=INFO">DEBUG is below INFO, so the handler drops this record. Nothing is printed and the arguments are barely evaluated.</li>
+      <li data-lines="29" data-state="attrs=service,version,req{id,method,path}"><code>slog.Group</code> nests attributes under one key. <code>reqLog</code> carries the request's identity on every line it writes.</li>
+      <li data-lines="30-34,14" data-state="api_key=Secret(…)" data-out="{&quot;time&quot;:&quot;2026-10-16T23:37:41.787517+05:30&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;charging card&quot;,&quot;service&quot;:&quot;billing&quot;,&quot;version&quot;:&quot;v1.4.2&quot;,&quot;req&quot;:{&quot;id&quot;:&quot;r-42&quot;,&quot;method&quot;:&quot;POST&quot;,&quot;path&quot;:&quot;/charge&quot;},&quot;amount_cents&quot;:1999,&quot;api_key&quot;:&quot;[REDACTED]&quot;,&quot;took&quot;:12000000}"><code>Secret</code> implements <code>slog.LogValuer</code>, so the handler calls <code>LogValue()</code> and logs <code>[REDACTED]</code> instead of the key. A <code>time.Duration</code> is logged in nanoseconds by the JSON handler.</li>
+      <li data-lines="35" data-out="{&quot;time&quot;:&quot;2026-10-16T23:37:41.787545+05:30&quot;,&quot;level&quot;:&quot;ERROR&quot;,&quot;msg&quot;:&quot;charge failed&quot;,&quot;service&quot;:&quot;billing&quot;,&quot;version&quot;:&quot;v1.4.2&quot;,&quot;req&quot;:{&quot;id&quot;:&quot;r-42&quot;,&quot;method&quot;:&quot;POST&quot;,&quot;path&quot;:&quot;/charge&quot;},&quot;err&quot;:&quot;card declined&quot;}">An error value becomes its <code>Error()</code> string. Same request group, so you can grep every line for <code>r-42</code>.</li>
+      <li data-lines="37" data-state="level=DEBUG">Flip the level at runtime, as an admin endpoint might during an incident. No restart, no new logger.</li>
+      <li data-lines="38" data-state="level=DEBUG" data-out="{&quot;time&quot;:&quot;2026-10-16T23:37:41.78757+05:30&quot;,&quot;level&quot;:&quot;DEBUG&quot;,&quot;msg&quot;:&quot;debug now visible&quot;,&quot;service&quot;:&quot;billing&quot;,&quot;version&quot;:&quot;v1.4.2&quot;,&quot;cache_hits&quot;:17}">The debug record now passes the filter. It uses the default logger, so it has <code>service</code> and <code>version</code> but no <code>req</code> group.</li>
+    </ol>
+  </div>
+<div class="output" data-label="terminal (timestamps differ per run)"><pre>$ go run ./slogdemo
+{"time":"2026-10-16T23:37:41.786902+05:30","level":"INFO","msg":"server starting","service":"billing","version":"v1.4.2","addr":":8080"}
+{"time":"2026-10-16T23:37:41.787517+05:30","level":"INFO","msg":"charging card","service":"billing","version":"v1.4.2","req":{"id":"r-42","method":"POST","path":"/charge"},"amount_cents":1999,"api_key":"[REDACTED]","took":12000000}
+{"time":"2026-10-16T23:37:41.787545+05:30","level":"ERROR","msg":"charge failed","service":"billing","version":"v1.4.2","req":{"id":"r-42","method":"POST","path":"/charge"},"err":"card declined"}
+{"time":"2026-10-16T23:37:41.78757+05:30","level":"DEBUG","msg":"debug now visible","service":"billing","version":"v1.4.2","cache_hits":17}</pre></div>
+  <p>What to notice:</p>
+  <ul>
+    <li><code>.With(...)</code> attaches fields to <em>every</em> line from that logger: service name and version on every line, request ID on every line for that request.</li>
+    <li><code>slog.Group</code> nests related fields under one key (<code>"req":{...}</code>).</li>
+    <li>The <code>LogValuer</code> interface lets a type control how it's logged, so the API key printed as <code>[REDACTED]</code>.</li>
+    <li><code>slog.LevelVar</code> lets you change the level <em>while running</em>: the hidden debug line was dropped, and after <code>level.Set</code> debug lines appeared.</li>
+    <li>Durations are logged as nanoseconds in JSON (<code>"took":12000000</code>). Many teams log <code>took_ms</code> as an integer instead, because it's easier to query.</li>
+  </ul>
+  <p>One more slog pattern worth watching step by step: a base logger with a minimum level, and child loggers per component. Text handler this time, which is what you want on your laptop.</p>
+  <div class="live" data-title="Child loggers and the level gate">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+)
+
+func main() {
+	opts := &amp;slog.HandlerOptions{
+		Level: slog.LevelWarn,
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{} // drop time for stable output
+			}
+			return a
+		},
+	}
+	base := slog.New(slog.NewTextHandler(os.Stdout, opts))
+
+	db := base.With("component", "db")
+	api := base.With("component", "api")
+
+	db.Info("connected", "host", "pg-1") // below WARN: dropped
+	db.Warn("slow query", "ms", 950)
+	api.Error("upstream failed", "status", 502)
+	if base.Enabled(context.Background(), slog.LevelDebug) {
+		base.Debug("expensive dump", "state", "...")
+	}
+	api.WithGroup("user").Warn("rate limited", "id", 7, "plan", "free")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-11" data-state="min level=WARN">Only records at WARN or above will be written. DEBUG and INFO are dropped at the door.</li>
+      <li data-lines="12-17"><code>ReplaceAttr</code> runs on every attribute before it is written. Returning an empty <code>slog.Attr{}</code> for the time key removes it, which keeps test output stable.</li>
+      <li data-lines="19" data-state="base=TextHandler(stdout)">The base logger. <code>NewTextHandler</code> writes <code>key=value</code> pairs instead of JSON.</li>
+      <li data-lines="21-22" data-state="db=+component=db; api=+component=api"><code>With</code> creates two children. They share the handler but each carries its own <code>component</code> attribute.</li>
+      <li data-lines="24"><code>db.Info</code> is below WARN, so the handler's <code>Enabled</code> check says no and the record is never built. No output.</li>
+      <li data-lines="25" data-out="level=WARN msg=&quot;slow query&quot; component=db ms=950">WARN passes. The child's <code>component=db</code> comes first, then this call's <code>ms=950</code>. Messages with spaces are quoted.</li>
+      <li data-lines="26" data-out="level=ERROR msg=&quot;upstream failed&quot; component=api status=502">The <code>api</code> child tags its line with <code>component=api</code>.</li>
+      <li data-lines="27-29" data-state="enabled(DEBUG)=false"><code>Enabled</code> lets you skip <em>expensive</em> work (building a big dump) when the level would drop it anyway. The block is skipped.</li>
+      <li data-lines="30" data-out="level=WARN msg=&quot;rate limited&quot; component=api user.id=7 user.plan=free"><code>WithGroup("user")</code> prefixes the following keys. The text handler shows groups as dotted names; JSON would nest them.</li>
+    </ol>
+  </div>
+<div class="output"><pre>level=WARN msg="slow query" component=db ms=950
+level=ERROR msg="upstream failed" component=api status=502
+level=WARN msg="rate limited" component=api user.id=7 user.plan=free</pre></div>
+  <div class="callout senior"><p>Log rules that save you money and pain: use JSON in production and text locally; log to <strong>stdout</strong> and let the platform ship it (12-factor, factor XI); put a <strong>request ID</strong> on every line; log at <code>Info</code> for business events and <code>Error</code> only for things a human must look at; and never log secrets, tokens or full request bodies. High-volume debug logs cost real money in log storage.</p></div>
+
+  <h3>Metrics with <code>expvar</code> and Prometheus</h3>
+  <p>A <strong>metric</strong> is a number tracked over time: requests per second, error rate, latency percentiles, queue depth. The standard library's <code>expvar</code> package publishes counters as JSON at <code>/debug/vars</code>, which is great for small services and quick debugging. You'll see it running in the next section.</p>
+  <p>In most companies, though, the standard is <strong>Prometheus</strong>. Its Go client (<code>github.com/prometheus/client_golang</code>) exposes a <code>/metrics</code> endpoint that a Prometheus server scrapes every few seconds. A typical setup looks like this (not run here because it needs the third-party module):</p>
+  <div class="code" data-file="metrics.go (needs go get github.com/prometheus/client_golang)"><pre><code class="language-go">var httpDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "http_request_duration_seconds",
+	Help:    "Latency of HTTP requests.",
+	Buckets: prometheus.DefBuckets,
+}, []string{"method", "route", "status"})
+
+// in middleware, after the handler runs:
+httpDuration.WithLabelValues(r.Method, r.Pattern, strconv.Itoa(rec.status)).
+	Observe(time.Since(start).Seconds())
+
+// in main:
+mux.Handle("GET /metrics", promhttp.Handler())</code></pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: label cardinality</div><p>Every unique combination of label values creates a new time series. Use the route <em>pattern</em> (<code>r.Pattern</code>, e.g. <code>GET /tasks/{id}</code>, available since Go 1.23) as a label, never the raw path <code>/tasks/81723</code>, and never user IDs or emails. Otherwise you'll create millions of series and take down your monitoring.</p></div>
+
+  <h3>Tracing with OpenTelemetry</h3>
+  <p>When one user click fans out to five services, logs and metrics tell you <em>that</em> it was slow but not <em>where</em>. A <strong>distributed trace</strong> follows one request across every service: each step is a <em>span</em> with a start time and duration, and the trace ID travels between services in HTTP headers. <strong>OpenTelemetry</strong> (OTel) is the vendor-neutral standard; you instrument once and send data to Jaeger, Tempo, Honeycomb, Datadog or whatever your company uses.</p>
+  <div class="code" data-file="tracing.go (needs go.opentelemetry.io/otel modules)"><pre><code class="language-go">// Wrap the whole mux: every request becomes a span, and incoming trace headers are honoured.
+handler := otelhttp.NewHandler(mux, "taskapi")
+
+// Inside your code, add child spans around interesting work:
+ctx, span := otel.Tracer("task").Start(ctx, "store.Create")
+defer span.End()</code></pre></div>
+  <p>This is one more reason to pass <code>context.Context</code> everywhere: the current span lives in the context, so child spans and outgoing HTTP calls link up automatically.</p>
+
+  <h2>Health checks and graceful shutdown</h2>
+  <p>Orchestrators like Kubernetes keep asking your service two different questions, and it's important not to mix them up:</p>
+  <table>
+    <thead><tr><th>Probe</th><th>Question</th><th>If it fails…</th><th>What to check</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Liveness</strong> <code>/healthz</code></td><td>"Is the process alive and not stuck?"</td><td>The container is <strong>restarted</strong></td><td>Almost nothing. Just respond. Don't check the database here, or a DB blip restarts every pod at once.</td></tr>
+      <tr><td><strong>Readiness</strong> <code>/readyz</code></td><td>"Should I send you traffic right now?"</td><td>Removed from the load balancer, <strong>not</strong> restarted</td><td>Warm-up finished, critical dependencies reachable, not shutting down.</td></tr>
+    </tbody>
+  </table>
+
+  <p>Here's a production-shaped <code>main</code> that brings together everything so far: config from env, JSON logs with the version, a logging middleware that also feeds <code>expvar</code> metrics, liveness and readiness endpoints, server timeouts, and graceful shutdown on <code>SIGTERM</code>.</p>
+<div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"expvar"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync/atomic"
+	"syscall"
+	"time"
+)
+
+var version = "dev"
+
+// Metrics, published automatically at /debug/vars by importing expvar.
+var (
+	requests = expvar.NewInt("http_requests_total")
+	byStatus = expvar.NewMap("http_responses_by_status")
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("version", version)
+	if err := run(logger); err != nil {
+		logger.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(log *slog.Logger) error {
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
+	// Cancelled on Ctrl-C (SIGINT) or `docker stop` / Kubernetes (SIGTERM).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var ready atomic.Bool // flips to true once dependencies are warm
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok") // liveness: "the process is not wedged"
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !ready.Load() { // readiness: "send me traffic"
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, "ready")
+	})
+	mux.HandleFunc("GET /hello/{name}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello, %s\n", r.PathValue("name"))
+	})
+	mux.Handle("GET /debug/vars", expvar.Handler())
+
+	srv := &amp;http.Server{
+		Addr:              addr,
+		Handler:           logRequests(log, mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", addr)
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			errCh &lt;- err
+		}
+		close(errCh)
+	}()
+
+	// Pretend to warm caches / connect to the database.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		ready.Store(true)
+		log.Info("ready")
+	}()
+
+	select {
+	case err := &lt;-errCh:
+		return fmt.Errorf("listen: %w", err)
+	case &lt;-ctx.Done():
+	}
+
+	log.Info("shutdown signal received")
+	ready.Store(false) // fail readiness first so the load balancer drains us
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	log.Info("shutdown complete")
+	return nil
+}
+
+// statusRecorder remembers the status code a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &amp;statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		requests.Add(1)
+		byStatus.Add(strconv.Itoa(rec.status), 1)
+		log.Info("request", "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "dur_ms", time.Since(start).Milliseconds())
+	})
+}</code></pre></div>
+
+  <p>Following a request through the middleware:</p>
+  <div class="live" data-title="A request through logRequests">
+    <pre><code class="language-go">func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &amp;statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		requests.Add(1)
+		byStatus.Add(strconv.Itoa(rec.status), 1)
+		log.Info("request", "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "dur_ms", time.Since(start).Milliseconds())
+	})
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="next=mux">At startup, <code>logRequests</code> wraps the mux and returns a new handler. It runs once; the inner function runs for every request.</li>
+      <li data-lines="2-3" data-state="req=GET /hello/gopher; start=t0">A request for <code>GET /hello/gopher</code> arrives. We note the start time.</li>
+      <li data-lines="4" data-state="rec.status=200">We wrap the real <code>ResponseWriter</code> in a <code>statusRecorder</code>. Embedding means it has every method of the original, but our <code>WriteHeader</code> remembers the code. It defaults to 200 because handlers that never call <code>WriteHeader</code> send 200.</li>
+      <li data-lines="5" data-state="rec.status=200; body=hello, gopher">The mux matches <code>GET /hello/{name}</code>, and the handler writes the body. If it had been a <code>POST</code>, the mux itself would call <code>WriteHeader(405)</code> and we'd record 405.</li>
+      <li data-lines="6-7" data-state="http_requests_total=+1; by_status[200]=+1">Bump the expvar counters.</li>
+      <li data-lines="8-9" data-out="{&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;request&quot;,&quot;method&quot;:&quot;GET&quot;,&quot;path&quot;:&quot;/hello/gopher&quot;,&quot;status&quot;:200,&quot;dur_ms&quot;:0}">One structured log line per request (time and version fields trimmed here).</li>
+    </ol>
+  </div>
+
+  <p>And the shutdown sequence, the part that's easy to get wrong:</p>
+  <div class="live" data-title="Graceful shutdown on SIGTERM">
+    <pre><code class="language-go">	select {
+	case err := &lt;-errCh:
+		return fmt.Errorf("listen: %w", err)
+	case &lt;-ctx.Done():
+	}
+
+	log.Info("shutdown signal received")
+	ready.Store(false) // fail readiness first so the load balancer drains us
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	log.Info("shutdown complete")
+	return nil</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="server=serving; ready=true">main waits in a <code>select</code> for one of two things: the server failing to start, or a shutdown signal.</li>
+      <li data-lines="2-3" data-state="(not taken)">If <code>ListenAndServe</code> fails (port already in use, say), we'd return an error straight away. Not today.</li>
+      <li data-lines="4" data-state="ctx=cancelled (SIGTERM)">Kubernetes sends <code>SIGTERM</code>. <code>signal.NotifyContext</code> turns that into a cancelled context, and this case fires.</li>
+      <li data-lines="7-8" data-state="ready=false" data-out="{&quot;msg&quot;:&quot;shutdown signal received&quot;}">We flip readiness to false first. Any probe now gets 503, so the load balancer stops sending <em>new</em> requests.</li>
+      <li data-lines="10-11" data-state="deadline=now+10s">We give shutdown a hard deadline. It uses a <em>fresh</em> background context, because <code>ctx</code> is already cancelled.</li>
+      <li data-lines="12" data-state="server=draining">Shutdown closes the listeners (no new connections), closes idle connections, and <strong>waits for in-flight requests to finish</strong>. Meanwhile <code>ListenAndServe</code> returns <code>ErrServerClosed</code>, which the goroutine ignores.</li>
+      <li data-lines="15-16" data-state="server=stopped" data-out="{&quot;msg&quot;:&quot;shutdown complete&quot;}">All requests done within the deadline. We return nil, deferred cleanups run, and the process exits with code 0.</li>
+    </ol>
+  </div>
+
+  <p>Now for real. Start the server, poke it with curl, then send <code>SIGTERM</code>:</p>
+<div class="output" data-label="terminal: curl session"><pre>$ curl -i localhost:18080/readyz      # during warm-up
+HTTP/1.1 503 Service Unavailable
+Content-Type: text/plain; charset=utf-8
+
+not ready
+$ curl -i localhost:18080/readyz      # after warm-up
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+
+ready
+$ curl localhost:18080/healthz
+ok
+$ curl localhost:18080/hello/gopher
+hello, gopher
+$ curl -X POST localhost:18080/hello/gopher
+Method Not Allowed
+$ curl -s localhost:18080/debug/vars | jq "{http_requests_total, http_responses_by_status}"
+{
+  "http_requests_total": 5,
+  "http_responses_by_status": {
+    "200": 3,
+    "405": 1,
+    "503": 1
+  }
+}
+$ curl -s localhost:18080/debug/vars | jq -c "keys"
+["cmdline","http_requests_total","http_responses_by_status","memstats"]
+$ kill -TERM $PID</pre></div>
+<div class="output" data-label="server stdout"><pre>{"time":"2026-10-16T23:38:28.698499+05:30","level":"INFO","msg":"listening","version":"v1.4.2","addr":":18080"}
+{"time":"2026-10-16T23:38:28.725327+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/readyz","status":503,"dur_ms":0}
+{"time":"2026-10-16T23:38:28.999512+05:30","level":"INFO","msg":"ready","version":"v1.4.2"}
+{"time":"2026-10-16T23:38:29.24116+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/readyz","status":200,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.251251+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/healthz","status":200,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.260865+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/hello/gopher","status":200,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.271684+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"POST","path":"/hello/gopher","status":405,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.281978+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/debug/vars","status":200,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.291635+05:30","level":"INFO","msg":"request","version":"v1.4.2","method":"GET","path":"/debug/vars","status":200,"dur_ms":0}
+{"time":"2026-10-16T23:38:29.292504+05:30","level":"INFO","msg":"shutdown signal received","version":"v1.4.2"}
+{"time":"2026-10-16T23:38:29.292571+05:30","level":"INFO","msg":"shutdown complete","version":"v1.4.2"}
+exit code 0</pre></div>
+  <p>Everything lines up: <code>/readyz</code> returned 503 during warm-up and 200 after; the wrong method got a 405 from the mux automatically; <code>/debug/vars</code> showed our counters next to <code>expvar</code>'s built-in <code>cmdline</code> and <code>memstats</code>; and <code>SIGTERM</code> produced a clean shutdown with exit code 0.</p>
+
+  <p>The two probes answer different questions, and the difference shows up over time. This small program probes both endpoints in three phases of a pod's life, using <code>httptest</code> instead of a real port:</p>
+  <div class="live" data-title="Liveness vs readiness over a pod's life">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+)
+
+var ready atomic.Bool // false until warm-up finishes
+
+func healthz(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK) // liveness: the process is alive
+}
+
+func readyz(w http.ResponseWriter, r *http.Request) {
+	if !ready.Load() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintln(w, "ok")
+}
+
+func probe(h http.Handler, path string) {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+	fmt.Println(path, rec.Code)
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /readyz", readyz)
+
+	fmt.Println("-- starting (cache cold)")
+	probe(mux, "/healthz")
+	probe(mux, "/readyz")
+
+	ready.Store(true) // warm-up done
+	fmt.Println("-- warmed up")
+	probe(mux, "/readyz")
+
+	ready.Store(false) // SIGTERM: stop taking new traffic
+	fmt.Println("-- draining")
+	probe(mux, "/healthz")
+	probe(mux, "/readyz")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="ready=false"><code>atomic.Bool</code> is safe to flip from one goroutine (startup, signal handler) while request goroutines read it. Its zero value is false.</li>
+      <li data-lines="31-33">Two routes. <code>healthz</code> always answers 200: "the process is alive, don't restart me". <code>readyz</code> asks "should I get traffic right now?".</li>
+      <li data-lines="35-36,24-27,12-13" data-state="ready=false" data-out="-- starting (cache cold)\n/healthz 200"><code>probe</code> sends a fake request through the mux. Liveness is 200 even during warm-up, so Kubernetes won't kill a pod that is just slow to start.</li>
+      <li data-lines="37,16-18" data-state="ready=false" data-out="/readyz 503">Readiness returns 503 while warming up, so the load balancer keeps traffic away from a cold cache.</li>
+      <li data-lines="39-41,21" data-state="ready=true" data-out="-- warmed up\n/readyz 200">Warm-up done: flip the flag. The next readiness probe gets 200 and the pod joins the rotation.</li>
+      <li data-lines="43-45" data-state="ready=false" data-out="-- draining\n/healthz 200">On SIGTERM we flip readiness back to false <em>first</em>. Liveness stays 200: the process is healthy, it is just leaving.</li>
+      <li data-lines="46" data-state="ready=false" data-out="/readyz 503">Readiness 503 tells the load balancer to stop sending new requests while in-flight ones finish. Never make liveness depend on a database: an outage would restart every pod at once.</li>
+    </ol>
+  </div>
+<div class="output"><pre>-- starting (cache cold)
+/healthz 200
+/readyz 503
+-- warmed up
+/readyz 200
+-- draining
+/healthz 200
+/readyz 503</pre></div>
+  <p><code>srv.Shutdown</code> is the heart of graceful shutdown. Here it is in isolation: a slow request is already running when shutdown starts. Watch the order of events.</p>
+  <div class="live" data-title="Shutdown waits for the in-flight request">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+func main() {
+	started := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		time.Sleep(200 * time.Millisecond) // a request still in flight
+		fmt.Println("handler: finished")
+		io.WriteString(w, "done")
+	})
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	srv := &amp;http.Server{Handler: mux}
+	go srv.Serve(ln)
+
+	got := make(chan string)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err != nil {
+			got &lt;- "client error: " + err.Error()
+			return
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		got &lt;- fmt.Sprintf("client: %d %s", resp.StatusCode, b)
+	}()
+
+	&lt;-started
+	fmt.Println("main: shutdown begins")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := srv.Shutdown(ctx) // waits for the in-flight request
+	fmt.Println("main: shutdown returned, err =", err)
+	fmt.Println(&lt;-got)
+
+	_, err = http.Get("http://" + ln.Addr().String() + "/slow")
+	fmt.Println("new request after shutdown fails:", err != nil)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13-20" data-state="started=open">A handler that signals when it starts, then takes 200 ms. That simulates a real request in progress.</li>
+      <li data-lines="22-24" data-state="addr=127.0.0.1:random">Listen on a random free port and serve in a background goroutine.</li>
+      <li data-lines="26-28" data-state="goroutines=main, server, client">A client goroutine sends <code>GET /slow</code>. It will block until the response arrives.</li>
+      <li data-lines="15-17,38" data-state="started=closed">The server runs the handler, which closes <code>started</code> and begins sleeping. main was waiting on <code>&lt;-started</code>, so it now knows a request is in flight.</li>
+      <li data-lines="39-42" data-state="in-flight=1" data-out="main: shutdown begins"><code>Shutdown</code> closes the listener at once (no new connections), then <strong>waits</strong> until every active connection goes idle, bounded by the 2 s context.</li>
+      <li data-lines="18-19" data-state="in-flight=1" data-out="handler: finished">200 ms later the handler finishes and writes its response. The request was not cut off.</li>
+      <li data-lines="42-43" data-state="in-flight=0; err=nil" data-out="main: shutdown returned, err = &lt;nil&gt;">Only now, with no requests left, does <code>Shutdown</code> return. <code>nil</code> means it drained before the deadline; otherwise it would return <code>context.DeadlineExceeded</code>.</li>
+      <li data-lines="33-35,44" data-out="client: 200 done">The client got a complete <code>200 done</code>. Nothing was dropped.</li>
+      <li data-lines="46-47" data-out="new request after shutdown fails: true">A new request now fails: the listener is closed, so the connection is refused.</li>
+    </ol>
+  </div>
+<div class="output"><pre>main: shutdown begins
+handler: finished
+main: shutdown returned, err = &lt;nil&gt;
+client: 200 done
+new request after shutdown fails: true</pre></div>
+  <div class="callout senior"><div class="callout-title">The Kubernetes shutdown race</div><p>When a pod is deleted, Kubernetes sends <code>SIGTERM</code> <em>and</em> removes it from service endpoints at roughly the same time, but load balancers take a few seconds to notice. If you shut down instantly, those last few seconds of requests fail. Production services often sleep 5–10 seconds after flipping readiness and before calling <code>Shutdown</code> (or use a <code>preStop</code> hook). Make sure <code>terminationGracePeriodSeconds</code> (default 30s) is longer than that sleep plus your shutdown timeout.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Your service's database goes down for 20 seconds. Which design avoids making the outage worse?</div>
+    <div class="quiz-opts"><button>Liveness checks the database, so pods get restarted</button><button>Readiness checks the database; liveness just returns 200</button><button>Both probes check the database</button><button>Neither probe exists; let requests fail</button></div>
+    <div class="quiz-explain">If liveness depends on the database, every pod restarts at once, and when the DB comes back you have a cold-start stampede. Readiness failing just takes pods out of rotation temporarily, and they come back on their own when the dependency recovers.</div>
+  </div>
+
+  <h2>Automating builds: Makefile, Taskfile and CI</h2>
+  <h3>A Makefile everyone can use</h3>
+  <p>A Makefile is a shared list of the commands your project needs, so nobody has to remember the long <code>go build</code> invocation. <code>make</code> is installed almost everywhere. A self-documenting <code>help</code> target makes it friendly for new teammates.</p>
+<div class="code" data-file="Makefile"><pre><code class="language-bash"># ---- variables -------------------------------------------------------------
+APP      := hello
+PKG      := ./...
+VERSION  ?= $(shell git describe --tags --always --dirty 2&gt;/dev/null || echo dev)
+COMMIT   := $(shell git rev-parse --short HEAD 2&gt;/dev/null || echo none)
+DATE     := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS  := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+PLATFORMS := linux/amd64 linux/arm64 darwin/arm64 windows/amd64
+
+.DEFAULT_GOAL := help
+.PHONY: help fmt vet test race build cross clean check
+
+help: ## show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}'
+
+fmt: ## format code (fails in CI if anything changes)
+	@test -z "$$(gofmt -l .)" || (gofmt -l . &amp;&amp; exit 1)
+
+vet: ## run go vet
+	go vet $(PKG)
+
+test: ## run unit tests
+	go test $(PKG)
+
+race: ## run tests with the race detector
+	go test -race -count=1 $(PKG)
+
+check: fmt vet race ## everything CI runs
+
+build: ## build a release binary for this machine
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(APP) .
+
+cross: ## build for every platform in PLATFORMS
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; ext=$$( [ $$os = windows ] &amp;&amp; echo .exe ); \
+		echo "building $$os/$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o dist/$(APP)-$$os-$$arch$$ext . || exit 1; \
+	done
+
+clean: ## remove build output
+	rm -rf bin dist</code></pre></div>
+<div class="output" data-label="terminal"><pre>$ make help
+  help     show this help
+  fmt      format code (fails in CI if anything changes)
+  vet      run go vet
+  test     run unit tests
+  race     run tests with the race detector
+  check    everything CI runs
+  build    build a release binary for this machine
+  cross    build for every platform in PLATFORMS
+  clean    remove build output
+$ make check
+go vet ./...
+go test -race -count=1 ./...
+ok  	example.com/hello	1.507s
+$ make build
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.0 -X main.commit=b359c72 -X main.date=2026-10-16T18:08:53Z" -o bin/hello .
+$ ./bin/hello
+hello v1.5.0 (commit b359c72, built 2026-10-16T18:08:53Z)
+$ make cross
+building linux/amd64
+building linux/arm64
+building darwin/arm64
+building windows/amd64
+$ ls dist
+hello-darwin-arm64
+hello-linux-amd64
+hello-linux-arm64
+hello-windows-amd64.exe</pre></div>
+  <div class="callout warn"><p>Makefile recipes must be indented with a real <strong>tab</strong>, not spaces, or make fails with "missing separator". And <code>$</code> must be doubled (<code>$$</code>) to reach the shell, as in the <code>cross</code> loop.</p></div>
+
+  <h3>Or a Taskfile</h3>
+  <p><a href="https://taskfile.dev">Task</a> is a popular Go-written alternative with YAML syntax, no tab rules, and built-in "skip if sources unchanged" support:</p>
+<div class="code" data-file="Taskfile.yml"><pre><code class="language-yaml">version: "3"
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+
+tasks:
+  default:
+    cmds: [task --list]
+
+  test:
+    desc: Run tests with the race detector
+    cmds:
+      - go test -race -count=1 ./...
+
+  lint:
+    desc: Vet and lint
+    cmds:
+      - go vet ./...
+      - golangci-lint run
+
+  build:
+    desc: Build a release binary
+    sources: ["**/*.go", go.mod, go.sum]   # skip if nothing changed
+    generates: [bin/app]
+    env:
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/app ./cmd/api</code></pre></div>
+
+  <h3>Continuous integration with GitHub Actions</h3>
+  <p>CI runs your checks on every push and pull request, on a clean machine, so "works on my laptop" stops being a thing. A solid Go pipeline runs: formatting, <code>go mod tidy</code> check, vet, tests with the race detector, a vulnerability scan, lint, and builds for every target platform.</p>
+<div class="code" data-file=".github/workflows/ci.yml"><pre><code class="language-yaml">name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod     # one source of truth for the Go version
+          cache: true
+
+      - name: Check formatting and go.mod
+        run: |
+          test -z "$(gofmt -l .)" || (gofmt -l . &amp;&amp; exit 1)
+          go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race + coverage)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -trimpath -o bin/app ./cmd/api
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5
+
+  cross-build:
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -o /dev/null ./cmd/api</code></pre></div>
+  <ul>
+    <li><code>go-version-file: go.mod</code> means CI uses exactly the Go version your module declares. Upgrade Go in one place.</li>
+    <li><code>-count=1</code> disables test result caching so every CI run actually runs the tests.</li>
+    <li><code>permissions: contents: read</code> follows least privilege: the CI token can't push code.</li>
+    <li>The matrix job cross-builds to <code>/dev/null</code>, just proving every platform compiles.</li>
+  </ul>
+  <div class="callout senior"><p>Pin third-party actions to a full commit SHA (<code>uses: golangci/golangci-lint-action@&lt;sha&gt; # v8</code>) in security-sensitive repos; a tag can be moved by whoever controls the action. Dependabot or Renovate can keep those SHAs updated for you.</p></div>
+
+  <h3>Scanning for vulnerabilities with <code>govulncheck</code></h3>
+  <p><code>govulncheck</code> is the Go team's official vulnerability scanner. It checks your dependencies (and the standard library version you build with) against the Go vulnerability database. Its superpower: it does <strong>call-graph analysis</strong>, so it only reports a vulnerability if your code actually <em>calls</em> the affected function. That cuts the noise that makes most scanners useless.</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...                 # scan source (call-graph aware)
+govulncheck -mode=binary ./bin/app  # scan an already-built binary
+govulncheck -show verbose ./...   # also list vulns in modules you don't call</code></pre></div>
+  <p>When it finds something, it prints the vulnerability ID (like <code>GO-2025-1234</code>), the module and version that fixes it, and the exact call stack from your code to the vulnerable function. The usual fix is <code>go get module@fixed-version</code>, or upgrading Go itself for standard-library issues. A clean run exits 0; findings exit 3, which fails CI.</p>
+
+  <h3>Releasing with goreleaser</h3>
+  <p><a href="https://goreleaser.com">GoReleaser</a> turns a git tag into a full release: it cross-compiles every platform, stamps versions, creates archives and checksums, writes a changelog from commit messages, and publishes a GitHub release. Optionally it also builds Docker images, Homebrew formulas and Linux packages.</p>
+<div class="code" data-file=".goreleaser.yaml"><pre><code class="language-yaml">version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: api
+    main: ./cmd/api
+    binary: taskapi
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]</code></pre></div>
+<div class="code" data-file=".github/workflows/release.yml"><pre><code class="language-yaml">name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create the GitHub release
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # goreleaser needs full history for the changelog
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~&gt; v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}</code></pre></div>
+  <p>Your whole release process becomes: <code>git tag v1.5.0 &amp;&amp; git push --tags</code>. Run <code>goreleaser release --snapshot --clean</code> locally to test the config without publishing.</p>
+
+  <h2>Runtime tuning: GOMAXPROCS and GOMEMLIMIT</h2>
+  <p>Go's defaults are good, and you should rarely touch the runtime knobs. But two of them matter a lot in containers.</p>
+
+  <h3>GOMAXPROCS: how many threads run Go code</h3>
+  <p><code>GOMAXPROCS</code> is the number of OS threads that can execute Go code at the same time. By default it's the number of CPU cores. The problem: in a container limited to 2 CPUs on a 64-core machine, older Go versions saw 64 cores and set <code>GOMAXPROCS=64</code>. The Linux scheduler then throttled the container every 100 ms for using more than its quota, causing nasty latency spikes. The usual fix was importing <code>go.uber.org/automaxprocs</code>.</p>
+  <p><strong>Since Go 1.25, the runtime is container-aware</strong>: on Linux it reads the cgroup CPU limit and sets <code>GOMAXPROCS</code> to match when the limit is lower than the core count. It also re-checks periodically, so if the orchestrator changes the limit, Go adjusts. This only applies when the <code>go</code> line in <code>go.mod</code> is 1.25 or later, and it's switched off if you set <code>GOMAXPROCS</code> yourself. So for new code: delete <code>automaxprocs</code> and let the runtime handle it.</p>
+
+  <h3>GOMEMLIMIT: a soft memory ceiling</h3>
+  <p>The garbage collector normally decides when to run based on <code>GOGC</code> (default 100: collect when the heap has doubled since the last collection). It knows nothing about your container's memory limit. So a service with a 400 MB live heap might grow towards 800 MB before collecting, and if the container limit is 512 MB, the kernel's OOM killer ends it.</p>
+  <p><code>GOMEMLIMIT</code> (Go 1.19+) tells the GC: "try hard to stay under this much total memory". As usage approaches the limit, the GC runs more often. It's a <em>soft</em> limit: if your live data genuinely needs more, Go uses more rather than freezing in GC forever. Unlike GOMAXPROCS, it is <strong>not</strong> set automatically from the container limit.</p>
+  <div class="live" data-title="Reading the runtime knobs">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+	"runtime"
+	"runtime/debug"
+)
+
+func main() {
+	fmt.Println("NumCPU:     ", runtime.NumCPU())
+	fmt.Println("GOMAXPROCS: ", runtime.GOMAXPROCS(0)) // 0 = just read it
+
+	limit := debug.SetMemoryLimit(-1) // negative = just read it
+	if limit == math.MaxInt64 {
+		fmt.Println("GOMEMLIMIT:  none (math.MaxInt64)")
+	} else {
+		fmt.Printf("GOMEMLIMIT:  %d MiB\n", limit&gt;&gt;20)
+	}
+	gc := debug.SetGCPercent(-1) // read old value...
+	debug.SetGCPercent(gc)       // ...and restore it
+	fmt.Println("GOGC:       ", gc)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="NumCPU=8" data-out="$ go run ./tune\nNumCPU:      8"><code>runtime.NumCPU</code> reports the logical CPUs the process can use.</li>
+      <li data-lines="12" data-state="GOMAXPROCS=8" data-out="GOMAXPROCS:  8"><code>GOMAXPROCS(0)</code> reads the current value without changing it. By default it equals the CPU count (or the container's CPU limit on Linux, Go 1.25+).</li>
+      <li data-lines="14-16" data-state="limit=math.MaxInt64" data-out="GOMEMLIMIT:  none (math.MaxInt64)"><code>SetMemoryLimit(-1)</code> is a read. With no <code>GOMEMLIMIT</code> set, the limit is the max int64: effectively none.</li>
+      <li data-lines="20-22" data-state="gc=100" data-out="GOGC:        100">There is no getter for GOGC, so we set it to -1 to learn the old value, then put the old value straight back.</li>
+      <li data-lines="11-12" data-state="NumCPU=8; GOMAXPROCS=2" data-out="$ GOMAXPROCS=2 GOMEMLIMIT=512MiB GOGC=50 go run ./tune\nNumCPU:      8\nGOMAXPROCS:  2">Second run with environment variables. The CPU count is the same, but only 2 threads now run Go code at once.</li>
+      <li data-lines="14-18" data-state="limit=536870912" data-out="GOMEMLIMIT:  512 MiB">The limit is now 512 MiB in bytes; <code>limit&gt;&gt;20</code> converts bytes to MiB. The GC works harder as the heap nears this.</li>
+      <li data-lines="20-22" data-state="gc=50" data-out="GOGC:        50">GOGC=50 means a GC cycle starts when the heap grows 50% over the live heap: less memory, more CPU.</li>
+    </ol>
+  </div>
+<div class="output" data-label="terminal"><pre>$ go run ./tune
+NumCPU:      8
+GOMAXPROCS:  8
+GOMEMLIMIT:  none (math.MaxInt64)
+GOGC:        100
+$ GOMAXPROCS=2 GOMEMLIMIT=512MiB GOGC=50 go run ./tune
+NumCPU:      8
+GOMAXPROCS:  2
+GOMEMLIMIT:  512 MiB
+GOGC:        50</pre></div>
+
+  <table>
+    <thead><tr><th>Knob</th><th>Default</th><th>Typical production setting</th></tr></thead>
+    <tbody>
+      <tr><td><code>GOMAXPROCS</code></td><td>CPU cores, or cgroup CPU limit (Go 1.25+, Linux)</td><td>Leave alone on 1.25+</td></tr>
+      <tr><td><code>GOMEMLIMIT</code></td><td>none</td><td>~80–90% of the container memory limit, e.g. <code>GOMEMLIMIT=900MiB</code> for a 1 GiB container</td></tr>
+      <tr><td><code>GOGC</code></td><td>100</td><td>Usually leave alone; raise (200) to trade memory for less CPU</td></tr>
+      <tr><td><code>GODEBUG</code></td><td>per go.mod version</td><td>Only to temporarily restore old behaviour after an upgrade</td></tr>
+    </tbody>
+  </table>
+  <p>In Kubernetes, you can wire GOMEMLIMIT to the container's real limit so they never drift apart:</p>
+  <div class="code" data-file="deployment.yaml (excerpt)"><pre><code class="language-yaml">containers:
+  - name: api
+    image: ghcr.io/acme/taskapi:v1.5.0
+    resources:
+      limits:
+        memory: 1Gi
+        cpu: "2"            # Go 1.25+ sets GOMAXPROCS=2 automatically
+    env:
+      - name: GOMEMLIMIT
+        valueFrom:
+          resourceFieldRef:
+            resource: limits.memory
+            divisor: "1"    # bytes; or compute 90% in your entrypoint
+    readinessProbe:
+      httpGet: { path: /readyz, port: 8080 }
+    livenessProbe:
+      httpGet: { path: /healthz, port: 8080 }</code></pre></div>
+  <div class="callout warn"><p>Setting <code>GOMEMLIMIT</code> to exactly the container limit leaves no room for memory Go doesn't manage (cgo, thread stacks, the binary itself). Leave 10–20% headroom. And never set <code>GOGC=off</code> with a limit unless you've load-tested it: if live memory nears the limit, the GC can end up running constantly ("death spiral").</p></div>
+
+  <h2>The production readiness checklist</h2>
+  <p>Before a Go service takes real traffic, walk through this list. Each item is something that has caused a real outage somewhere.</p>
+  <table>
+    <thead><tr><th>Area</th><th>Check</th></tr></thead>
+    <tbody>
+      <tr><td>Build</td><td><code>CGO_ENABLED=0</code>, <code>-trimpath</code>, version stamped, reproducible in CI</td></tr>
+      <tr><td>Image</td><td>Multi-stage, distroless/scratch, non-root, <code>.dockerignore</code></td></tr>
+      <tr><td>Config</td><td>All from env, validated at startup, secrets never logged</td></tr>
+      <tr><td>HTTP server</td><td><code>ReadHeaderTimeout</code>, <code>ReadTimeout</code>, <code>WriteTimeout</code>, <code>IdleTimeout</code> set; body size limits</td></tr>
+      <tr><td>HTTP clients</td><td>Timeouts on every client; bodies closed; contexts passed</td></tr>
+      <tr><td>Health</td><td><code>/healthz</code> trivial, <code>/readyz</code> meaningful, both excluded from noisy logs if needed</td></tr>
+      <tr><td>Shutdown</td><td>SIGTERM handled, readiness flipped, <code>Shutdown</code> with deadline, background workers stopped</td></tr>
+      <tr><td>Logs</td><td>JSON to stdout, request IDs, version on every line</td></tr>
+      <tr><td>Metrics</td><td>Rate, errors, duration per route (the "RED" method); low-cardinality labels</td></tr>
+      <tr><td>Profiling</td><td><code>net/http/pprof</code> on a separate, internal-only port</td></tr>
+      <tr><td>CI</td><td>fmt, vet, race tests, lint, govulncheck, cross-build</td></tr>
+      <tr><td>Runtime</td><td>GOMEMLIMIT set; Go ≥ 1.25 for container-aware GOMAXPROCS</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><p>Never expose <code>/debug/pprof</code> or <code>/debug/vars</code> on your public port: they leak internals (command line, memory stats) and pprof can be used to burn your CPU. Run a second <code>http.Server</code> on an internal port like <code>:6060</code> that only your network or <code>kubectl port-forward</code> can reach.</p></div>
+
+  <details class="exercise">
+    <summary>Exercise 1: Add a /version endpoint that works with or without -ldflags</summary>
+    <p>Add <code>GET /version</code> to the ops server. It should return JSON with <code>version</code>, <code>commit</code> and <code>go</code>. If <code>version</code> is still <code>"dev"</code> (no <code>-X</code> flag), fall back to the module version and <code>vcs.revision</code> from <code>debug.ReadBuildInfo</code>.</p>
+    <div class="solution-label">Solution</div>
+  <div class="live" data-title="Where does the version come from?">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
+	"runtime/debug"
+)
+
+var (
+	version = "dev"
+	commit  = "none"
+)
+
+type versionInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Go      string `json:"go"`
+}
+
+// buildVersion prefers -ldflags values, then falls back to embedded build info.
+func buildVersion() versionInfo {
+	v := versionInfo{Version: version, Commit: commit, Go: runtime.Version()}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return v
+	}
+	if v.Version == "dev" &amp;&amp; info.Main.Version != "" &amp;&amp; info.Main.Version != "(devel)" {
+		v.Version = info.Main.Version
+	}
+	if v.Commit == "none" {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" &amp;&amp; len(s.Value) &gt;= 7 {
+				v.Commit = s.Value[:7]
+			}
+		}
+	}
+	return v
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(buildVersion())
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /version", versionHandler)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/version", nil))
+	fmt.Print(rec.Code, " ", rec.Body.String())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-15" data-state="version=&quot;dev&quot;; commit=&quot;none&quot;">Package-level string variables with placeholder values. <code>-ldflags -X</code> can overwrite them at link time.</li>
+      <li data-lines="49-53" data-out="$ go build -o v ./cmd/version\n$ ./v">First build: no <code>-X</code> flags. We serve one fake request with <code>httptest</code>, so no network is needed.</li>
+      <li data-lines="53,43-45,24-25" data-state="v={Version:dev Commit:none Go:go1.27.1}">The mux routes <code>GET /version</code> to <code>versionHandler</code>, which calls <code>buildVersion</code>. It starts from the ldflags values, still the defaults.</li>
+      <li data-lines="26-31" data-state="v={Version:v1.5.0 Commit:none Go:go1.27.1}"><code>debug.ReadBuildInfo</code> succeeds. The version is still "dev", and Go 1.24+ stamped the module version from the git tag, so we take <code>v1.5.0</code>.</li>
+      <li data-lines="33-37" data-state="v={Version:v1.5.0 Commit:e5bc484 Go:go1.27.1}">The commit is still "none", so we look for <code>vcs.revision</code> in the build settings and keep its first 7 characters.</li>
+      <li data-lines="54" data-out="200 {&quot;version&quot;:&quot;v1.5.0&quot;,&quot;commit&quot;:&quot;e5bc484&quot;,&quot;go&quot;:&quot;go1.27.1&quot;}">The handler encodes the struct as JSON. Zero build flags, and we still know exactly what is running.</li>
+      <li data-lines="12-13" data-state="version=&quot;v9.9.9-custom&quot;; commit=&quot;none&quot;" data-out="$ go build -ldflags &quot;-X main.version=v9.9.9-custom&quot; -o v ./cmd/version\n$ ./v">Second build sets <code>main.version</code> at link time.</li>
+      <li data-lines="30" data-state="v={Version:v9.9.9-custom Commit:none}">Now <code>v.Version</code> is not "dev", so the build-info fallback is skipped: the explicit value wins.</li>
+      <li data-lines="33-37,54" data-state="v={Version:v9.9.9-custom Commit:e5bc484}" data-out="200 {&quot;version&quot;:&quot;v9.9.9-custom&quot;,&quot;commit&quot;:&quot;e5bc484&quot;,&quot;go&quot;:&quot;go1.27.1&quot;}">The commit still comes from VCS stamping because nobody overrode it.</li>
+    </ol>
+  </div>
+<div class="output" data-label="terminal (inside the module tagged v1.5.0)"><pre>$ go build -o v ./cmd/version
+$ ./v
+200 {"version":"v1.5.0","commit":"e5bc484","go":"go1.27.1"}
+$ go build -ldflags "-X main.version=v9.9.9-custom" -o v ./cmd/version
+$ ./v
+200 {"version":"v9.9.9-custom","commit":"e5bc484","go":"go1.27.1"}</pre></div>
+    <p>Built inside the tagged git repo without any <code>-X</code> flags, the binary still knows it's <code>v1.5.0</code> and which commit it came from, thanks to Go 1.24+ VCS stamping. With <code>-X</code>, the explicit value wins.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: Make shutdown wait for a background worker</summary>
+    <p>The ops server has no background work. Add a goroutine that "flushes metrics" every second, and make sure that on SIGTERM it finishes its current flush and exits <em>before</em> the process does. Use the existing <code>ctx</code> and a <code>sync.WaitGroup</code>.</p>
+    <div class="solution-label">Solution</div>
+  <div class="live" data-title="SIGTERM with a background worker">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+)
+
+func flusher(ctx context.Context, log *slog.Logger) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case &lt;-ctx.Done():
+			log.Info("flusher: final flush, exiting")
+			return
+		case &lt;-t.C:
+			log.Info("flusher: flushed metrics")
+		}
+	}
+}
+
+func main() {
+	log := slog.New(slog.NewTextHandler(os.Stdout, &amp;slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var wg sync.WaitGroup
+	wg.Go(func() { flusher(ctx, log) })
+
+	srv := &amp;http.Server{Addr: "127.0.0.1:18081", ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("listen", "err", err)
+			stop()
+		}
+	}()
+	log.Info("running")
+
+	&lt;-ctx.Done()
+	log.Info("signal received, shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown", "err", err)
+	}
+	wg.Wait() // background goroutines finish before main returns
+	log.Info("bye")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="30-37">A text logger whose <code>ReplaceAttr</code> drops the <code>time</code> key, so the output is stable.</li>
+      <li data-lines="38-39" data-state="ctx=live"><code>signal.NotifyContext</code> returns a context that is cancelled when SIGINT or SIGTERM arrives. <code>defer stop()</code> unregisters the handler on the way out.</li>
+      <li data-lines="41-42,15-18" data-state="ctx=live; wg=1 goroutine"><code>wg.Go</code> (Go 1.25+) does <code>Add(1)</code>, starts <code>flusher</code> in a goroutine and calls <code>Done</code> when it returns.</li>
+      <li data-lines="44-51" data-state="ctx=live; goroutines=main, flusher, server" data-out="level=INFO msg=running">The HTTP server runs in its own goroutine. <code>ErrServerClosed</code> is the normal result of <code>Shutdown</code>, so it is not logged as an error.</li>
+      <li data-lines="53,23-24" data-state="ctx=live; tick=1" data-out="level=INFO msg=&quot;flusher: flushed metrics&quot;">main blocks on <code>&lt;-ctx.Done()</code>. Meanwhile the ticker fires after one second and the flusher does its work.</li>
+      <li data-lines="23-24" data-state="ctx=live; tick=2" data-out="level=INFO msg=&quot;flusher: flushed metrics&quot;">A second tick. Then we send SIGTERM (what Kubernetes does on a rolling update).</li>
+      <li data-lines="53-54" data-state="ctx=cancelled" data-out="level=INFO msg=&quot;signal received, shutting down&quot;">The signal cancels <code>ctx</code>, so main wakes up and starts shutting down.</li>
+      <li data-lines="55-57" data-state="ctx=cancelled; shutdownCtx=5s deadline"><code>srv.Shutdown</code> stops accepting new connections and waits for in-flight requests, but never longer than 5 seconds.</li>
+      <li data-lines="20-22" data-state="ctx=cancelled" data-out="level=INFO msg=&quot;flusher: final flush, exiting&quot;">The flusher's <code>select</code> sees <code>ctx.Done()</code> too, does a final flush and returns. That calls <code>wg.Done</code>.</li>
+      <li data-lines="60-61" data-state="wg=0 goroutines" data-out="level=INFO msg=bye"><code>wg.Wait()</code> makes sure the flusher finished <em>before</em> main returns. Without it, the process could exit mid-flush and lose data.</li>
+    </ol>
+  </div>
+<div class="output" data-label="terminal (SIGTERM sent after ~2.5s)"><pre>level=INFO msg=running
+level=INFO msg="flusher: flushed metrics"
+level=INFO msg="flusher: flushed metrics"
+level=INFO msg="signal received, shutting down"
+level=INFO msg="flusher: final flush, exiting"
+level=INFO msg=bye
+exit code 0</pre></div>
+    <p>The key is the ordering: cancel the context (the signal does that), let the HTTP server drain, then <code>wg.Wait()</code> for background goroutines before returning from <code>main</code>. Otherwise <code>main</code> returns and the runtime kills the worker mid-flush.</p>
+  </details>
+
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">You build with <code>go build -ldflags "-X main.Version=1.2.0"</code>, but the program still prints "dev". Your code has <code>var version = "dev"</code> in package main. Why?</div>
+    <div class="quiz-opts"><button>-X only works with -trimpath</button><button>-X needs the full module path, like example.com/app.version</button><button>You must also pass -s -w</button><button>The name is case-sensitive: Version ≠ version, and -X silently ignores unknown names</button></div>
+    <div class="quiz-explain">The flag says <code>main.Version</code> but the variable is <code>version</code>. The linker can't find it and silently does nothing. For package main, <code>main.version</code> is the right path.</div>
+  </div>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Release builds: <code>CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=..."</code>. Static, smaller, reproducible, versioned.</li>
+      <li>Go embeds module, dependency and VCS info in every binary. Read it with <code>debug.ReadBuildInfo</code> or <code>go version -m</code>.</li>
+      <li>Cross-compiling is just <code>GOOS</code>/<code>GOARCH</code>. Combine it with <code>$BUILDPLATFORM</code> in Docker for fast multi-arch images.</li>
+      <li>Ship on distroless or scratch, as non-root, via a multi-stage build with cached module downloads.</li>
+      <li>Config comes from env (12-factor), flags can override, and everything is validated at startup into one typed struct.</li>
+      <li><code>slog</code> JSON logs with request IDs, RED metrics per route pattern, and OpenTelemetry traces that ride on <code>context</code>.</li>
+      <li>Liveness is trivial; readiness is meaningful. On SIGTERM: fail readiness, drain with <code>Shutdown</code>, stop workers, exit 0.</li>
+      <li>CI runs fmt, tidy, vet, race tests, lint, govulncheck and cross-builds. goreleaser turns tags into releases.</li>
+      <li>Go 1.25+ sets GOMAXPROCS from the container's CPU limit; set GOMEMLIMIT yourself to about 90% of memory.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

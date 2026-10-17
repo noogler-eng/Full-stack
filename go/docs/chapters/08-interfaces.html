@@ -1,0 +1,1520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 08 · Interfaces — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="08">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part III · Chapter 08</div>
+  <h1>Interfaces</h1>
+  <p class="lead">Interfaces are how Go says "I don't care <em>what</em> you are, only what you can <em>do</em>." They let your checkout code work with Razorpay today, Stripe tomorrow and a fake gateway in tests, without changing a line. They're also the most elegant and most misunderstood part of the language.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What an interface is, and why Go's <strong>implicit</strong> satisfaction is a big deal</li>
+      <li>A real payment-gateway design: one <code>Payer</code> interface, many implementations</li>
+      <li>What an interface value looks like in memory, and the famous "nil interface vs nil pointer" trap</li>
+      <li><code>any</code>, type assertions (comma-ok), and type switches</li>
+      <li>The standard-library interfaces you'll use daily: <code>fmt.Stringer</code>, <code>error</code>, <code>io.Reader</code>/<code>io.Writer</code>, <code>sort.Interface</code></li>
+      <li>Design rules seniors live by: small interfaces, defined at the consumer, "accept interfaces, return structs"</li>
+      <li>Compile-time assertions, optional-capability checks, decorators, mocking for tests, and dependency injection</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The problem interfaces solve</h2>
+  <p>Say your shop charges customers through Razorpay. The simplest code calls Razorpay directly:</p>
+  <div class="code" data-file="tightly coupled"><pre><code class="language-go">func Checkout(r Razorpay, amount float64) error {
+	return r.Pay(amount)
+}</code></pre></div>
+  <p>Now the business wants Stripe for international customers. And QA wants to test checkout without moving real money. With the code above, you'd copy <code>Checkout</code> three times, once per gateway. Every bug fix, three times.</p>
+  <p>What <code>Checkout</code> really needs isn't "a Razorpay". It needs "<em>something that can Pay</em>". An <strong>interface</strong> lets you write exactly that down:</p>
+  <div class="code" data-file="the contract"><pre><code class="language-go">type Payer interface {
+	Pay(amount float64) error
+}</code></pre></div>
+  <p>An interface type is a <strong>list of method signatures</strong>. Any type that has all those methods (same names, same parameter and result types) <em>is</em> a <code>Payer</code>. No registration, no <code>implements</code> keyword.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>An interface is a <strong>job description</strong>: "must be able to Pay(amount)". Razorpay, Stripe and a test fake are <strong>candidates</strong>. Go hires anyone whose CV (method set) covers every line of the job description. The candidates never have to know the job exists.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Implicit satisfaction: a payment-gateway example</h2>
+  <p>Here's the full design, the same idea as the <code>paymenter</code> interface in your own learning code, cleaned up into a runnable program:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Payer is anything that can take money. That's the whole contract.
+type Payer interface {
+	Pay(amount float64) error
+}
+
+// --- three unrelated types, none of which mention Payer ---
+
+type Razorpay struct{ KeyID string }
+
+func (r Razorpay) Pay(amount float64) error {
+	fmt.Printf("razorpay[%s]: charged ₹%.2f\n", r.KeyID, amount)
+	return nil
+}
+
+type Stripe struct{ Account string }
+
+func (s Stripe) Pay(amount float64) error {
+	fmt.Printf("stripe[%s]: charged ₹%.2f\n", s.Account, amount)
+	return nil
+}
+
+// FakePayer is for tests and local dev: it records calls and can fail on demand.
+type FakePayer struct {
+	Fail  bool
+	Calls []float64
+}
+
+func (f *FakePayer) Pay(amount float64) error {
+	f.Calls = append(f.Calls, amount)
+	if f.Fail {
+		return errors.New("fake: card declined")
+	}
+	return nil
+}
+
+// Checkout depends on the BEHAVIOUR (Payer), not on any concrete gateway.
+type Checkout struct {
+	gateway Payer
+}
+
+func (c Checkout) Process(orderID int, amount float64) {
+	if err := c.gateway.Pay(amount); err != nil {
+		fmt.Printf("order %d failed: %v\n", orderID, err)
+		return
+	}
+	fmt.Printf("order %d paid\n", orderID)
+}
+
+func main() {
+	fake := &amp;FakePayer{Fail: true}
+
+	gateways := []Payer{
+		Razorpay{KeyID: "rzp_test"},
+		Stripe{Account: "acct_42"},
+		fake,
+	}
+	for i, g := range gateways {
+		Checkout{gateway: g}.Process(100+i, 499)
+	}
+	fmt.Println("fake saw calls:", fake.Calls)
+}</code></pre></div>
+  <div class="output"><pre>razorpay[rzp_test]: charged ₹499.00
+order 100 paid
+stripe[acct_42]: charged ₹499.00
+order 101 paid
+order 102 failed: fake: card declined
+fake saw calls: [499]</pre></div>
+
+  <p>What just happened:</p>
+  <ul>
+    <li><code>Razorpay</code>, <code>Stripe</code> and <code>*FakePayer</code> never mention <code>Payer</code>. They each just have a <code>Pay(float64) error</code> method, so the compiler accepts them anywhere a <code>Payer</code> is expected.</li>
+    <li><code>Checkout</code> stores a <code>Payer</code> and calls <code>c.gateway.Pay(...)</code>. At run time Go looks up which concrete <code>Pay</code> to call. This is called <strong>dynamic dispatch</strong>.</li>
+    <li><code>FakePayer</code> uses a <strong>pointer receiver</strong> (it records calls), so it's <code>&amp;FakePayer{}</code> (a <code>*FakePayer</code>) that satisfies <code>Payer</code>. Recall the method-set rule from Chapter 07.</li>
+  </ul>
+
+  <div class="callout warn"><div class="callout-title">A bug worth spotting in real code</div><p>A common first attempt looks like this: <code>type payment struct{ gateway paymenter }</code> with <code>func (p payment) makePayment(amt float32) { g := fakePayment{}; g.pay(amt) }</code>. It <em>declares</em> an interface field but then ignores it and hard-codes a gateway. The whole point is to call <strong><code>p.gateway.pay(amt)</code></strong> so whoever builds the <code>payment</code> chooses the gateway. If you have this in your own learning code, it's a one-line fix!</p></div>
+
+  <div class="live" data-title="Dynamic dispatch through an interface">
+    <pre><code class="language-go">type Payer interface {
+	Pay(amount float64) error
+}
+
+func checkout(p Payer, amount float64) {
+	err := p.Pay(amount)
+	fmt.Println("result:", err)
+}
+
+func main() {
+	checkout(Razorpay{KeyID: "rzp"}, 499)
+	checkout(&amp;FakePayer{Fail: true}, 99)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="arg=Razorpay{rzp}">We pass a <code>Razorpay</code> value where a <code>Payer</code> is expected. The compiler checks Razorpay has <code>Pay(float64) error</code>. It does.</li>
+      <li data-lines="5" data-state="p=(type: Razorpay, value: {rzp})">Inside <code>checkout</code>, <code>p</code> is an <strong>interface value</strong>: it remembers both the concrete <em>type</em> (Razorpay) and the <em>value</em>.</li>
+      <li data-lines="6" data-state="p=(Razorpay, {rzp}); calls Razorpay.Pay" data-out="razorpay: charged ₹499.00"><code>p.Pay</code> looks at the stored type, finds <code>Razorpay.Pay</code>, and calls it. Razorpay prints its message.</li>
+      <li data-lines="7" data-state="err=nil" data-out="result: &lt;nil&gt;">Payment succeeded, so <code>err</code> is nil.</li>
+      <li data-lines="12,5" data-state="p=(type: *FakePayer, value: 0xc0…)">Second call: same function, totally different concrete type. Now <code>p</code> holds a <code>*FakePayer</code>.</li>
+      <li data-lines="6" data-state="p=(*FakePayer, 0xc0…); calls (*FakePayer).Pay">The same line of code now dispatches to <code>(*FakePayer).Pay</code>, which returns an error because <code>Fail</code> is true.</li>
+      <li data-lines="7" data-state="err=fake: card declined" data-out="result: fake: card declined"><code>checkout</code> never knew which gateway it had. That's the power: one function, any number of implementations.</li>
+    </ol>
+  </div>
+
+  <h3>It works across packages, too</h3>
+  <p>Because satisfaction is implicit, a type written years ago in another package can satisfy an interface you define today. The standard library's <code>fmt.Stringer</code> is the classic example:</p>
+
+  <div class="live" data-title="Implicit satisfaction of fmt.Stringer">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Status string
+
+// String makes Status satisfy fmt.Stringer:
+//
+//	type Stringer interface { String() string }
+//
+// We never wrote "implements Stringer". Having the method is enough.
+func (s Status) String() string {
+	switch s {
+	case "pending":
+		return "⏳ Pending"
+	case "paid":
+		return "✅ Paid"
+	}
+	return "❓ " + string(s)
+}
+
+func main() {
+	var s fmt.Stringer = Status("paid")
+	fmt.Println(s.String())
+
+	// fmt checks for Stringer and calls it automatically.
+	fmt.Println(Status("pending"), Status("lost"))
+
+	// Types from other packages satisfy your interfaces too.
+	s = 90 * time.Minute // time.Duration has a String method
+	fmt.Println(s)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="15">No code runs yet. <code>Status</code> gets a <code>String() string</code> method, which is exactly the method set of <code>fmt.Stringer</code>. No <code>implements</code> keyword anywhere.</li>
+      <li data-lines="26" data-state="s=(Status, &quot;paid&quot;)">Assigning a <code>Status</code> to a <code>fmt.Stringer</code> variable compiles because the method set matches. The interface stores the dynamic type <code>Status</code> and the value <code>"paid"</code>.</li>
+      <li data-lines="27,15-20" data-state="s=(Status, &quot;paid&quot;)">Calling <code>s.String()</code> dispatches to <code>Status.String</code>. The switch hits <code>case "paid"</code>.</li>
+      <li data-lines="27" data-state="s=(Status, &quot;paid&quot;)" data-out="✅ Paid">The returned string is printed.</li>
+      <li data-lines="30,16-18" data-state="s=(Status, &quot;paid&quot;)"><code>fmt.Println</code> checks each argument: "do you implement Stringer?" <code>Status("pending")</code> does, so fmt calls <code>String()</code> for you and gets <code>⏳ Pending</code>.</li>
+      <li data-lines="30,22" data-state="s=(Status, &quot;paid&quot;)" data-out="⏳ Pending ❓ lost"><code>"lost"</code> matches no case, so it falls through to the <code>❓</code> fallback.</li>
+      <li data-lines="33" data-state="s=(time.Duration, 1h30m0s)">The same interface variable now holds a <code>time.Duration</code>. A type from another package satisfies <em>our</em> use of <code>Stringer</code> with zero coordination.</li>
+      <li data-lines="34" data-state="s=(time.Duration, 1h30m0s)" data-out="1h30m0s">fmt calls <code>Duration.String()</code>, which renders 90 minutes as <code>1h30m0s</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>✅ Paid
+⏳ Pending ❓ lost
+1h30m0s</pre></div>
+
+  <p><code>time.Duration</code>'s authors had never heard of your variable <code>s</code>, yet it fits. In Java you'd need the class to declare <code>implements Stringer</code> up front; in Go, the <em>consumer</em> decides what it needs and any matching type plugs in. This one design choice shapes everything else in this chapter.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Implicit interfaces mean you can <strong>introduce an abstraction later</strong>, after you have two concrete implementations, without editing them. So don't create an interface on day one "just in case". Start with a concrete type; extract an interface when a second implementation (or a test fake) actually shows up. "Don't design with interfaces, discover them." (Rob Pike)</p></div>
+
+  <!-- ============================================================ -->
+  <h2>What an interface value really is</h2>
+  <p>A variable of interface type is a small two-word box. Conceptually it's a pair:</p>
+  <ul>
+    <li><strong>type</strong>: which concrete type is stored (plus, internally, a table of that type's methods for this interface, called the <em>itab</em>);</li>
+    <li><strong>value</strong>: a pointer to the concrete data.</li>
+  </ul>
+  <p>Calling a method looks up the function in the itab and calls it with the data pointer. An interface value is <code>nil</code> only when <strong>both</strong> words are empty.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="660" height="300" rx="10" fill="#262624"/>
+      <defs><marker id="arr8" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <!-- row 1 -->
+      <text x="20" y="34" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">var p Payer = &amp;FakePayer{Fail: true}</text>
+      <rect x="20" y="48" width="110" height="40" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="75" y="73" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">tab</text>
+      <rect x="130" y="48" width="110" height="40" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="185" y="73" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">data</text>
+      <rect x="300" y="40" width="200" height="56" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="312" y="60" fill="#7fa6d9" font-size="11" font-family="JetBrains Mono, monospace">itab: type *FakePayer</text>
+      <text x="312" y="80" fill="#a8a49a" font-size="11" font-family="JetBrains Mono, monospace">fun[0] → (*FakePayer).Pay</text>
+      <rect x="520" y="40" width="120" height="56" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="532" y="72" fill="#8fbf7f" font-size="11" font-family="JetBrains Mono, monospace">{Fail: true}</text>
+      <path d="M100 48 C 140 20, 250 20, 298 52" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr8)"/>
+      <path d="M210 88 C 300 125, 480 125, 560 98" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr8)"/>
+      <!-- row 2 -->
+      <text x="20" y="160" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">var p Payer            // nil interface</text>
+      <rect x="20" y="172" width="110" height="36" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="75" y="195" fill="#a8a49a" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">nil</text>
+      <rect x="130" y="172" width="110" height="36" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="185" y="195" fill="#a8a49a" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">nil</text>
+      <text x="270" y="195" fill="#8fbf7f" font-size="12">p == nil → true</text>
+      <!-- row 3 -->
+      <text x="20" y="244" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">var e error = (*PaymentError)(nil)</text>
+      <rect x="20" y="256" width="110" height="36" fill="#2e2d2a" stroke="#e0b45c"/>
+      <text x="75" y="279" fill="#e0b45c" font-size="11" text-anchor="middle" font-family="JetBrains Mono, monospace">*PaymentError</text>
+      <rect x="130" y="256" width="110" height="36" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="185" y="279" fill="#a8a49a" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">nil</text>
+      <text x="270" y="279" fill="#d97757" font-size="12">e == nil → false! (the type word is set)</text>
+    </svg>
+    <figcaption>An interface value is a (type, data) pair. It's nil only if <em>both</em> are nil. A nil pointer stored in an interface still has a type.</figcaption>
+  </figure>
+
+  <div class="live" data-title="Inside an interface value">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Payer interface{ Pay(float64) error }
+
+type Razorpay struct{ KeyID string }
+
+func (Razorpay) Pay(float64) error { return nil }
+
+type Stripe struct{}
+
+func (*Stripe) Pay(float64) error { return nil }
+
+func describe(p Payer) {
+	fmt.Printf("dynamic type=%-14T value=%v nil? %v\n", p, p, p == nil)
+}
+
+func main() {
+	var p Payer // zero value: no type, no value
+	describe(p)
+
+	p = Razorpay{KeyID: "rzp_1"}
+	describe(p)
+
+	p = &amp;Stripe{}
+	describe(p)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20" data-state="p=(type=nil, value=nil)">An interface value is a pair: <strong>(dynamic type, dynamic value)</strong>. A freshly declared <code>Payer</code> has neither, so it is <code>nil</code>.</li>
+      <li data-lines="21,16" data-state="p=(type=nil, value=nil)" data-out="dynamic type=&lt;nil&gt;          value=&lt;nil&gt; nil? true"><code>%T</code> of a nil interface prints <code>&lt;nil&gt;</code>. Only when <em>both</em> halves are empty is <code>p == nil</code> true.</li>
+      <li data-lines="23" data-state="p=(type=main.Razorpay, value={rzp_1})"><code>Razorpay</code> has a value-receiver <code>Pay</code>, so a plain <code>Razorpay</code> value satisfies <code>Payer</code>. The interface now stores a copy of the struct.</li>
+      <li data-lines="24,16" data-state="p=(type=main.Razorpay, value={rzp_1})" data-out="dynamic type=main.Razorpay  value={rzp_1} nil? false"><code>%-14T</code> pads the type name so the columns line up.</li>
+      <li data-lines="26" data-state="p=(type=*main.Stripe, value=&amp;{})"><code>Stripe.Pay</code> has a <strong>pointer</strong> receiver, so only <code>*Stripe</code> satisfies <code>Payer</code>. Writing <code>p = Stripe{}</code> would not compile.</li>
+      <li data-lines="27,16" data-state="p=(type=*main.Stripe, value=&amp;{})" data-out="dynamic type=*main.Stripe   value=&amp;{} nil? false">The dynamic type is now <code>*main.Stripe</code> and fmt prints the pointer as <code>&amp;{}</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>dynamic type=&lt;nil&gt;          value=&lt;nil&gt; nil? true
+dynamic type=main.Razorpay  value={rzp_1} nil? false
+dynamic type=*main.Stripe   value=&amp;{} nil? false</pre></div>
+
+  <p><code>%T</code> prints the <em>dynamic type</em>: the concrete type currently inside the box. The variable's <em>static type</em> (<code>Payer</code>) never changes; the dynamic type changes every time you assign something new.</p>
+
+  <!-- ============================================================ -->
+  <h2>The nil-interface trap</h2>
+  <p>This is the most famous Go gotcha, and it follows directly from the diagram. If you put a <em>nil pointer</em> into an interface, the interface is <strong>not nil</strong>, because its type word is filled in.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type PaymentError struct{ Code string }
+
+func (e *PaymentError) Error() string { return "payment failed: " + e.Code }
+
+// BUG: returns a typed nil pointer wrapped in an error interface.
+func chargeBuggy(amount float64) error {
+	var perr *PaymentError // nil pointer
+	if amount &lt;= 0 {
+		perr = &amp;PaymentError{Code: "invalid_amount"}
+	}
+	return perr // interface = (type=*PaymentError, value=nil) -&gt; NOT nil!
+}
+
+// FIX: return a literal nil on the success path.
+func chargeFixed(amount float64) error {
+	if amount &lt;= 0 {
+		return &amp;PaymentError{Code: "invalid_amount"}
+	}
+	return nil
+}
+
+func main() {
+	err := chargeBuggy(100)
+	fmt.Printf("buggy: err == nil? %v  (type %T, value %v)\n", err == nil, err, err)
+
+	err = chargeFixed(100)
+	fmt.Printf("fixed: err == nil? %v  (type %T)\n", err == nil, err)
+}</code></pre></div>
+  <div class="output"><pre>buggy: err == nil? false  (type *main.PaymentError, value &lt;nil&gt;)
+fixed: err == nil? true  (type &lt;nil&gt;)</pre></div>
+
+  <div class="live" data-title="How a nil pointer becomes a non-nil error">
+    <pre><code class="language-go">func chargeBuggy(amount float64) error {
+	var perr *PaymentError
+	if amount &lt;= 0 {
+		perr = &amp;PaymentError{Code: "invalid_amount"}
+	}
+	return perr
+}
+
+func main() {
+	err := chargeBuggy(100)
+	if err != nil {
+		fmt.Println("failed:", err == nil, err)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10,1" data-state="amount=100">We call <code>chargeBuggy(100)</code>. 100 is a valid amount, so we expect "no error".</li>
+      <li data-lines="2" data-state="perr=(*PaymentError)(nil)"><code>perr</code> is a <em>pointer</em> variable. Its zero value is a nil pointer, but its <strong>type</strong> is <code>*PaymentError</code>.</li>
+      <li data-lines="3-5" data-state="perr=(*PaymentError)(nil)">The amount is positive, so the <code>if</code> body is skipped. <code>perr</code> stays a nil pointer.</li>
+      <li data-lines="6" data-state="returned error=(type: *PaymentError, value: nil)">Here's the moment: returning <code>perr</code> as an <code>error</code> wraps it in an interface. The box gets type = <code>*PaymentError</code>, value = nil.</li>
+      <li data-lines="10-11" data-state="err=(*PaymentError, nil); err != nil → true"><code>err != nil</code> asks "is the <em>interface</em> empty?" No: the type word is set. So the check is <strong>true</strong> and we go into the failure branch.</li>
+      <li data-lines="12" data-state="err=(*PaymentError, nil)" data-out="failed: false &lt;nil&gt;">We print "failed" for a payment that succeeded, and the error even prints as <code>&lt;nil&gt;</code>. In production this shows up as mysterious "error: &lt;nil&gt;" log lines.</li>
+    </ol>
+  </div>
+
+  <div class="callout danger"><div class="callout-title">Rule</div><p><strong>Never return a concrete pointer type through an interface on the "no error" path.</strong> Declare the function to return <code>error</code>, and write <code>return nil</code> literally when there's no error. The same applies to any interface: if a function returns <code>Payer</code>, return <code>nil</code>, not <code>(*Stripe)(nil)</code>.</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q"><code>var s *Stripe; var p Payer = s</code>. What does <code>fmt.Println(s == nil, p == nil)</code> print?</div>
+    <div class="quiz-opts">
+      <button><code>true true</code></button>
+      <button><code>false false</code></button>
+      <button><code>true false</code></button>
+      <button><code>false true</code></button>
+    </div>
+    <div class="quiz-explain"><code>s</code> is a nil pointer, so <code>s == nil</code> is true. <code>p</code> holds (type <code>*Stripe</code>, value nil): the type word is set, so <code>p == nil</code> is false.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The empty interface, type assertions and type switches</h2>
+  <h3><code>any</code>: the interface with no methods</h3>
+  <p>An interface with zero methods, <code>interface{}</code>, is satisfied by <em>every</em> type, because every type has "at least zero methods". Since Go 1.18 it has a friendlier alias: <strong><code>any</code></strong>. You've already used it: <code>fmt.Println(a ...any)</code> accepts anything.</p>
+
+  <div class="live" data-title="any holds anything, one type at a time">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	// any is an alias for interface{}: the interface with zero methods.
+	// Every type satisfies it.
+	var box any
+	box = 42
+	fmt.Printf("%v (%T)\n", box, box)
+	box = "hello"
+	fmt.Printf("%v (%T)\n", box, box)
+	box = []string{"a", "b"}
+	fmt.Printf("%v (%T)\n", box, box)
+
+	// Common in decoded JSON with unknown shape.
+	payload := map[string]any{
+		"order_id": 101,
+		"paid":     true,
+		"items":    []any{"pen", "book"},
+	}
+	fmt.Println(len(payload), "keys")
+
+	// But you can't DO much with an any until you get the type back.
+	// n := box + 1 // compile error: mismatched types any and int
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8" data-state="box=nil"><code>any</code> is just <code>interface{}</code>: zero methods, so every type satisfies it. It starts as a nil interface.</li>
+      <li data-lines="9-10" data-state="box=(int, 42)" data-out="42 (int)">Storing <code>42</code> records both the value and its dynamic type <code>int</code>.</li>
+      <li data-lines="11-12" data-state="box=(string, &quot;hello&quot;)" data-out="hello (string)">The same variable can be re-assigned a value of a completely different type. The type half of the pair changes too.</li>
+      <li data-lines="13-14" data-state="box=([]string, [a b])" data-out="[a b] ([]string)">Now it holds a slice. <code>%T</code> always reports the <em>dynamic</em> type, never "any".</li>
+      <li data-lines="17-21" data-state="payload=map[items:[pen book] order_id:101 paid:true]"><code>map[string]any</code> is the shape <code>encoding/json</code> gives you for unknown JSON: values of mixed types under string keys.</li>
+      <li data-lines="22" data-state="len(payload)=3" data-out="3 keys">Three keys.</li>
+      <li data-lines="25">The catch: an <code>any</code> has no methods, so you can't add to it, index it, or call anything on it. You must get the concrete type back with a type assertion or type switch first.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>42 (int)
+hello (string)
+[a b] ([]string)
+3 keys</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: any throws away type safety</div><p>Once a value is in an <code>any</code>, the compiler can't help you any more; you have to check types at run time. Use <code>any</code> at true boundaries (decoding unknown JSON, generic printing, logging fields). Inside your own code, prefer a real interface with methods, or generics (Chapter 09) when you need "works for many types" with full type checking.</p></div>
+
+  <h3>Type assertions: getting the concrete value back</h3>
+  <p>A <strong>type assertion</strong> <code>x.(T)</code> asks: "is the thing in this interface a <code>T</code>? If so, give it to me as a <code>T</code>." Always prefer the two-value <strong>comma-ok</strong> form:</p>
+
+  <div class="live" data-title="Comma-ok type assertions">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Payer interface{ Pay(float64) error }
+
+type Razorpay struct{ KeyID string }
+
+func (r Razorpay) Pay(float64) error { return nil }
+
+type Stripe struct{ Account string }
+
+func (s Stripe) Pay(float64) error { return nil }
+
+func main() {
+	var p Payer = Razorpay{KeyID: "rzp_live"}
+
+	// Comma-ok form: never panics.
+	if r, ok := p.(Razorpay); ok {
+		fmt.Println("it's Razorpay, key =", r.KeyID)
+	}
+
+	s, ok := p.(Stripe)
+	fmt.Printf("Stripe? ok=%v, s=%+v (zero value)\n", ok, s)
+
+	// Asserting to another INTERFACE: "does it also have this method?"
+	_, isStringer := p.(fmt.Stringer)
+	fmt.Println("is Stringer?", isStringer)
+
+	// Works on any too.
+	var v any = 3.14
+	f, ok := v.(float64)
+	fmt.Println(f, ok)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="16" data-state="p=(Razorpay, {KeyID:rzp_live})">The interface holds a <code>Razorpay</code> value.</li>
+      <li data-lines="19" data-state="p=(Razorpay, {KeyID:rzp_live}); r={KeyID:rzp_live}; ok=true"><code>p.(Razorpay)</code> asks "is the dynamic type exactly <code>Razorpay</code>?" Yes, so <code>r</code> gets the concrete value and <code>ok</code> is true.</li>
+      <li data-lines="20" data-state="r={KeyID:rzp_live}; ok=true" data-out="it's Razorpay, key = rzp_live">Now <code>r</code> is a real <code>Razorpay</code>, so we can read <code>r.KeyID</code>, which the <code>Payer</code> interface never exposed.</li>
+      <li data-lines="23" data-state="s={Account:}; ok=false">Asserting to <code>Stripe</code> fails. With the <strong>comma-ok</strong> form there is no panic: <code>ok</code> is false and <code>s</code> is <code>Stripe</code>'s zero value.</li>
+      <li data-lines="24" data-state="s={Account:}; ok=false" data-out="Stripe? ok=false, s={Account:} (zero value)">Always check <code>ok</code> before trusting <code>s</code>.</li>
+      <li data-lines="27-28" data-state="isStringer=false" data-out="is Stringer? false">Asserting to an <em>interface</em> type asks a different question: "does the stored value also have a <code>String()</code> method?" <code>Razorpay</code> doesn't.</li>
+      <li data-lines="31-33" data-state="v=(float64, 3.14); f=3.14; ok=true" data-out="3.14 true">Same tool on an <code>any</code>: the untyped constant <code>3.14</code> defaulted to <code>float64</code>, so the assertion succeeds.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>it's Razorpay, key = rzp_live
+Stripe? ok=false, s={Account:} (zero value)
+is Stringer? false
+3.14 true</pre></div>
+
+  <ul>
+    <li><code>v, ok := x.(T)</code>: if it matches, <code>ok</code> is true and <code>v</code> is the value. If not, <code>ok</code> is false and <code>v</code> is <code>T</code>'s zero value. Never panics.</li>
+    <li><code>T</code> can be a concrete type (<code>Razorpay</code>) <em>or another interface</em> (<code>fmt.Stringer</code>). The second form asks "does it also have these methods?"; we'll use that for optional capabilities shortly.</li>
+  </ul>
+  <p>The single-value form <code>v := x.(T)</code> panics on a mismatch:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var v any = "forty-two"
+	n := v.(int) // single-value form panics on mismatch
+	fmt.Println(n)
+}</code></pre></div>
+  <div class="output error" data-label="Runtime panic"><pre>panic: interface conversion: interface {} is string, not int
+
+goroutine 1 [running]:
+main.main()
+	/home/you/shop/main.go:7 +0x34
+exit status 2</pre></div>
+
+  <h3>Type switches: many assertions at once</h3>
+  <p>When you need to handle several possible types, a <strong>type switch</strong> is cleaner than a chain of assertions. The special syntax <code>switch x := v.(type)</code> gives you <code>x</code> already converted to the matching case's type.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type Razorpay struct{ KeyID string }
+type Stripe struct{ Account string }
+
+func describe(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "nothing at all"
+	case int, int64:
+		return fmt.Sprintf("an integer: %v", x) // x is still any here
+	case string:
+		return fmt.Sprintf("a string of %d bytes", len(x)) // x is a string
+	case error:
+		return "an error: " + x.Error()
+	case Razorpay:
+		return "Razorpay with key " + x.KeyID
+	case *Stripe:
+		return "pointer to Stripe account " + x.Account
+	default:
+		return fmt.Sprintf("something else: %T", x)
+	}
+}
+
+func main() {
+	fmt.Println(describe(nil))
+	fmt.Println(describe(7))
+	fmt.Println(describe("₹499"))
+	fmt.Println(describe(errors.New("timeout")))
+	fmt.Println(describe(Razorpay{KeyID: "rzp_1"}))
+	fmt.Println(describe(&amp;Stripe{Account: "acct_9"}))
+	fmt.Println(describe(3.5))
+}</code></pre></div>
+  <div class="output"><pre>nothing at all
+an integer: 7
+a string of 6 bytes
+an error: timeout
+Razorpay with key rzp_1
+pointer to Stripe account acct_9
+something else: float64</pre></div>
+
+  <ul>
+    <li>In a case with <strong>one type</strong> (<code>case string:</code>), <code>x</code> has that type, so <code>len(x)</code> works. Note <code>"₹499"</code> is 6 <em>bytes</em> (₹ takes 3 in UTF-8; see Chapter 06).</li>
+    <li>In a case with <strong>several types</strong> (<code>case int, int64:</code>), Go can't pick one, so <code>x</code> stays <code>any</code>.</li>
+    <li>Cases can be interfaces (<code>case error:</code>) and are checked <strong>top to bottom</strong>; the first match wins. Put specific types before broad interfaces.</li>
+    <li><code>case nil:</code> matches a nil interface.</li>
+  </ul>
+
+  <div class="live" data-title="Trace a type switch">
+    <pre><code class="language-go">func describe(v any) string {
+	switch x := v.(type) {
+	case int:
+		return fmt.Sprint("int doubled: ", x*2)
+	case string:
+		return "string: " + x
+	case Razorpay:
+		return "gateway key " + x.KeyID
+	default:
+		return fmt.Sprintf("unknown %T", x)
+	}
+}
+
+func main() {
+	fmt.Println(describe(21))
+	fmt.Println(describe(Razorpay{KeyID: "rzp_1"}))
+	fmt.Println(describe(true))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="15,1" data-state="v=(int, 21)">We pass <code>21</code>. It gets boxed into <code>v</code> as (type int, value 21).</li>
+      <li data-lines="2-3" data-state="v=(int, 21); x=21 (int)">The switch reads <code>v</code>'s dynamic type: <code>int</code>. The first case matches, and <code>x</code> is a real <code>int</code>.</li>
+      <li data-lines="4,15" data-state="x=21" data-out="int doubled: 42">Because <code>x</code> is an int, <code>x*2</code> compiles. We'd need an assertion to do arithmetic on <code>v</code> directly.</li>
+      <li data-lines="16,2" data-state="v=(Razorpay, {rzp_1})">Second call: dynamic type is <code>Razorpay</code>. Cases <code>int</code> and <code>string</code> don't match…</li>
+      <li data-lines="7-8,16" data-state="x=Razorpay{KeyID: rzp_1}" data-out="gateway key rzp_1">…<code>case Razorpay</code> does. <code>x</code> is a <code>Razorpay</code>, so <code>x.KeyID</code> is accessible.</li>
+      <li data-lines="17,9-10" data-state="v=(bool, true); x=true (any)" data-out="unknown bool">A <code>bool</code> matches nothing, so <code>default</code> runs. In <code>default</code>, <code>x</code> has the same type as <code>v</code> (<code>any</code>).</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>If you find yourself writing a type switch over <em>your own</em> types to decide behaviour (<code>case Razorpay: ... case Stripe: ...</code>), that's usually a sign the behaviour should be a <strong>method on the interface</strong> instead. Every new gateway would otherwise mean editing that switch. Type switches are best at boundaries with genuinely open-ended data: decoded JSON, AST nodes, error classification.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Interfaces you'll meet every day</h2>
+  <p>The standard library is built on a handful of tiny interfaces. Learn these and huge parts of the ecosystem "just fit together".</p>
+
+  <table>
+    <thead><tr><th>Interface</th><th>Method(s)</th><th>What it unlocks</th></tr></thead>
+    <tbody>
+      <tr><td><code>fmt.Stringer</code></td><td><code>String() string</code></td><td>Custom printing with <code>%v</code>, <code>Println</code></td></tr>
+      <tr><td><code>error</code></td><td><code>Error() string</code></td><td>Being returned and handled as an error</td></tr>
+      <tr><td><code>io.Reader</code></td><td><code>Read(p []byte) (n int, err error)</code></td><td>Files, HTTP bodies, gzip, network, strings… all read the same way</td></tr>
+      <tr><td><code>io.Writer</code></td><td><code>Write(p []byte) (n int, err error)</code></td><td>Files, buffers, HTTP responses, hashes, <code>fmt.Fprintf</code></td></tr>
+      <tr><td><code>io.Closer</code></td><td><code>Close() error</code></td><td>Releasing resources (combine: <code>io.ReadCloser</code>)</td></tr>
+      <tr><td><code>sort.Interface</code></td><td><code>Len</code>, <code>Less</code>, <code>Swap</code></td><td>Sorting any collection (older style)</td></tr>
+      <tr><td><code>http.Handler</code></td><td><code>ServeHTTP(w, r)</code></td><td>Anything that can answer an HTTP request (Chapter 17)</td></tr>
+      <tr><td><code>json.Marshaler</code></td><td><code>MarshalJSON() ([]byte, error)</code></td><td>Custom JSON encoding</td></tr>
+    </tbody>
+  </table>
+
+  <h3><code>fmt.Stringer</code> and <code>error</code></h3>
+  <div class="live" data-title="error and Stringer: the two interfaces you use daily">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// The built-in error interface is just:
+//
+//	type error interface { Error() string }
+type DeclinedError struct {
+	OrderID int
+	Reason  string
+}
+
+func (e *DeclinedError) Error() string {
+	return fmt.Sprintf("order %d declined: %s", e.OrderID, e.Reason)
+}
+
+type Money struct {
+	Paise    int64
+	Currency string
+}
+
+// Stringer controls how fmt prints the value.
+func (m Money) String() string {
+	return fmt.Sprintf("%s %d.%02d", m.Currency, m.Paise/100, m.Paise%100)
+}
+
+func charge(orderID int, m Money) error {
+	if m.Paise &gt; 1_000_000 {
+		return &amp;DeclinedError{OrderID: orderID, Reason: "limit exceeded"}
+	}
+	return nil
+}
+
+func main() {
+	price := Money{Paise: 49900, Currency: "INR"}
+	fmt.Println("charging", price)
+
+	err := charge(7, Money{Paise: 5_000_000, Currency: "INR"})
+	fmt.Println(err)
+
+	var de *DeclinedError
+	if errors.As(err, &amp;de) { // preview of Chapter 10
+		fmt.Println("reason only:", de.Reason)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="38" data-state="price={Paise:49900 Currency:INR}">Money is stored in paise (integer) to avoid floating-point rounding.</li>
+      <li data-lines="39,26-27" data-state="price={Paise:49900 Currency:INR}" data-out="charging INR 499.00"><code>Money</code> has a <code>String()</code> method, so <code>Println</code> calls it: 49900 / 100 = 499, 49900 % 100 = 0, padded with <code>%02d</code>.</li>
+      <li data-lines="41,30-32" data-state="orderID=7; m.Paise=5000000">5,000,000 paise is over the limit, so <code>charge</code> returns a <code>*DeclinedError</code>. It satisfies <code>error</code> because it has <code>Error() string</code>.</li>
+      <li data-lines="42,16-17" data-state="err=(*DeclinedError, &amp;{7 limit exceeded})" data-out="order 7 declined: limit exceeded"><code>Println(err)</code> sees an <code>error</code> and calls its <code>Error()</code> method.</li>
+      <li data-lines="44-45" data-state="err=(*DeclinedError, &amp;{7 limit exceeded}); de=&amp;{7 limit exceeded}"><code>errors.As</code> checks whether the error is a <code>*DeclinedError</code> and, if so, stores it in <code>de</code>. Now we have the concrete type back.</li>
+      <li data-lines="46" data-state="de.OrderID=7; de.Reason=&quot;limit exceeded&quot;" data-out="reason only: limit exceeded">Structured fields like <code>Reason</code> are available to the caller, not just a string.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>charging INR 499.00
+order 7 declined: limit exceeded
+reason only: limit exceeded</pre></div>
+
+  <div class="callout tip"><p>Custom error types usually use a <strong>pointer receiver</strong> for <code>Error()</code>, and you return them as <code>&amp;DeclinedError{...}</code>. Then <code>errors.As(err, &amp;target)</code> with <code>var target *DeclinedError</code> can pull out the fields. Chapter 10 covers this properly.</p></div>
+
+  <h3><code>io.Reader</code> and <code>io.Writer</code></h3>
+  <p>These two are Go's universal plumbing. <code>Read</code> fills the slice you give it and says how many bytes it wrote; at the end it returns <code>io.EOF</code>. <code>Write</code> takes bytes and pushes them somewhere. Because they're so small, everything implements them, and you can snap them together like Lego.</p>
+
+  <div class="live" data-title="io.Reader and io.Writer at work">
+    <pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"unicode"
+)
+
+// upperWriter wraps ANY io.Writer and upper-cases what passes through.
+type upperWriter struct {
+	w io.Writer
+}
+
+func (u upperWriter) Write(p []byte) (int, error) {
+	return u.w.Write(bytes.ToUpper(p))
+}
+
+// countLetters works with ANY io.Reader: a file, a network socket, a string...
+func countLetters(r io.Reader) (int, error) {
+	buf := make([]byte, 8) // tiny buffer to show Read is called repeatedly
+	n := 0
+	for {
+		k, err := r.Read(buf)
+		for _, b := range buf[:k] {
+			if unicode.IsLetter(rune(b)) {
+				n++
+			}
+		}
+		if err == io.EOF {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+}
+
+func main() {
+	receipt := "Order 101: 2 x pen, 1 x book\n"
+
+	n, _ := countLetters(strings.NewReader(receipt))
+	fmt.Println("letters:", n)
+
+	// io.Copy moves bytes from any Reader to any Writer.
+	io.Copy(os.Stdout, strings.NewReader(receipt))
+	io.Copy(upperWriter{w: os.Stdout}, strings.NewReader(receipt))
+
+	// Writers compose: write into a buffer through the upper-caser.
+	var buf bytes.Buffer
+	fmt.Fprintf(upperWriter{w: &amp;buf}, "total: ₹%d\n", 135)
+	fmt.Print("buffered -&gt; ", buf.String())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="42" data-state="receipt=&quot;Order 101: 2 x pen, 1 x book\n&quot; (29 bytes)">The receipt is 29 bytes long including the newline.</li>
+      <li data-lines="44,22-24" data-state="n=0; len(buf)=8"><code>strings.NewReader</code> returns a <code>*strings.Reader</code>, which has a <code>Read</code> method, so it is an <code>io.Reader</code>. <code>countLetters</code> only knows about the interface.</li>
+      <li data-lines="26-31" data-state="k=8; chunk=&quot;Order 10&quot;; n=5; err=nil">First <code>Read</code> fills all 8 bytes. We only loop over <code>buf[:k]</code>, the bytes actually read. 5 letters.</li>
+      <li data-lines="26-31" data-state="k=8; chunk=&quot;1: 2 x p&quot;; n=7; err=nil">Second call continues where the reader left off. <code>x</code> and <code>p</code> are letters.</li>
+      <li data-lines="26-31" data-state="k=8; chunk=&quot;en, 1 x &quot;; n=10; err=nil">Third call: <code>e</code>, <code>n</code>, <code>x</code>.</li>
+      <li data-lines="26-31" data-state="k=5; chunk=&quot;book\n&quot;; n=14; err=nil">Only 5 bytes remain, so <code>k=5</code>. Using <code>buf[:k]</code> matters here: the last 3 bytes of <code>buf</code> are stale leftovers.</li>
+      <li data-lines="26,32-33" data-state="k=0; n=14; err=io.EOF">The fifth call has nothing left: <code>k=0</code>, <code>err=io.EOF</code>. EOF is the normal "done" signal, so we return <code>14, nil</code>.</li>
+      <li data-lines="45" data-state="n=14" data-out="letters: 14">Back in <code>main</code>.</li>
+      <li data-lines="48" data-out="Order 101: 2 x pen, 1 x book"><code>io.Copy</code> pumps from any Reader to any Writer. <code>os.Stdout</code> is a Writer, so the receipt prints unchanged.</li>
+      <li data-lines="49,17-18" data-out="ORDER 101: 2 X PEN, 1 X BOOK">Same copy, but the destination is our <code>upperWriter</code>. Its <code>Write</code> upper-cases the bytes and forwards them to the wrapped <code>os.Stdout</code>.</li>
+      <li data-lines="52-53,17-18" data-state="buf=&quot;TOTAL: ₹135\n&quot;"><code>Fprintf</code> writes to any Writer. Here the wrapper forwards into a <code>*bytes.Buffer</code> instead of the terminal. Same type, different destination.</li>
+      <li data-lines="54" data-state="buf=&quot;TOTAL: ₹135\n&quot;" data-out="buffered -&gt; TOTAL: ₹135">Printing the buffer shows the upper-cased text. Small interfaces compose freely.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>letters: 14
+Order 101: 2 x pen, 1 x book
+ORDER 101: 2 X PEN, 1 X BOOK
+buffered -&gt; TOTAL: ₹135</pre></div>
+
+  <ul>
+    <li><code>countLetters</code> doesn't know if it's reading a string, a 2&nbsp;GB file or a TCP connection. It just loops on <code>Read</code> until <code>io.EOF</code>. (It checks bytes one by one, which is fine for ASCII letters like here.)</li>
+    <li><code>upperWriter</code> <strong>wraps</strong> any <code>io.Writer</code>: a stdout, a buffer, a file. Wrapping one implementation of an interface inside another is the <strong>decorator</strong> pattern; you'll see it again with HTTP middleware.</li>
+    <li>Note the <code>Read</code> loop: process <code>buf[:k]</code> <em>before</em> checking the error. A reader may return data <em>and</em> <code>io.EOF</code> in the same call.</li>
+  </ul>
+
+  <h3><code>sort.Interface</code> (and the modern alternative)</h3>
+  <div class="live" data-title="sort.Interface vs slices.SortFunc">
+    <pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+	"slices"
+	"sort"
+)
+
+type Order struct {
+	ID    int
+	Total float64
+}
+
+// ByTotal implements sort.Interface: Len, Less, Swap.
+type ByTotal []Order
+
+func (o ByTotal) Len() int           { return len(o) }
+func (o ByTotal) Less(i, j int) bool { return o[i].Total &lt; o[j].Total }
+func (o ByTotal) Swap(i, j int)      { o[i], o[j] = o[j], o[i] }
+
+func main() {
+	orders := []Order{{1, 899}, {2, 120}, {3, 4500}, {4, 120}}
+
+	sort.Sort(ByTotal(orders)) // the classic, interface-based way
+	fmt.Println("sort.Sort:      ", orders)
+
+	// Modern Go (1.21+): a comparison function, no wrapper type needed.
+	slices.SortFunc(orders, func(a, b Order) int {
+		return cmp.Or(
+			cmp.Compare(b.Total, a.Total), // highest total first
+			cmp.Compare(a.ID, b.ID),       // then by ID
+		)
+	})
+	fmt.Println("slices.SortFunc:", orders)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="23" data-state="orders=[{1 899} {2 120} {3 4500} {4 120}]">Four unsorted orders. Two share a total of 120.</li>
+      <li data-lines="25,16" data-state="orders=[{1 899} {2 120} {3 4500} {4 120}]"><code>ByTotal(orders)</code> is a conversion, not a copy: same backing array, new type. That type has <code>Len</code>, <code>Less</code>, <code>Swap</code>, so it satisfies <code>sort.Interface</code>.</li>
+      <li data-lines="25,18-20" data-state="orders=[{2 120} {4 120} {1 899} {3 4500}]"><code>sort.Sort</code> repeatedly calls <code>Less(i, j)</code> and <code>Swap(i, j)</code> through the interface. Because <code>Swap</code> writes into the shared array, <code>orders</code> itself ends up sorted.</li>
+      <li data-lines="26" data-state="orders=[{2 120} {4 120} {1 899} {3 4500}]" data-out="sort.Sort:       [{2 120} {4 120} {1 899} {3 4500}]">Ascending by total. Note <code>sort.Sort</code> is <strong>not stable</strong>: ties are in no guaranteed order.</li>
+      <li data-lines="29-33" data-state="orders=[{3 4500} {1 899} {2 120} {4 120}]">The modern way: pass a comparison func that returns negative, zero, or positive. <code>cmp.Compare(b.Total, a.Total)</code> reverses the order; <code>cmp.Or</code> picks the first non-zero result, so ties fall back to ID.</li>
+      <li data-lines="35" data-state="orders=[{3 4500} {1 899} {2 120} {4 120}]" data-out="slices.SortFunc: [{3 4500} {1 899} {2 120} {4 120}]">Highest total first, and the 120 tie broken by ID 2 before 4. No wrapper type needed.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>sort.Sort:       [{2 120} {4 120} {1 899} {3 4500}]
+slices.SortFunc: [{3 4500} {1 899} {2 120} {4 120}]</pre></div>
+
+  <p>You'll still see <code>sort.Interface</code> in older code and it's a nice tiny example of interface-driven design. In new code, prefer <code>slices.SortFunc</code> (or <code>slices.SortStableFunc</code> when equal elements must keep their order; <code>sort.Sort</code> isn't stable either). Combining keys with <code>cmp.Or</code> keeps multi-field sorting readable.</p>
+
+  <!-- ============================================================ -->
+  <h2>Composing interfaces with embedding</h2>
+  <p>Interfaces can embed other interfaces. The result's method set is the union. This is how the stdlib builds <code>io.ReadWriter</code> from <code>io.Reader</code> + <code>io.Writer</code>, and how you can build a store interface from read and write halves:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+)
+
+type Order struct {
+	ID    int
+	Total float64
+}
+
+// Small interfaces...
+type OrderReader interface {
+	Get(id int) (Order, error)
+}
+
+type OrderWriter interface {
+	Save(o Order) error
+}
+
+// ...combined by embedding, exactly like io.ReadWriter = Reader + Writer.
+type OrderStore interface {
+	OrderReader
+	OrderWriter
+}
+
+var ErrNotFound = errors.New("order not found")
+
+type memStore struct{ m map[int]Order }
+
+func (s *memStore) Get(id int) (Order, error) {
+	o, ok := s.m[id]
+	if !ok {
+		return Order{}, ErrNotFound
+	}
+	return o, nil
+}
+
+func (s *memStore) Save(o Order) error {
+	s.m[o.ID] = o
+	return nil
+}
+
+// A report only needs to READ, so it asks for the smallest interface.
+func printReport(r OrderReader, ids ...int) {
+	for _, id := range ids {
+		o, err := r.Get(id)
+		if err != nil {
+			fmt.Printf("#%d: %v\n", id, err)
+			continue
+		}
+		fmt.Printf("#%d: ₹%.2f\n", o.ID, o.Total)
+	}
+}
+
+func main() {
+	var store OrderStore = &amp;memStore{m: map[int]Order{}}
+	store.Save(Order{ID: 1, Total: 499})
+	store.Save(Order{ID: 2, Total: 1299})
+
+	printReport(store, 1, 2, 3) // an OrderStore IS an OrderReader
+
+	var _ io.ReadWriter // the stdlib does the same thing
+}</code></pre></div>
+  <div class="output"><pre>#1: ₹499.00
+#2: ₹1299.00
+#3: order not found</pre></div>
+
+  <p>Notice <code>printReport</code> asks only for <code>OrderReader</code>. It can't accidentally write, and in a test you only need to fake <code>Get</code>. Small interfaces make both the code and its tests smaller.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of interfaces as <strong>permissions</strong>. Handing a function an <code>OrderReader</code> is like handing someone a read-only key. Hand out the narrowest key that does the job.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Designing with interfaces</h2>
+  <h3>Keep them small</h3>
+  <p>"The bigger the interface, the weaker the abstraction." (Go proverb). One- or two-method interfaces (<code>Reader</code>, <code>Writer</code>, <code>Stringer</code>, <code>Payer</code>) have dozens of implementations. A 15-method <code>OrderRepository</code> interface has exactly one real implementation and one painful mock. By convention, single-method interfaces are named <em>method + "er"</em>: <code>Reader</code>, <code>Payer</code>, <code>Notifier</code>.</p>
+
+  <h3>Define them at the consumer</h3>
+  <p>In Java, the package that <em>provides</em> a class also declares its interface. In Go, it's usually the opposite: the package that <strong>uses</strong> a dependency declares a small interface describing just what it needs. The provider exports a plain concrete type. Implicit satisfaction makes that work without the two packages knowing about each other.</p>
+
+  <h3>Accept interfaces, return structs</h3>
+  <p>A function's <strong>parameters</strong> should be as general as possible (interfaces, so callers can pass anything suitable), and its <strong>return values</strong> as specific as possible (concrete types, so callers get every method and field, and can wrap them in whatever interface <em>they</em> need).</p>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">// package razorpay (the PROVIDER)
+type Client interface { // provider-side, big
+	Pay(float64) error
+	Refund(float64) error
+	Payouts() []Payout
+	Webhooks() WebhookAPI
+	// ...12 more
+}
+
+// returns an interface: callers can't reach
+// new methods or fields without asserting
+func New(key string) Client { ... }
+
+// consumer must accept the huge interface
+func Checkout(c razorpay.Client) { ... }</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">// package razorpay (the PROVIDER)
+type Client struct{ key string }
+
+// return the concrete struct
+func New(key string) *Client { ... }
+func (c *Client) Pay(float64) error    { ... }
+func (c *Client) Refund(float64) error { ... }
+
+// package checkout (the CONSUMER)
+// declares only what it needs
+type Payer interface {
+	Pay(amount float64) error
+}
+
+func Checkout(p Payer) { ... }</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>There are good exceptions to "return structs": returning <code>error</code> (always an interface), constructors in packages whose whole point is hiding implementations (<code>hash.Hash</code> from <code>sha256.New()</code>, <code>cipher.Block</code>), and factory functions that choose an implementation at run time. The rule is a default, not a law. What you really want to avoid is <strong>pre-emptive, provider-side, fat interfaces</strong> that exist only to be mocked.</p></div>
+
+  <h3>Compile-time assertions</h3>
+  <p>Because satisfaction is implicit, a typo in a method signature isn't caught until something tries to <em>use</em> the type as the interface, which might be in a different package or only in production wiring. Pin it down with a one-liner that costs nothing at runtime:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+type Payer interface {
+	Pay(amount float64) error
+}
+
+type Paytm struct{}
+
+// Oops: wrong signature (float32 instead of float64).
+func (p *Paytm) Pay(amount float32) error { return nil }
+
+// Compile-time check: "*Paytm must implement Payer".
+// Costs nothing at runtime: it's a nil pointer assigned to _ .
+var _ Payer = (*Paytm)(nil)
+
+func main() {}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:14:15: cannot use (*Paytm)(nil) (value of type *Paytm) as Payer value in variable declaration: *Paytm does not implement Payer (wrong type for method Pay)
+		have Pay(float32) error
+		want Pay(float64) error</pre></div>
+
+  <p><code>var _ Payer = (*Paytm)(nil)</code> means: "assign a nil <code>*Paytm</code> to a throwaway variable of type <code>Payer</code>". If <code>*Paytm</code> doesn't satisfy <code>Payer</code>, the build fails right there with a precise message. For value-receiver types, <code>var _ Payer = Razorpay{}</code> works too.</p>
+
+  <h3>Optional capabilities: upgrading an interface</h3>
+  <p>Sometimes only <em>some</em> implementations can do an extra thing. Rather than bloating <code>Payer</code> with a <code>Refund</code> method that cash-on-delivery can't implement, define a separate small interface and <strong>check for it with a type assertion</strong>. The stdlib does this constantly: <code>io.Copy</code> checks whether your Reader is also an <code>io.WriterTo</code> to take a faster path; <code>http.ResponseWriter</code> may also be an <code>http.Flusher</code>.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type Payer interface {
+	Pay(amount float64) error
+}
+
+// Refunder is an OPTIONAL capability some gateways have.
+type Refunder interface {
+	Refund(amount float64) error
+}
+
+type Razorpay struct{}
+
+func (Razorpay) Pay(a float64) error    { fmt.Printf("razorpay pay %.0f\n", a); return nil }
+func (Razorpay) Refund(a float64) error { fmt.Printf("razorpay refund %.0f\n", a); return nil }
+
+type CashOnDelivery struct{}
+
+func (CashOnDelivery) Pay(a float64) error { fmt.Printf("COD collect %.0f\n", a); return nil }
+
+// Compile-time proofs.
+var (
+	_ Payer    = Razorpay{}
+	_ Refunder = Razorpay{}
+	_ Payer    = CashOnDelivery{}
+)
+
+func cancelOrder(p Payer, amount float64) error {
+	// Upgrade check: does this Payer ALSO know how to refund?
+	if r, ok := p.(Refunder); ok {
+		return r.Refund(amount)
+	}
+	return errors.New("gateway cannot refund; raise a manual ticket")
+}
+
+func main() {
+	for _, p := range []Payer{Razorpay{}, CashOnDelivery{}} {
+		p.Pay(250)
+		if err := cancelOrder(p, 250); err != nil {
+			fmt.Println("error:", err)
+		}
+	}
+}</code></pre></div>
+  <div class="output"><pre>razorpay pay 250
+razorpay refund 250
+COD collect 250
+error: gateway cannot refund; raise a manual ticket</pre></div>
+
+  <div class="live" data-title="An optional-interface upgrade check">
+    <pre><code class="language-go">func cancelOrder(p Payer, amount float64) error {
+	if r, ok := p.(Refunder); ok {
+		return r.Refund(amount)
+	}
+	return errors.New("gateway cannot refund; raise a manual ticket")
+}
+
+func main() {
+	for _, p := range []Payer{Razorpay{}, CashOnDelivery{}} {
+		p.Pay(250)
+		if err := cancelOrder(p, 250); err != nil {
+			fmt.Println("error:", err)
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="p=(Razorpay, {})">First iteration: <code>p</code> holds a <code>Razorpay</code>, viewed through the narrow <code>Payer</code> interface.</li>
+      <li data-lines="10" data-state="p=(Razorpay, {})" data-out="razorpay pay 250">Paying works for every Payer.</li>
+      <li data-lines="11,1-2" data-state="p=(Razorpay, {}); ok=true">Inside <code>cancelOrder</code>, <code>p.(Refunder)</code> asks: "does the concrete type <em>also</em> have <code>Refund(float64) error</code>?" Razorpay does, so <code>ok</code> is true and <code>r</code> is a <code>Refunder</code>.</li>
+      <li data-lines="3" data-state="r=(Razorpay, {})" data-out="razorpay refund 250">We call <code>Refund</code> and return its (nil) error, so nothing is printed in <code>main</code>.</li>
+      <li data-lines="9-10" data-state="p=(CashOnDelivery, {})" data-out="COD collect 250">Second iteration: cash on delivery. Paying still works.</li>
+      <li data-lines="11,2,5" data-state="p=(CashOnDelivery, {}); ok=false"><code>CashOnDelivery</code> has no <code>Refund</code>, so the assertion fails safely (comma-ok, no panic) and we fall through to the error.</li>
+      <li data-lines="12" data-state="err=gateway cannot refund…" data-out="error: gateway cannot refund; raise a manual ticket">The caller gets a clear error instead of a crash or a fake no-op refund.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: wrappers hide optional interfaces</div><p>If you wrap a <code>Razorpay</code> in a <code>loggingPayer</code> decorator that only implements <code>Pay</code>, the upgrade check now sees the wrapper and finds no <code>Refund</code>. The capability silently disappears. Either have the wrapper forward the optional method too, or give it an <code>Unwrap() Payer</code> so callers can dig through. (The same issue hits HTTP middleware that wraps <code>ResponseWriter</code> and loses <code>Flush</code>; that's why <code>http.ResponseController</code> exists.)</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Mocking with interfaces for tests</h2>
+  <p>Here's where interfaces pay their rent. If your business logic depends on an interface rather than on Razorpay directly, a test can hand it a tiny <strong>fake</strong> that records what happened and returns whatever result the test wants: success, decline, timeout. No network, no sandbox account, no flakiness, tests run in milliseconds.</p>
+
+  <div class="code" data-file="go.mod"><pre><code class="language-go">module shop
+
+go 1.27</code></pre></div>
+  <div class="code" data-file="checkout/service.go"><pre><code class="language-go">package checkout
+
+import (
+	"errors"
+	"fmt"
+)
+
+// The interfaces live HERE, with the code that uses them (the consumer),
+// and they contain only the methods this package actually needs.
+type Payer interface {
+	Pay(amount float64) error
+}
+
+type Notifier interface {
+	Notify(customerID int, msg string) error
+}
+
+type Service struct {
+	payer    Payer
+	notifier Notifier
+}
+
+// NewService accepts interfaces...
+func NewService(p Payer, n Notifier) *Service {
+	return &amp;Service{payer: p, notifier: n}
+}
+
+var ErrInvalidAmount = errors.New("amount must be positive")
+
+// PlaceOrder charges the customer and tells them about it.
+func (s *Service) PlaceOrder(customerID int, amount float64) error {
+	if amount &lt;= 0 {
+		return ErrInvalidAmount
+	}
+	if err := s.payer.Pay(amount); err != nil {
+		_ = s.notifier.Notify(customerID, "payment failed, please retry")
+		return fmt.Errorf("place order: %w", err)
+	}
+	return s.notifier.Notify(customerID, fmt.Sprintf("paid ₹%.2f, thank you!", amount))
+}</code></pre></div>
+  <div class="code" data-file="checkout/service_test.go"><pre><code class="language-go">package checkout
+
+import (
+	"errors"
+	"testing"
+)
+
+// Hand-written fakes: tiny structs that satisfy the interfaces.
+type fakePayer struct {
+	err     error
+	charged []float64
+}
+
+func (f *fakePayer) Pay(amount float64) error {
+	f.charged = append(f.charged, amount)
+	return f.err
+}
+
+type fakeNotifier struct{ msgs []string }
+
+func (f *fakeNotifier) Notify(_ int, msg string) error {
+	f.msgs = append(f.msgs, msg)
+	return nil
+}
+
+func TestPlaceOrder(t *testing.T) {
+	declined := errors.New("card declined")
+
+	tests := []struct {
+		name        string
+		amount      float64
+		payErr      error
+		wantErr     error
+		wantCharged int
+		wantMsg     string
+	}{
+		{"success", 499, nil, nil, 1, "paid ₹499.00, thank you!"},
+		{"declined", 499, declined, declined, 1, "payment failed, please retry"},
+		{"invalid amount", 0, nil, ErrInvalidAmount, 0, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &amp;fakePayer{err: tt.payErr}
+			n := &amp;fakeNotifier{}
+			svc := NewService(p, n)
+
+			err := svc.PlaceOrder(42, tt.amount)
+
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if len(p.charged) != tt.wantCharged {
+				t.Errorf("charged %d times, want %d", len(p.charged), tt.wantCharged)
+			}
+			if tt.wantMsg != "" &amp;&amp; (len(n.msgs) != 1 || n.msgs[0] != tt.wantMsg) {
+				t.Errorf("msgs = %q, want [%q]", n.msgs, tt.wantMsg)
+			}
+		})
+	}
+}</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go test -v ./checkout/</code></pre></div>
+  <div class="output"><pre>=== RUN   TestPlaceOrder
+=== RUN   TestPlaceOrder/success
+=== RUN   TestPlaceOrder/declined
+=== RUN   TestPlaceOrder/invalid_amount
+--- PASS: TestPlaceOrder (0.00s)
+    --- PASS: TestPlaceOrder/success (0.00s)
+    --- PASS: TestPlaceOrder/declined (0.00s)
+    --- PASS: TestPlaceOrder/invalid_amount (0.00s)
+PASS
+ok  	shop/checkout	0.742s</pre></div>
+
+  <p>The fakes are ten lines each and live in the test file. There's no mocking framework, no code generation, no reflection. Because the interfaces are small (one method each), faking them is trivial. That's a direct payoff of "keep interfaces small, define them at the consumer". (The timing on the <code>ok</code> line varies run to run.)</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Prefer hand-written <strong>fakes</strong> (simple working implementations, like an in-memory store) over generated <strong>mocks</strong> that assert exact call sequences. Mocks that verify "Pay was called once with 499, then Notify with…" break on every refactor even when behaviour is correct. Test <em>outcomes</em> (what got charged, what the user was told), not choreography. Reach for tools like <code>gomock</code>/<code>mockery</code> only when an interface is big and you can't shrink it (often a third-party SDK).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Dependency injection, the Go way</h2>
+  <p><strong>Dependency injection</strong> (DI) sounds grand, but in Go it just means: <em>a type receives the things it depends on as constructor arguments, instead of creating them itself</em>. The arguments are interfaces, so you can pass real implementations in production and fakes in tests. You already did it above with <code>NewService(p, n)</code>.</p>
+  <p>All the wiring lives in one place, usually <code>main</code>, called the <strong>composition root</strong>. That's also where decorators get layered on:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// ---- interfaces (owned by the consumer: OrderService) ----
+
+type Payer interface {
+	Pay(amount float64) error
+}
+
+type Notifier interface {
+	Notify(customerID int, msg string) error
+}
+
+// ---- concrete implementations ----
+
+type Razorpay struct{ KeyID string }
+
+func (r *Razorpay) Pay(amount float64) error {
+	fmt.Printf("  razorpay: charging ₹%.2f\n", amount)
+	return nil
+}
+
+type SMSNotifier struct{ Sender string }
+
+func (s *SMSNotifier) Notify(id int, msg string) error {
+	fmt.Printf("  sms from %s to customer %d: %s\n", s.Sender, id, msg)
+	return nil
+}
+
+// loggingPayer is a DECORATOR: it is a Payer that wraps another Payer.
+type loggingPayer struct {
+	next Payer
+	now  func() time.Time
+}
+
+func (l loggingPayer) Pay(amount float64) error {
+	start := l.now()
+	err := l.next.Pay(amount)
+	fmt.Printf("  log: Pay(%.2f) err=%v took=%v\n", amount, err, l.now().Sub(start))
+	return err
+}
+
+// ---- the business logic: knows only interfaces ----
+
+type OrderService struct {
+	payer    Payer
+	notifier Notifier
+}
+
+func NewOrderService(p Payer, n Notifier) *OrderService {
+	return &amp;OrderService{payer: p, notifier: n}
+}
+
+func (s *OrderService) PlaceOrder(customerID int, amount float64) error {
+	if err := s.payer.Pay(amount); err != nil {
+		return err
+	}
+	return s.notifier.Notify(customerID, "order confirmed")
+}
+
+func main() {
+	// Wiring happens in ONE place: main (the "composition root").
+	fixed := time.Date(2026, 10, 16, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return fixed } // deterministic clock for the demo
+
+	var payer Payer = &amp;Razorpay{KeyID: "rzp_live_xxx"}
+	payer = loggingPayer{next: payer, now: clock} // add logging without touching Razorpay
+
+	svc := NewOrderService(payer, &amp;SMSNotifier{Sender: "SHOPIN"})
+
+	fmt.Println("placing order:")
+	if err := svc.PlaceOrder(42, 1299); err != nil {
+		fmt.Println("error:", err)
+	}
+}</code></pre></div>
+  <div class="output"><pre>placing order:
+  razorpay: charging ₹1299.00
+  log: Pay(1299.00) err=&lt;nil&gt; took=0s
+  sms from SHOPIN to customer 42: order confirmed</pre></div>
+
+  <ul>
+    <li><code>OrderService</code> has no idea Razorpay, SMS or logging exist. Swap SMS for email, or Razorpay for Stripe, by changing one line in <code>main</code>.</li>
+    <li><code>loggingPayer</code> is a <code>Payer</code> wrapping a <code>Payer</code>. You can stack retries, metrics, circuit breakers the same way without touching business code.</li>
+    <li>Even the <strong>clock</strong> is injected (<code>now func() time.Time</code>), which makes time-dependent code testable. A function type is a perfectly good "one-method interface".</li>
+  </ul>
+
+  <div class="callout tip"><p>Go projects rarely need a DI framework. Plain constructors called from <code>main</code> stay readable well into dozens of dependencies. If wiring gets genuinely large, Google's <code>wire</code> generates that same plain code for you at build time, so there's still no runtime magic.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">You're writing package <code>invoice</code>, which needs to fetch a customer's address from package <code>crm</code> (which exports a big <code>*crm.Client</code>). Where should the interface live?</div>
+    <div class="quiz-opts">
+      <button>In <code>crm</code>, as <code>crm.ClientInterface</code> listing all of Client's methods</button>
+      <button>In <code>invoice</code>, as a one-method <code>AddressFetcher</code> interface</button>
+      <button>Nowhere: <code>invoice</code> should take <code>*crm.Client</code> directly and tests should hit a real CRM</button>
+    </div>
+    <div class="quiz-explain">The consumer (<code>invoice</code>) declares the small interface it needs. <code>*crm.Client</code> satisfies it implicitly, <code>crm</code> doesn't have to change, and <code>invoice</code>'s tests can fake one method instead of an entire CRM client.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Performance notes and practice</h2>
+  <p>Interfaces are cheap, but not free. Worth knowing:</p>
+  <ul>
+    <li><strong>A method call through an interface</strong> is an indirect call via the itab: a couple of nanoseconds. The bigger cost is that the compiler usually can't <strong>inline</strong> it (though modern Go does "devirtualize" calls when it can prove the concrete type, especially with profile-guided optimisation).</li>
+    <li><strong>Storing a value in an interface</strong> may allocate. The data word must be a pointer, so a non-pointer value that doesn't fit is copied to the heap ("boxing"). Small constants and pointers usually avoid this. In hot loops over millions of items, this can show up in profiles (Chapter 18).</li>
+    <li>For 99% of code (HTTP handlers, business logic, I/O) these costs are invisible next to a network or database call. Design for clarity; optimise from profiles.</li>
+  </ul>
+
+  <details class="exercise">
+    <summary>Exercise 1: A fan-out Notifier</summary>
+    <p>Define <code>Notifier</code> with <code>Notify(customerID int, msg string) error</code>. Implement <code>EmailNotifier</code> and an <code>SMSNotifier</code> that truncates messages over 20 characters. Then write <code>MultiNotifier</code>, a slice of Notifiers that is <em>itself</em> a Notifier and sends to all of them. Add compile-time assertions.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="A notifier made of notifiers">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+type Notifier interface {
+	Notify(customerID int, msg string) error
+}
+
+type EmailNotifier struct{ From string }
+
+func (e EmailNotifier) Notify(id int, msg string) error {
+	fmt.Printf("email from %s to #%d: %s\n", e.From, id, msg)
+	return nil
+}
+
+type SMSNotifier struct{}
+
+func (SMSNotifier) Notify(id int, msg string) error {
+	if len(msg) &gt; 20 {
+		msg = msg[:17] + "..."
+	}
+	fmt.Printf("sms to #%d: %s\n", id, msg)
+	return nil
+}
+
+// MultiNotifier is itself a Notifier that fans out to many.
+type MultiNotifier []Notifier
+
+func (m MultiNotifier) Notify(id int, msg string) error {
+	var failed []string
+	for _, n := range m {
+		if err := n.Notify(id, msg); err != nil {
+			failed = append(failed, err.Error())
+		}
+	}
+	if len(failed) &gt; 0 {
+		return fmt.Errorf("notify: %s", strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+var (
+	_ Notifier = EmailNotifier{}
+	_ Notifier = SMSNotifier{}
+	_ Notifier = MultiNotifier{}
+)
+
+func main() {
+	var n Notifier = MultiNotifier{EmailNotifier{From: "orders@shop.in"}, SMSNotifier{}}
+	n.Notify(42, "Your order #101 has been shipped")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="45-49">Compile-time assertions: if any of these types stopped satisfying <code>Notifier</code>, the build would fail right here instead of somewhere far away.</li>
+      <li data-lines="52" data-state="n=(MultiNotifier, [Email SMS])"><code>MultiNotifier</code> is a slice of <code>Notifier</code>s that is <em>itself</em> a <code>Notifier</code>. The caller sees one notifier and has no idea it fans out.</li>
+      <li data-lines="53,32-34" data-state="id=42; failed=nil; len(m)=2"><code>n.Notify</code> dispatches to <code>MultiNotifier.Notify</code>, which loops over its members.</li>
+      <li data-lines="35,14-15" data-state="id=42; n=EmailNotifier{From:orders@shop.in}" data-out="email from orders@shop.in to #42: Your order #101 has been shipped">Member 1 is an <code>EmailNotifier</code>, so the interface call lands in <code>EmailNotifier.Notify</code>. It returns nil, so nothing is added to <code>failed</code>.</li>
+      <li data-lines="35,21-23" data-state="id=42; n=SMSNotifier{}; msg=&quot;Your order #101 h...&quot;">Member 2 is an <code>SMSNotifier</code>. The 32-byte message is over 20, so it is cut to 17 bytes plus <code>...</code>. This only reassigns the local <code>msg</code> copy.</li>
+      <li data-lines="25-26" data-state="id=42; msg=&quot;Your order #101 h...&quot;" data-out="sms to #42: Your order #101 h...">The SMS goes out truncated, and returns nil.</li>
+      <li data-lines="39,42" data-state="failed=nil">The loop is done and <code>failed</code> is empty, so <code>MultiNotifier</code> returns nil. This "composite" pattern works for loggers, metrics, and hooks too.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>email from orders@shop.in to #42: Your order #101 has been shipped
+sms to #42: Your order #101 h...</pre></div>
+    <p>This is the <strong>composite</strong> pattern: a collection of interface values that also satisfies the interface. <code>io.MultiWriter</code> in the stdlib is exactly this for writers.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: Sum a messy cart with a type switch</summary>
+    <p>Write <code>total(items []any) (float64, []string)</code> that adds up <code>int</code> and <code>float64</code> items and returns a description of everything it skipped. Items that are <code>fmt.Stringer</code> should be described with their <code>String()</code> method; anything else with <code>%T(%v)</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="Summing a []any with a type switch">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func total(items []any) (float64, []string) {
+	var sum float64
+	var skipped []string
+	for _, it := range items {
+		switch v := it.(type) {
+		case int:
+			sum += float64(v)
+		case float64:
+			sum += v
+		case fmt.Stringer:
+			skipped = append(skipped, v.String())
+		default:
+			skipped = append(skipped, fmt.Sprintf("%T(%v)", v, v))
+		}
+	}
+	return sum, skipped
+}
+
+type SKU string
+
+func (s SKU) String() string { return "sku:" + string(s) }
+
+func main() {
+	sum, skipped := total([]any{100, 49.5, "oops", SKU("PEN-1"), 25, nil})
+	fmt.Println("sum:", sum)
+	fmt.Println("skipped:", skipped)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="28,5-8" data-state="sum=0; skipped=nil; len(items)=6"><code>main</code> passes a <code>[]any</code> with six mixed values. <code>total</code> starts with zero values.</li>
+      <li data-lines="9-11" data-state="it=100; sum=100; skipped=[]">Item 1: the type switch matches <code>case int</code>. Inside that case <code>v</code> is a real <code>int</code>, so we can convert and add it.</li>
+      <li data-lines="9,12-13" data-state="it=49.5; sum=149.5; skipped=[]">Item 2 is a <code>float64</code>: added directly.</li>
+      <li data-lines="9,16-17" data-state="it=&quot;oops&quot;; sum=149.5; skipped=[string(oops)]">Item 3 is a <code>string</code>. No case for it, so <code>default</code> records its type and value.</li>
+      <li data-lines="9,14-15,25" data-state="it=SKU(&quot;PEN-1&quot;); sum=149.5; skipped=[string(oops) sku:PEN-1]">Item 4 is a <code>SKU</code>. It isn't <code>int</code> or <code>float64</code>, but it <em>has</em> a <code>String()</code> method, so it matches the interface case <code>fmt.Stringer</code>. Cases are tried top to bottom.</li>
+      <li data-lines="9-11" data-state="it=25; sum=174.5; skipped=[string(oops) sku:PEN-1]">Item 5: another int.</li>
+      <li data-lines="9,16-17" data-state="it=nil; sum=174.5; skipped=[string(oops) sku:PEN-1 &lt;nil&gt;(&lt;nil&gt;)]">Item 6 is a nil interface. There's no <code>case nil</code>, so it lands in <code>default</code>, and <code>%T</code> of nil prints <code>&lt;nil&gt;</code>.</li>
+      <li data-lines="20,29" data-state="sum=174.5" data-out="sum: 174.5">Both results return to <code>main</code>.</li>
+      <li data-lines="30" data-state="skipped=[string(oops) sku:PEN-1 &lt;nil&gt;(&lt;nil&gt;)]" data-out="skipped: [string(oops) sku:PEN-1 &lt;nil&gt;(&lt;nil&gt;)]">Three items were skipped, each described by the branch that caught it.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>sum: 174.5
+skipped: [string(oops) sku:PEN-1 &lt;nil&gt;(&lt;nil&gt;)]</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: A retrying Payer decorator</summary>
+    <p>Write <code>retryPayer</code>, a <code>Payer</code> that wraps another <code>Payer</code> and retries up to N attempts. Test it with a <code>flaky</code> payer that fails its first few calls. The final error should wrap the last underlying error with <code>%w</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="A retrying Payer decorator">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type Payer interface {
+	Pay(amount float64) error
+}
+
+// retryPayer is a decorator: a Payer that wraps a Payer.
+type retryPayer struct {
+	next     Payer
+	attempts int
+}
+
+func (r retryPayer) Pay(amount float64) error {
+	var err error
+	for i := 1; i &lt;= r.attempts; i++ {
+		if err = r.next.Pay(amount); err == nil {
+			return nil
+		}
+		fmt.Printf("attempt %d failed: %v\n", i, err)
+	}
+	return fmt.Errorf("gave up after %d attempts: %w", r.attempts, err)
+}
+
+// flaky fails the first N calls.
+type flaky struct{ failsLeft int }
+
+func (f *flaky) Pay(amount float64) error {
+	if f.failsLeft &gt; 0 {
+		f.failsLeft--
+		return errors.New("gateway timeout")
+	}
+	fmt.Printf("charged ₹%.2f\n", amount)
+	return nil
+}
+
+func main() {
+	var p Payer = retryPayer{next: &amp;flaky{failsLeft: 2}, attempts: 3}
+	fmt.Println("result:", p.Pay(799))
+
+	p = retryPayer{next: &amp;flaky{failsLeft: 5}, attempts: 2}
+	fmt.Println("result:", p.Pay(799))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="42" data-state="p=retryPayer{next:&amp;flaky{failsLeft:2}, attempts:3}">A decorator: <code>retryPayer</code> is a <code>Payer</code> wrapping another <code>Payer</code>. The inner one fails its first 2 calls.</li>
+      <li data-lines="43,18-21,32-35" data-state="i=1; failsLeft=1; err=gateway timeout">Attempt 1: <code>r.next.Pay</code> dispatches to <code>(*flaky).Pay</code>. It decrements <code>failsLeft</code> and fails. <code>flaky</code> needs a pointer receiver so the counter actually goes down.</li>
+      <li data-lines="24" data-state="i=1; failsLeft=1; err=gateway timeout" data-out="attempt 1 failed: gateway timeout">The wrapper logs and loops.</li>
+      <li data-lines="20-21,32-35,24" data-state="i=2; failsLeft=0; err=gateway timeout" data-out="attempt 2 failed: gateway timeout">Attempt 2 fails the same way, using up the last failure.</li>
+      <li data-lines="21,37-38" data-state="i=3; failsLeft=0; err=nil" data-out="charged ₹799.00">Attempt 3: <code>failsLeft</code> is 0, so the charge succeeds and returns nil.</li>
+      <li data-lines="22,43" data-state="err=nil" data-out="result: &lt;nil&gt;">The wrapper returns nil immediately. The caller just sees a successful <code>Pay</code>.</li>
+      <li data-lines="45" data-state="p=retryPayer{next:&amp;flaky{failsLeft:5}, attempts:2}">Now an inner payer that fails 5 times, but only 2 attempts allowed. Same variable <code>p</code>, new dynamic value.</li>
+      <li data-lines="46,20-24" data-state="i=1; failsLeft=4; err=gateway timeout" data-out="attempt 1 failed: gateway timeout">Attempt 1 fails.</li>
+      <li data-lines="20-24" data-state="i=2; failsLeft=3; err=gateway timeout" data-out="attempt 2 failed: gateway timeout">Attempt 2 fails. <code>i</code> becomes 3, which exceeds <code>attempts</code>, so the loop ends.</li>
+      <li data-lines="26,46" data-state="err=gave up after 2 attempts: gateway timeout" data-out="result: gave up after 2 attempts: gateway timeout"><code>%w</code> wraps the last error, so callers can still detect the gateway timeout with <code>errors.Is</code>.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>attempt 1 failed: gateway timeout
+attempt 2 failed: gateway timeout
+charged ₹799.00
+result: &lt;nil&gt;
+attempt 1 failed: gateway timeout
+attempt 2 failed: gateway timeout
+result: gave up after 2 attempts: gateway timeout</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>An interface is a set of method signatures. Any type with those methods satisfies it <strong>implicitly</strong>; no <code>implements</code> keyword.</li>
+      <li>An interface value is a (type, data) pair. It's <code>nil</code> only when both are nil. <strong>A nil pointer inside an interface is not a nil interface</strong>: return a literal <code>nil</code>.</li>
+      <li><code>any</code> holds anything but gives up type safety. Get values back with comma-ok <strong>type assertions</strong> or <strong>type switches</strong>.</li>
+      <li>Learn the stdlib's tiny interfaces: <code>Stringer</code>, <code>error</code>, <code>io.Reader</code>, <code>io.Writer</code>. They make everything composable.</li>
+      <li>Keep interfaces <strong>small</strong>, define them where they're <strong>used</strong>, and "accept interfaces, return structs".</li>
+      <li>Use <code>var _ I = (*T)(nil)</code> to catch broken implementations at compile time.</li>
+      <li>Optional capabilities: assert to a second small interface (<code>p.(Refunder)</code>). Beware wrappers hiding them.</li>
+      <li>Interfaces enable fakes for fast tests, decorators (logging, retry), and plain-constructor dependency injection wired in <code>main</code>.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

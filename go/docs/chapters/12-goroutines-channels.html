@@ -1,0 +1,1287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 12 · Goroutines &amp; Channels — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="12">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part IV · Chapter 12</div>
+  <h1>Goroutines &amp; Channels</h1>
+  <p class="lead">Concurrency is the reason many teams pick Go. Starting a task in the background is one keyword, <code>go</code>, and goroutines talk to each other through typed pipes called channels. This chapter starts where your own code left off (goroutines plus <code>sync.WaitGroup</code>) and goes all the way to the scheduler, <code>select</code>, timeouts, deadlocks, leaks and real patterns.</p>
+  <div class="meta">
+    <span class="pill">⏱ 50 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>Concurrency vs parallelism, and why goroutines are so cheap</li>
+      <li>How the Go scheduler (G, M, P) runs millions of goroutines on a few OS threads</li>
+      <li>Unbuffered channels as a handoff, buffered channels as a queue, and channel direction types</li>
+      <li>Closing channels, <code>range</code> over a channel, the comma-ok receive, and nil channels</li>
+      <li><code>select</code> for multiplexing, non-blocking operations and timeouts</li>
+      <li>Reading the real "all goroutines are asleep - deadlock!" error, and avoiding goroutine leaks</li>
+      <li>Patterns: generators, done channels, ownership ("share memory by communicating"), tickers and timers, and a concurrent URL checker</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Concurrency vs parallelism</h2>
+  <p>These two words get mixed up all the time, so let's pin them down.</p>
+  <ul>
+    <li><strong>Concurrency</strong> is about <em>structure</em>: your program is made of several independent tasks that can make progress in overlapping time periods. Like a chef who puts pasta on to boil, chops vegetables while waiting, then stirs the sauce. One chef, many tasks in progress.</li>
+    <li><strong>Parallelism</strong> is about <em>execution</em>: several tasks literally running at the same instant, on different CPU cores. Like three chefs, each cooking a dish at the same time.</li>
+  </ul>
+  <p>Rob Pike's summary: concurrency is <em>dealing with</em> lots of things at once; parallelism is <em>doing</em> lots of things at once. A concurrent program can run on one core (tasks take turns) or many (tasks run in parallel). Go lets you write the concurrent structure, and the runtime decides how much parallelism to use.</p>
+  <p>Here is the difference, measured. Four goroutines doing pure CPU work, first allowed to use only one core, then all cores:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+// busy does pure CPU work: no sleeping, no I/O.
+func busy() int {
+	x := 0
+	for i := range 200_000_000 {
+		x += i % 7
+	}
+	return x
+}
+
+func run(procs int) time.Duration {
+	runtime.GOMAXPROCS(procs)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() { busy() })
+	}
+	wg.Wait()
+	return time.Since(start).Round(10 * time.Millisecond)
+}
+
+func main() {
+	n := runtime.NumCPU()
+	fmt.Println("4 CPU-bound goroutines, GOMAXPROCS=1:", run(1), "(concurrent, not parallel)")
+	fmt.Printf("4 CPU-bound goroutines, GOMAXPROCS=%d: %v (parallel)\n", n, run(n))
+}</code></pre></div>
+  <div class="output" data-label="output on an 8-core laptop (timings vary)"><pre>4 CPU-bound goroutines, GOMAXPROCS=1: 270ms (concurrent, not parallel)
+4 CPU-bound goroutines, GOMAXPROCS=8: 70ms (parallel)</pre></div>
+  <p>Same code, same four goroutines. With <code>GOMAXPROCS=1</code> they are concurrent but take turns on one core. With 8 they run in parallel and finish about 4x faster. (For waiting-heavy work like network calls, even one core gives a big speedup, because goroutines spend most of their time asleep. That is the URL checker at the end of this chapter.)</p>
+
+  <!-- ============================================================ -->
+  <h2>Goroutines: cheap, growable, and killed when main returns</h2>
+  <p>A <strong>goroutine</strong> is a function running independently of the code that started it. You start one by putting <code>go</code> in front of any function call. The call returns immediately; the function runs "in the background".</p>
+  <div class="live" data-title="Two goroutines interleaving (one possible run)">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func say(msg string) {
+	for i := range 3 {
+		fmt.Println(msg, i)
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func main() {
+	go say("background") // starts, then main moves on immediately
+	say("main")
+	fmt.Println("main returns -&gt; program exits")
+	// "background 2" may never print: when main returns,
+	// every other goroutine is killed on the spot.
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="16" data-state="goroutines=[main, bg]; t=0ms"><code>go say("background")</code> creates a new goroutine and returns <strong>immediately</strong>. It does not wait for <code>say</code> to run, or even to start.</li>
+      <li data-lines="17,9-10" data-state="main: i=0; t=0ms" data-out="main 0"><code>main</code> calls <code>say("main")</code> itself, as an ordinary call, and prints first. That is common but not guaranteed.</li>
+      <li data-lines="9-11" data-state="bg: i=0; main sleeping" data-out="background 0">While <code>main</code> sleeps, the scheduler runs the background goroutine, which prints and then sleeps too.</li>
+      <li data-lines="10-11" data-state="bg: i=1; main: i=1; t≈10ms" data-out="background 1\nmain 1">At about 10ms both wake up. Which prints first is up to the scheduler. In this run, background won. <strong>The order is nondeterministic.</strong></li>
+      <li data-lines="10-11" data-state="bg: i=2; main: i=2; t≈20ms" data-out="main 2\nbackground 2">At about 20ms both print their last line. This time <code>main</code> happened to go first.</li>
+      <li data-lines="11-12" data-state="bg: done; main: sleeping until ≈30ms">Background's loop is over, so its goroutine ends. <code>main</code> still sleeps once more after its last print.</li>
+      <li data-lines="18" data-state="goroutines=[main]" data-out="main returns -&gt; program exits"><code>main</code> returns and the program exits. Had background been slower, its remaining lines would simply be lost: nothing waits for other goroutines.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="one run (interleaving varies)"><pre>main 0
+background 0
+background 1
+main 1
+main 2
+background 2
+main returns -&gt; program exits</pre></div>
+  <p>Run it a few times and the interleaving changes: the scheduler decides who runs when. And here is the first big rule: <strong>when <code>main</code> returns, the program exits, and every other goroutine is killed instantly</strong>, with no cleanup and no deferred calls. In this run "background 2" just made it. On another run it may not.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: time.Sleep is not synchronization</div><p>Your learning code has a commented-out <code>time.Sleep(time.Second * 2)</code> next to <code>wg.Wait()</code>. Good instinct to replace it! A sleep only <em>hopes</em> the goroutines finish in time. On a slow CI machine they will not, and the bug appears once a week. Always wait for an actual signal: a <code>WaitGroup</code>, a channel receive, or a context.</p></div>
+
+  <h3>Recap: waiting with sync.WaitGroup</h3>
+  <p>Here is the exact pattern from your <code>main.go</code>, plus the shortcut added in Go 1.25, <code>wg.Go</code>, which does <code>Add(1)</code>, starts the goroutine and calls <code>Done</code> for you, so you cannot forget any of the three:</p>
+  <div class="live" data-title="WaitGroup: counting goroutines in and out">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// This is the pattern from your own learning code: Add before go,
+// Done (deferred) inside, Wait in main.
+func task(i int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	fmt.Println("printing", i)
+}
+
+func main() {
+	var wg sync.WaitGroup
+	for i := 0; i &lt; 5; i++ {
+		wg.Add(1)
+		go task(i, &amp;wg)
+	}
+	wg.Wait()
+	fmt.Println("all 5 tasks done")
+
+	// Go 1.25+: wg.Go does Add(1) + go + defer Done() for you.
+	var wg2 sync.WaitGroup
+	for i := range 3 {
+		wg2.Go(func() {
+			fmt.Println("wg.Go task", i) // i is per-iteration (Go 1.22+)
+		})
+	}
+	wg2.Wait()
+	fmt.Println("all wg.Go tasks done")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="16-19" data-state="i=0; counter=1; goroutines started=1"><code>wg.Add(1)</code> bumps the counter <strong>before</strong> <code>go</code>. Doing it inside the goroutine would race with <code>Wait</code>. Then <code>task(0, &amp;wg)</code> starts in the background.</li>
+      <li data-lines="17-19" data-state="i=4; counter=5; goroutines started=5">The loop repeats until five goroutines exist. We pass <code>&amp;wg</code>: a copied WaitGroup would count on its own copy.</li>
+      <li data-lines="21" data-state="counter=5; main=blocked in Wait"><code>Wait</code> blocks <code>main</code> until the counter falls to zero.</li>
+      <li data-lines="10-12" data-state="counter=5 → 0" data-out="printing 4\nprinting 1\nprinting 2\nprinting 3\nprinting 0">Each task prints, and its deferred <code>Done()</code> subtracts one. The tasks run in whatever order the scheduler picks: this run printed 4 1 2 3 0. <strong>Yours will differ.</strong></li>
+      <li data-lines="21-22" data-state="counter=0" data-out="all 5 tasks done">The counter hit zero, so <code>Wait</code> returns. This line is guaranteed to come <strong>after</strong> all five prints.</li>
+      <li data-lines="25-29" data-state="i=0,1,2; counter=3"><code>wg2.Go</code> (Go 1.25+) does <code>Add(1)</code>, starts the goroutine, and calls <code>Done</code> when the function returns. Each closure captures its own <code>i</code> (Go 1.22+ loop semantics).</li>
+      <li data-lines="28" data-state="counter=3 → 0" data-out="wg.Go task 2\nwg.Go task 0\nwg.Go task 1">Again the order is up to the scheduler: 2, 0, 1 in this run.</li>
+      <li data-lines="31-32" data-state="counter=0" data-out="all wg.Go tasks done"><code>Wait</code> returns once all three finished.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="one run (order varies)"><pre>printing 4
+printing 1
+printing 2
+printing 3
+printing 0
+all 5 tasks done
+wg.Go task 2
+wg.Go task 0
+wg.Go task 1
+all wg.Go tasks done</pre></div>
+  <p>A <code>WaitGroup</code> is a counter: <code>Add</code> increases it, <code>Done</code> decreases it, <code>Wait</code> blocks until it is zero. It answers "are they all finished?" but it cannot carry <em>data</em> back. For that we need channels. (Chapter 13 covers WaitGroup, Mutex and friends in depth.)</p>
+
+  <h3>Why goroutines are cheap</h3>
+  <p>An operating-system thread typically reserves 1 to 8 MB for its stack, and creating or switching between threads involves the kernel. A goroutine starts with a tiny stack, about <strong>2 KB</strong>, managed by the Go runtime. When a goroutine needs more (deep recursion, big local arrays), the runtime allocates a bigger stack, copies the old one over and fixes up pointers. Stacks <strong>grow</strong> (and shrink during garbage collection) automatically. Switching between goroutines happens in user space and costs on the order of a hundred nanoseconds.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+func main() {
+	fmt.Println("CPUs:", runtime.NumCPU(), "GOMAXPROCS:", runtime.GOMAXPROCS(0))
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&amp;before)
+
+	const n = 100_000
+	var wg sync.WaitGroup
+	block := make(chan struct{})
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			&lt;-block // park until we close the channel
+		}()
+	}
+
+	runtime.ReadMemStats(&amp;after)
+	fmt.Println("goroutines alive:", runtime.NumGoroutine())
+	perG := (after.StackInuse - before.StackInuse) / n
+	fmt.Printf("stack memory per goroutine: ~%d bytes\n", perG)
+
+	close(block) // release them all
+	wg.Wait()
+	fmt.Println("after release:", runtime.NumGoroutine())
+}</code></pre></div>
+  <div class="output"><pre>CPUs: 8 GOMAXPROCS: 8
+goroutines alive: 100001
+stack memory per goroutine: ~2048 bytes
+after release: 1</pre></div>
+  <p>A hundred thousand goroutines at about 2 KB each is roughly 200 MB in total. The same number of OS threads, reserving 1 MB or more of stack each, would need around 100 GB of address space. Real servers routinely run hundreds of thousands of goroutines, one per connection.</p>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Cheap does not mean free. Each goroutine still holds memory, and anything it references cannot be garbage collected. Spawning one goroutine per incoming request is idiomatic; spawning one per row of a 50-million-row file is not. Bound your concurrency (worker pools, semaphores; Chapter 13) whenever the input size is not under your control.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>The scheduler: G, M and P, explained simply</h2>
+  <p>How do 100,000 goroutines run on an 8-core machine? The Go runtime contains a <strong>scheduler</strong> that multiplexes goroutines onto a small number of OS threads. It uses three kinds of objects:</p>
+  <ul>
+    <li><strong>G</strong> (goroutine): the task. Holds its stack, its current instruction, and its status (running, runnable, waiting).</li>
+    <li><strong>M</strong> (machine): a real OS thread. Only Ms actually execute code on the CPU.</li>
+    <li><strong>P</strong> (processor): a "license to run Go code", with its own <strong>local run queue</strong> of runnable Gs. There are exactly <code>GOMAXPROCS</code> Ps (by default, the number of CPUs available to the process; since Go 1.25 it also respects container CPU limits). An M must hold a P to run Go code.</li>
+  </ul>
+
+  <figure class="diagram"><svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect width="760" height="330" fill="#262624"/>
+    <!-- global queue -->
+    <rect x="20" y="20" width="720" height="50" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="36" y="50" fill="#a8a49a" font-size="13">Global run queue</text>
+    <circle cx="200" cy="45" r="13" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="200" y="50" fill="#7fa6d9" font-size="11" text-anchor="middle">G</text>
+    <circle cx="232" cy="45" r="13" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="232" y="50" fill="#7fa6d9" font-size="11" text-anchor="middle">G</text>
+    <text x="270" y="50" fill="#a8a49a" font-size="12">overflow / fairness; checked now and then</text>
+    <!-- P1 -->
+    <rect x="20" y="95" width="230" height="120" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+    <text x="36" y="118" fill="#d97757" font-size="14" font-weight="600">P0</text>
+    <text x="70" y="118" fill="#a8a49a" font-size="12">local run queue</text>
+    <circle cx="50" cy="150" r="13" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="50" y="155" fill="#7fa6d9" font-size="11" text-anchor="middle">G</text>
+    <circle cx="82" cy="150" r="13" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="82" y="155" fill="#7fa6d9" font-size="11" text-anchor="middle">G</text>
+    <circle cx="114" cy="150" r="13" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/><text x="114" y="155" fill="#7fa6d9" font-size="11" text-anchor="middle">G</text>
+    <text x="36" y="195" fill="#ece9e1" font-size="12">running:</text>
+    <circle cx="100" cy="191" r="13" fill="#d97757"/><text x="100" y="196" fill="#262624" font-size="11" text-anchor="middle" font-weight="700">G</text>
+    <!-- P2 -->
+    <rect x="265" y="95" width="230" height="120" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+    <text x="281" y="118" fill="#d97757" font-size="14" font-weight="600">P1</text>
+    <text x="315" y="118" fill="#a8a49a" font-size="12">local run queue (empty)</text>
+    <text x="281" y="155" fill="#e0b45c" font-size="12">steals half of P0's queue ◀</text>
+    <text x="281" y="195" fill="#ece9e1" font-size="12">running:</text>
+    <circle cx="345" cy="191" r="13" fill="#d97757"/><text x="345" y="196" fill="#262624" font-size="11" text-anchor="middle" font-weight="700">G</text>
+    <!-- blocked -->
+    <rect x="510" y="95" width="230" height="120" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="526" y="118" fill="#ece9e1" font-size="14" font-weight="600">Waiting (not in any queue)</text>
+    <circle cx="540" cy="150" r="13" fill="#2e2d2a" stroke="#a8a49a" stroke-width="2" stroke-dasharray="3 2"/><text x="540" y="155" fill="#a8a49a" font-size="11" text-anchor="middle">G</text>
+    <text x="562" y="155" fill="#a8a49a" font-size="12">on channel recv</text>
+    <circle cx="540" cy="188" r="13" fill="#2e2d2a" stroke="#a8a49a" stroke-width="2" stroke-dasharray="3 2"/><text x="540" y="193" fill="#a8a49a" font-size="11" text-anchor="middle">G</text>
+    <text x="562" y="193" fill="#a8a49a" font-size="12">on network (netpoller)</text>
+    <!-- Ms -->
+    <rect x="70" y="240" width="130" height="44" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="2"/>
+    <text x="135" y="267" fill="#8fbf7f" font-size="13" text-anchor="middle">M0 (OS thread)</text>
+    <rect x="315" y="240" width="130" height="44" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="2"/>
+    <text x="380" y="267" fill="#8fbf7f" font-size="13" text-anchor="middle">M1 (OS thread)</text>
+    <line x1="135" y1="215" x2="135" y2="240" stroke="#8fbf7f" stroke-width="2"/>
+    <line x1="380" y1="215" x2="380" y2="240" stroke="#8fbf7f" stroke-width="2"/>
+    <rect x="70" y="292" width="375" height="26" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+    <text x="257" y="310" fill="#a8a49a" font-size="12" text-anchor="middle">CPU cores (GOMAXPROCS = 2 in this picture)</text>
+    <text x="520" y="260" fill="#a8a49a" font-size="12">When a G blocks, it leaves its P;</text>
+    <text x="520" y="278" fill="#a8a49a" font-size="12">the P picks the next G at once.</text>
+    <text x="520" y="296" fill="#a8a49a" font-size="12">When it is woken, it is put back</text>
+    <text x="520" y="314" fill="#a8a49a" font-size="12">into a run queue.</text>
+  </svg><figcaption>The GMP model. Each P has a queue of runnable goroutines and an OS thread (M) executing them. Idle Ps steal work from busy ones.</figcaption></figure>
+
+  <p>The important behaviours, in plain words:</p>
+  <ol>
+    <li><code>go f()</code> creates a G and puts it on the current P's local queue. Nothing heavy happens: no thread is created.</li>
+    <li>Each M runs the G at the front of its P's queue. When that G <strong>blocks</strong> (channel receive, mutex, <code>time.Sleep</code>, network read), it is parked in a waiting list and the P immediately runs the next G. The thread never sits idle waiting.</li>
+    <li>Network I/O uses the <strong>netpoller</strong> (epoll/kqueue under the hood). A goroutine waiting on a socket costs no thread at all; it is woken when data arrives. That is why one Go server can hold 100k connections.</li>
+    <li>A blocking <strong>system call</strong> (like reading a file) does block the thread. The runtime then hands the P to another M, so other goroutines keep running.</li>
+    <li><strong>Work stealing</strong>: a P with an empty queue steals half the goroutines from a busy P's queue, keeping all cores busy.</li>
+    <li><strong>Preemption</strong>: since Go 1.14, a goroutine running a tight loop for more than about 10 ms is interrupted asynchronously, so one busy goroutine cannot starve the others.</li>
+  </ol>
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Ps are checkout counters, Ms are cashiers, Gs are customers. There are only as many counters as <code>GOMAXPROCS</code>. If a customer has to go and fetch something (blocks), they step aside and the cashier serves the next one immediately. A counter with no queue grabs half of the customers from the longest line.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Unbuffered channels: a synchronized handoff</h2>
+  <p>A <strong>channel</strong> is a typed pipe that goroutines use to pass values. You create one with <code>make</code>, send with <code>ch &lt;- v</code> and receive with <code>v := &lt;-ch</code> (the arrow shows the direction data flows).</p>
+  <div class="code" data-file="syntax"><pre><code class="language-go">ch := make(chan string)    // unbuffered channel of strings
+ch &lt;- "hi"                 // send: blocks until a receiver takes it
+msg := &lt;-ch                // receive: blocks until a sender gives one
+&lt;-ch                       // receive and throw the value away</code></pre></div>
+  <p>An <strong>unbuffered</strong> channel has no storage. A send and a receive must happen <em>together</em>: whoever arrives first waits for the other. It is like handing someone a package in person. You cannot leave it on the doorstep; you both have to be there. So an unbuffered channel does two jobs at once: it <strong>transfers data</strong> and it <strong>synchronizes</strong> the two goroutines (after the handoff, both know the other reached that point).</p>
+
+  <div class="live" data-title="Two goroutines meet at an unbuffered channel">
+    <pre><code class="language-go">func main() {
+	ch := make(chan string)
+	go func() {
+		fmt.Println("worker: sending")
+		ch &lt;- "pizza"
+	}()
+	time.Sleep(50 * time.Millisecond)
+	fmt.Println("main: receiving")
+	msg := &lt;-ch
+	fmt.Println("main: got", msg)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="ch=chan string (cap 0)">We make an unbuffered channel. Capacity 0: it can never hold a value by itself.</li>
+      <li data-lines="3,7" data-state="main=sleeping; worker=runnable"><code>go func()</code> creates the worker goroutine and returns immediately. <code>main</code> goes to sleep for 50 ms.</li>
+      <li data-lines="4" data-state="main=sleeping; worker=running" data-out="worker: sending">The scheduler runs the worker. It prints.</li>
+      <li data-lines="5" data-state="main=sleeping; worker=BLOCKED on send">The worker tries to send <code>"pizza"</code>. Nobody is receiving, so the worker <strong>parks</strong>: it stops, uses no CPU, and waits.</li>
+      <li data-lines="8" data-state="main=running; worker=BLOCKED on send" data-out="main: receiving">50 ms later, <code>main</code> wakes and prints. The worker is still waiting at the door.</li>
+      <li data-lines="9,5" data-state="msg=&quot;pizza&quot;; worker=runnable">The receive meets the waiting sender. The value is copied directly from the worker to <code>main</code>, and the worker is made runnable again. The handoff is complete.</li>
+      <li data-lines="10" data-state="msg=&quot;pizza&quot;" data-out="main: got pizza">Main prints and returns. (The worker has nothing left to do, so nothing is lost.)</li>
+    </ol>
+  </div>
+  <div class="output"><pre>worker: sending
+main: receiving
+main: got pizza</pre></div>
+
+  <p>Here is the same idea with timestamps, so you can see the sender really waits for 200 ms:</p>
+  <div class="live" data-title="An unbuffered send waits for its receiver">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+	ts := func() string { return fmt.Sprintf("[%3dms]", time.Since(start).Milliseconds()) }
+
+	ch := make(chan string) // unbuffered: capacity 0
+
+	go func() {
+		fmt.Println(ts(), "worker: preparing the order...")
+		time.Sleep(100 * time.Millisecond)
+		fmt.Println(ts(), "worker: sending (blocks until main receives)")
+		ch &lt;- "pizza"
+		fmt.Println(ts(), "worker: handed off, going home")
+	}()
+
+	time.Sleep(300 * time.Millisecond) // main is busy for a while
+	fmt.Println(ts(), "main: ready to receive")
+	order := &lt;-ch
+	fmt.Println(ts(), "main: got", order)
+	time.Sleep(10 * time.Millisecond)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12" data-state="ch=chan string (cap 0); t=0ms">An unbuffered channel has no storage. A send can only finish when a receiver takes the value at the same moment.</li>
+      <li data-lines="14,22" data-state="worker=running; main=sleeping until 300ms">The worker goroutine starts, and <code>main</code> goes to sleep for 300ms.</li>
+      <li data-lines="15-16" data-state="worker=sleeping until ~100ms" data-out="[  0ms] worker: preparing the order...">The worker announces itself and sleeps 100ms.</li>
+      <li data-lines="17-18" data-state="worker=BLOCKED on ch &lt;-; t≈101ms" data-out="[101ms] worker: sending (blocks until main receives)">At ~101ms the worker reaches <code>ch &lt;- "pizza"</code>. Nobody is receiving, so the worker is <strong>parked</strong> right here.</li>
+      <li data-lines="22-23" data-state="worker=blocked; main=awake; t=300ms" data-out="[300ms] main: ready to receive">For about 200ms nothing happens. Then <code>main</code> wakes up.</li>
+      <li data-lines="24,18" data-state="order=&quot;pizza&quot;; worker=unblocked"><code>&lt;-ch</code> meets the waiting sender. The value is handed over directly and <strong>both</strong> goroutines can continue.</li>
+      <li data-lines="25" data-state="t=300ms" data-out="[300ms] main: got pizza"><code>main</code> prints first in this run.</li>
+      <li data-lines="19,26" data-state="worker=done; main=sleeping 10ms" data-out="[300ms] worker: handed off, going home">The worker prints its last line. These two 300ms lines could appear in either order. The final sleep gives the worker time to print before <code>main</code> exits.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[  0ms] worker: preparing the order...
+[101ms] worker: sending (blocks until main receives)
+[300ms] main: ready to receive
+[300ms] main: got pizza
+[300ms] worker: handed off, going home</pre></div>
+
+  <!-- ============================================================ -->
+  <h2>Buffered channels and direction types</h2>
+  <p><code>make(chan T, n)</code> creates a <strong>buffered</strong> channel with room for <code>n</code> values. It behaves like a queue (first in, first out):</p>
+  <ul>
+    <li>A send blocks only when the buffer is <strong>full</strong>.</li>
+    <li>A receive blocks only when the buffer is <strong>empty</strong>.</li>
+    <li><code>len(ch)</code> is how many values are waiting; <code>cap(ch)</code> is the buffer size.</li>
+  </ul>
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Unbuffered = handing a package to a person. Buffered = a mailbox with <code>n</code> slots. The mail carrier can drop letters and leave, until the box is full; then they must wait for someone to empty a slot.</p></div>
+
+  <div class="live" data-title="A buffered channel as a small FIFO queue">
+    <pre><code class="language-go">func main() {
+	ch := make(chan int, 2)
+	ch &lt;- 10
+	ch &lt;- 20
+	fmt.Println(len(ch), cap(ch))
+	fmt.Println(&lt;-ch)
+	ch &lt;- 30
+	fmt.Println(&lt;-ch, &lt;-ch)
+	fmt.Println(len(ch))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="buffer=[ _ _ ]; len=0; cap=2">A channel with two slots.</li>
+      <li data-lines="3-4" data-state="buffer=[10 20]; len=2">Two sends. Neither blocks, because there is room. No other goroutine is needed. (A third send here would deadlock.)</li>
+      <li data-lines="5" data-out="2 2"><code>len</code> is 2, <code>cap</code> is 2.</li>
+      <li data-lines="6" data-state="buffer=[20 _ ]; len=1" data-out="10">Receive takes the <strong>oldest</strong> value: 10.</li>
+      <li data-lines="7" data-state="buffer=[20 30]; len=2">A slot is free, so sending 30 does not block. It goes to the back.</li>
+      <li data-lines="8" data-state="buffer=[ _ _ ]; len=0" data-out="20 30">Two receives, in FIFO order: 20 then 30.</li>
+      <li data-lines="9" data-out="0">Empty again. A receive now would block forever (deadlock).</li>
+    </ol>
+  </div>
+
+  <div class="live" data-title="A full buffer makes the sender wait">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	ch := make(chan int, 3) // buffer holds 3 values
+	fmt.Println("len:", len(ch), "cap:", cap(ch))
+
+	ch &lt;- 1 // does not block: there is room
+	ch &lt;- 2
+	ch &lt;- 3
+	fmt.Println("len:", len(ch), "cap:", cap(ch), "(full)")
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		fmt.Println("receiver takes", &lt;-ch)
+	}()
+
+	fmt.Println("sending 4 (blocks until there is room)...")
+	ch &lt;- 4
+	fmt.Println("sent 4")
+
+	for len(ch) &gt; 0 {
+		fmt.Println("drain", &lt;-ch) // FIFO: first in, first out
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-10" data-state="buf=[]; len=0; cap=3" data-out="len: 0 cap: 3">A buffered channel is a queue with room for 3 values. It starts empty.</li>
+      <li data-lines="12-15" data-state="buf=[1 2 3]; len=3; cap=3" data-out="len: 3 cap: 3 (full)">Three sends go straight into the buffer. None of them blocks, even though no one is receiving.</li>
+      <li data-lines="17-18" data-state="buf=[1 2 3]; receiver=sleeping 50ms">A receiver goroutine starts, but sleeps 50ms first.</li>
+      <li data-lines="22-23" data-state="buf=[1 2 3]; main=BLOCKED on ch &lt;- 4" data-out="sending 4 (blocks until there is room)...">The buffer is full, so <code>ch &lt;- 4</code> <strong>blocks</strong> <code>main</code>.</li>
+      <li data-lines="19" data-state="buf=[2 3]; took=1" data-out="receiver takes 1">After 50ms the receiver takes the oldest value, <code>1</code>. That frees a slot.</li>
+      <li data-lines="23-24" data-state="buf=[2 3 4]; len=3" data-out="sent 4"><code>main</code>'s pending send completes into the free slot. (In theory "sent 4" could print before "receiver takes 1", since they are on different goroutines; in practice the receiver prints first.)</li>
+      <li data-lines="26-27" data-state="buf=[]; len=0" data-out="drain 2\ndrain 3\ndrain 4">We drain the rest in FIFO order: 2, 3, 4.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>len: 0 cap: 3
+len: 3 cap: 3 (full)
+sending 4 (blocks until there is room)...
+receiver takes 1
+sent 4
+drain 2
+drain 3
+drain 4</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: buffer sizes</div><p>Default to unbuffered, or a buffer of exactly 1 or exactly N (the known number of senders, as in the URL checker below). A buffer is not a performance knob to "make deadlocks go away"; it only delays them. Large arbitrary buffers (<code>make(chan Job, 10000)</code>) hide backpressure problems: the producer happily runs ahead until memory or latency explodes. If you pick a number, write down why.</p></div>
+
+  <h3>Channel direction types</h3>
+  <p>A channel type can be restricted to one direction. This is how functions document, and the compiler enforces, who sends and who receives:</p>
+  <table><thead><tr><th>Type</th><th>Can send?</th><th>Can receive?</th><th>Can close?</th></tr></thead><tbody>
+    <tr><td><code>chan T</code></td><td>yes</td><td>yes</td><td>yes</td></tr>
+    <tr><td><code>chan&lt;- T</code> (send-only)</td><td>yes</td><td>no</td><td>yes</td></tr>
+    <tr><td><code>&lt;-chan T</code> (receive-only)</td><td>no</td><td>yes</td><td>no</td></tr>
+  </tbody></table>
+  <p>A bidirectional <code>chan T</code> converts automatically to either restricted type when you pass it to a function. Trying to use it the wrong way does not compile:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+// produce may only SEND on out.
+func produce(out chan&lt;- int) {
+	out &lt;- 1
+	&lt;-out // compile error: receive from send-only channel
+}
+
+// consume may only RECEIVE from in.
+func consume(in &lt;-chan int) {
+	in &lt;- 2 // compile error: send to receive-only channel
+	close(in)
+}
+
+func main() {}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># ch12/e07
+./main.go:6:4: invalid operation: cannot receive from send-only channel chan&lt;- int out (variable of type chan&lt;- int)
+./main.go:11:2: invalid operation: cannot send to receive-only channel &lt;-chan int in (variable of type &lt;-chan int)
+./main.go:12:8: invalid operation: cannot close receive-only channel in (variable of type &lt;-chan int)</pre></div>
+  <p>Tip for remembering: the arrow always points <strong>left</strong>, in the direction data flows. <code>chan&lt;-</code> is "data goes into the channel"; <code>&lt;-chan</code> is "data comes out of the channel".</p>
+
+  <!-- ============================================================ -->
+  <h2>Closing channels, range and comma-ok</h2>
+  <p><code>close(ch)</code> says "no more values will ever be sent". After closing:</p>
+  <ul>
+    <li>Receivers still get any values left in the buffer.</li>
+    <li>Once empty, every receive returns <strong>immediately</strong> with the zero value. It never blocks again.</li>
+    <li><code>v, ok := &lt;-ch</code> reports <code>ok == false</code> when the value came from a closed, empty channel.</li>
+    <li><code>for v := range ch</code> receives until the channel is closed and drained, then exits the loop.</li>
+    <li>Sending on a closed channel, closing a closed channel, or closing a nil channel <strong>panics</strong>.</li>
+  </ul>
+  <div class="live" data-title="range keeps receiving until close">
+    <pre><code class="language-go">func main() {
+	ch := make(chan int)
+	done := make(chan bool)
+	go func() {
+		for v := range ch {
+			fmt.Println("worker got", v)
+		}
+		fmt.Println("worker: channel closed")
+		done &lt;- true
+	}()
+	ch &lt;- 1
+	ch &lt;- 2
+	close(ch)
+	&lt;-done
+	fmt.Println("main: done")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-3" data-state="ch=unbuffered int; done=unbuffered bool">Two channels: one for data, one to signal "I've finished".</li>
+      <li data-lines="4-5" data-state="worker: waiting at range">The worker starts and blocks at <code>range ch</code>, waiting for the first value.</li>
+      <li data-lines="11,5-6" data-state="v=1" data-out="worker got 1">Main sends 1. Handoff, and the worker prints it.</li>
+      <li data-lines="12,5-6" data-state="v=2" data-out="worker got 2">Main sends 2. Main had to wait until the worker came back to <code>range</code>, because the channel is unbuffered.</li>
+      <li data-lines="13" data-state="ch=closed">Main closes <code>ch</code>: "nothing more is coming".</li>
+      <li data-lines="5,8" data-state="range ends (ok=false)" data-out="worker: channel closed">The <code>range</code> loop sees the close and exits normally. No special check needed.</li>
+      <li data-lines="9,14" data-state="done handoff">The worker signals on <code>done</code>; main's <code>&lt;-done</code> receives it. Now main knows the worker is finished.</li>
+      <li data-lines="15" data-out="main: done">Safe to exit: no work is lost.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>worker got 1
+worker got 2
+worker: channel closed
+main: done</pre></div>
+
+  <p>The usual shape: a function creates a channel, starts a goroutine that sends and then <code>defer close(out)</code>, and returns the channel as receive-only. Plus comma-ok in action:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func squares(n int) &lt;-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out) // the SENDER closes, when it's done
+		for i := 1; i &lt;= n; i++ {
+			out &lt;- i * i
+		}
+	}()
+	return out
+}
+
+func main() {
+	// range receives until the channel is closed AND drained.
+	for sq := range squares(4) {
+		fmt.Println("got", sq)
+	}
+
+	// comma-ok tells "real zero" apart from "closed".
+	ch := make(chan int, 2)
+	ch &lt;- 0
+	close(ch)
+	v, ok := &lt;-ch
+	fmt.Println("v:", v, "ok:", ok) // a real 0 that was sent
+	v, ok = &lt;-ch
+	fmt.Println("v:", v, "ok:", ok) // closed and empty: zero value, false
+	v, ok = &lt;-ch
+	fmt.Println("v:", v, "ok:", ok, "(receiving from closed never blocks)")
+}</code></pre></div>
+  <div class="output"><pre>got 1
+got 4
+got 9
+got 16
+v: 0 ok: true
+v: 0 ok: false
+v: 0 ok: false (receiving from closed never blocks)</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: only the sender closes</div><p>Closing is a message from the <strong>sender</strong> to the receivers. A receiver should never close a channel, because a sender might still send and panic:</p></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int, 1)
+	close(ch)
+	fmt.Println("closed; now sending...")
+	ch &lt;- 1
+}</code></pre></div>
+  <div class="output error" data-label="Runtime panic (paths shortened)"><pre>closed; now sending...
+panic: send on closed channel
+
+goroutine 1 [running]:
+main.main()
+	/home/you/conc/e09/main.go:9 +0x74
+exit status 2</pre></div>
+  <p>With several senders, none of them can safely close the channel alone. The usual fix: senders use a <code>WaitGroup</code>, and one extra goroutine does <code>wg.Wait(); close(ch)</code>. Also: you do not <em>have</em> to close a channel. It is not like a file. Close only when receivers need to know that no more values are coming (for example, to end a <code>range</code>). Unclosed channels are garbage collected like anything else.</p>
+
+  <h3>Nil channels</h3>
+  <p>The zero value of a channel type is <code>nil</code>. Sending to or receiving from a nil channel <strong>blocks forever</strong>. That sounds useless, but inside <code>select</code> it is a neat trick: setting a channel variable to <code>nil</code> switches off its <code>case</code>.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func emit(name string, n int) &lt;-chan string {
+	ch := make(chan string)
+	go func() {
+		defer close(ch)
+		for i := range n {
+			ch &lt;- fmt.Sprint(name, i)
+		}
+	}()
+	return ch
+}
+
+// merge reads from a and b until BOTH are closed.
+// Setting a finished channel to nil disables its select case,
+// because operations on a nil channel block forever.
+func merge(a, b &lt;-chan string) []string {
+	var got []string
+	for a != nil || b != nil {
+		select {
+		case v, ok := &lt;-a:
+			if !ok {
+				a = nil
+				got = append(got, "(a closed)")
+				continue
+			}
+			got = append(got, v)
+		case v, ok := &lt;-b:
+			if !ok {
+				b = nil
+				got = append(got, "(b closed)")
+				continue
+			}
+			got = append(got, v)
+		}
+	}
+	return got
+}
+
+func main() {
+	got := merge(emit("a", 2), emit("b", 3))
+	fmt.Println(len(got), "items (order varies per run):")
+	fmt.Println(got)
+}</code></pre></div>
+  <div class="output" data-label="one run (order varies)"><pre>7 items (order varies per run):
+[b0 b1 b2 (b closed) a0 a1 (a closed)]</pre></div>
+
+  <table><thead><tr><th>Operation</th><th>nil channel</th><th>closed channel</th><th>open channel</th></tr></thead><tbody>
+    <tr><td>send <code>ch &lt;- v</code></td><td>blocks forever</td><td><strong>panic</strong></td><td>blocks until received / room in buffer</td></tr>
+    <tr><td>receive <code>&lt;-ch</code></td><td>blocks forever</td><td>buffered values, then zero value with ok=false, never blocks</td><td>blocks until a value is available</td></tr>
+    <tr><td><code>close(ch)</code></td><td><strong>panic</strong></td><td><strong>panic</strong></td><td>succeeds</td></tr>
+    <tr><td><code>len</code> / <code>cap</code></td><td>0 / 0</td><td>remaining / cap</td><td>queued / cap</td></tr>
+  </tbody></table>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q"><code>ch := make(chan int, 1); ch &lt;- 7; close(ch)</code>. What do the next two receives <code>v, ok := &lt;-ch</code> return?</div>
+    <div class="quiz-opts"><button>panic: receive from closed channel</button><button><code>7 true</code>, then <code>0 false</code></button><button><code>0 false</code>, then <code>0 false</code></button><button><code>7 true</code>, then it blocks forever</button></div>
+    <div class="quiz-explain">Closing does not throw away buffered values. The first receive gets the 7 that was already in the buffer (ok is true because it is a real sent value). After that the channel is closed and empty, so receives return immediately with the zero value and <code>ok == false</code>. Receiving from a closed channel never panics and never blocks.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>select: waiting on many channels at once</h2>
+  <p><code>select</code> looks like a <code>switch</code>, but each <code>case</code> is a channel operation. It blocks until <strong>one</strong> of the cases can proceed, then runs that case. If several are ready at the same moment, it picks one <strong>at random</strong> (so no channel is starved). A <code>default</code> case runs immediately if nothing else is ready, which makes the operation non-blocking.</p>
+
+  <div class="live" data-title="select with a timeout">
+    <pre><code class="language-go">func main() {
+	fast := make(chan string, 1)
+	slow := make(chan string, 1)
+	go func() { time.Sleep(10 * time.Millisecond); fast &lt;- "fast" }()
+	go func() { time.Sleep(500 * time.Millisecond); slow &lt;- "slow" }()
+
+	timeout := time.After(100 * time.Millisecond)
+	for range 3 {
+		select {
+		case v := &lt;-fast:
+			fmt.Println("got", v)
+		case v := &lt;-slow:
+			fmt.Println("got", v)
+		case &lt;-timeout:
+			fmt.Println("timeout!")
+			return
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-5" data-state="fast: in 10ms; slow: in 500ms">Two buffered result channels and two goroutines that will deliver after 10 ms and 500 ms.</li>
+      <li data-lines="7" data-state="timeout: fires at 100ms"><code>time.After</code> returns a channel that will receive one value after 100 ms. We create it <strong>once</strong>, outside the loop, so it is a deadline for the whole loop.</li>
+      <li data-lines="8-9" data-state="t=0ms; nothing ready">First iteration: no case is ready, so <code>select</code> blocks (the goroutine parks; no CPU used).</li>
+      <li data-lines="10-11" data-state="t=10ms; fast ready" data-out="got fast">At 10 ms the fast value arrives. That case runs.</li>
+      <li data-lines="8-9" data-state="t=10ms; waiting on slow / timeout">Second iteration: blocked again. Only <code>slow</code> and <code>timeout</code> can still fire.</li>
+      <li data-lines="14-16" data-state="t=100ms; timeout ready" data-out="timeout!">At 100 ms the timer fires before <code>slow</code> (500 ms). We print and return. The slow goroutine can still send later because its channel has a buffer of 1, so it will not leak.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>got fast
+timeout!</pre></div>
+
+  <p>The three everyday <code>select</code> idioms in one program: per-operation timeout, non-blocking send ("drop if busy"), and non-blocking receive ("poll"):</p>
+  <div class="live" data-title="select: timeouts, then default for non-blocking ops">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func slowQuery(d time.Duration) &lt;-chan string {
+	ch := make(chan string, 1) // buffered: the sender never gets stuck
+	go func() {
+		time.Sleep(d)
+		ch &lt;- fmt.Sprintf("result after %v", d)
+	}()
+	return ch
+}
+
+func main() {
+	// 1. Timeout with time.After
+	for _, d := range []time.Duration{20 * time.Millisecond, 200 * time.Millisecond} {
+		select {
+		case r := &lt;-slowQuery(d):
+			fmt.Println("ok:", r)
+		case &lt;-time.After(100 * time.Millisecond):
+			fmt.Println("timeout waiting for", d, "query")
+		}
+	}
+
+	// 2. Non-blocking send with default
+	jobs := make(chan int, 1)
+	for i := range 3 {
+		select {
+		case jobs &lt;- i:
+			fmt.Println("queued job", i)
+		default:
+			fmt.Println("queue full, dropping job", i)
+		}
+	}
+
+	// 3. Non-blocking receive
+	select {
+	case j := &lt;-jobs:
+		fmt.Println("took job", j)
+	default:
+		fmt.Println("nothing to do")
+	}
+	select {
+	case j := &lt;-jobs:
+		fmt.Println("took job", j)
+	default:
+		fmt.Println("nothing to do")
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="19-21,8-13" data-state="d=20ms; ch(cap 1)=[]; timer=100ms"><code>select</code> evaluates both channel expressions first: <code>slowQuery(20ms)</code> starts a goroutine, and <code>time.After</code> starts a 100ms timer. Then it waits for whichever is ready first.</li>
+      <li data-lines="21-22" data-state="d=20ms; r=&quot;result after 20ms&quot;" data-out="ok: result after 20ms">At 20ms the query sends its result. That case wins; the timer is simply ignored.</li>
+      <li data-lines="23-24" data-state="d=200ms; winner=timer" data-out="timeout waiting for 200ms query">Second query needs 200ms, so the 100ms timer fires first. The query goroutine still finishes later, and because <code>ch</code> has a buffer of 1, its send never blocks: <strong>no leak</strong>.</li>
+      <li data-lines="29-33" data-state="i=0; jobs=[0]; len=1; cap=1" data-out="queued job 0"><code>jobs</code> has room, so the send case is ready and runs.</li>
+      <li data-lines="31-35" data-state="i=1; jobs=[0] (full)" data-out="queue full, dropping job 1">The buffer is full, so the send is not ready. With a <code>default</code> branch, <code>select</code> does not wait: it runs <code>default</code> right away.</li>
+      <li data-lines="31-35" data-state="i=2; jobs=[0] (full)" data-out="queue full, dropping job 2">Same for job 2. This is how you shed load instead of blocking.</li>
+      <li data-lines="40-42" data-state="j=0; jobs=[]" data-out="took job 0">A non-blocking receive: a value is waiting, so we take it.</li>
+      <li data-lines="46-50" data-state="jobs=[]" data-out="nothing to do">Now the channel is empty, so the receive is not ready and <code>default</code> runs instead of blocking forever.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>ok: result after 20ms
+timeout waiting for 200ms query
+queued job 0
+queue full, dropping job 1
+queue full, dropping job 2
+took job 0
+nothing to do</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: time.After inside a busy loop</div><p><code>case &lt;-time.After(time.Second)</code> inside a <code>for</code> loop creates a <em>new</em> timer on every iteration, so the timeout restarts each time a message arrives, which is usually not what you meant. Decide: a deadline for the whole operation (create it once, before the loop, as in the walkthrough) or an idle timeout (a <code>time.Timer</code> you <code>Reset</code>). Since Go 1.23, unreferenced timers are garbage collected right away, so the old memory-leak worry is gone, but the logic bug is not. In real services, prefer <code>context.WithTimeout</code> (Chapter 14).</p></div>
+
+  <div class="callout tip"><p>An empty <code>select {}</code> blocks forever. You will occasionally see it at the end of <code>main</code> in programs where background goroutines do all the work. A <code>for { select { ... } }</code> loop is the standard shape of a long-running goroutine's event loop.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Deadlocks and goroutine leaks</h2>
+  <h3>"all goroutines are asleep - deadlock!"</h3>
+  <p>Look at the last lines of your own learning <code>main.go</code>:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// This is exactly the channel code at the end of your main.go.
+func main() {
+	messageChan := make(chan string)
+	messageChan &lt;- "Hello, World!" // blocks forever: nobody is receiving yet
+
+	msg := &lt;-messageChan // never reached
+	fmt.Println(msg)
+}</code></pre></div>
+  <div class="output error" data-label="Runtime error (paths shortened)"><pre>fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+	/home/you/conc/e06/main.go:8 +0x38
+exit status 2</pre></div>
+  <p>Line 8 sends on an unbuffered channel. A send blocks until another goroutine receives, but the only receive is on the <em>next</em> line of the <em>same</em> goroutine, which can never run. The runtime notices that <strong>every</strong> goroutine is blocked and nothing could ever wake them up, so it crashes with this message. The trace tells you exactly what each goroutine was stuck on: <code>goroutine 1 [chan send]</code>, at <code>main.go:8</code>.</p>
+  <p>Three ways to fix it:</p>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Deadlock: send and receive in one goroutine"><pre><code class="language-go">messageChan := make(chan string)
+messageChan &lt;- "Hello, World!"
+msg := &lt;-messageChan
+fmt.Println(msg)</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Send from another goroutine"><pre><code class="language-go">messageChan := make(chan string)
+go func() {
+	messageChan &lt;- "Hello, World!"
+}()
+msg := &lt;-messageChan // waits for the goroutine
+fmt.Println(msg)
+// or: make(chan string, 1) so the send
+// can complete without a receiver</code></pre></div></div>
+  </div>
+  <div class="callout warn"><div class="callout-title">Gotcha: the detector only sees total deadlocks</div><p>The runtime reports a deadlock only when <em>all</em> goroutines are stuck. In a real server there are always other goroutines (the HTTP listener, timers), so a stuck goroutine just sits there silently. That is called a <strong>leak</strong>, and it is far more common than a crash.</p></div>
+
+  <h3>Goroutine leaks</h3>
+  <p>A goroutine <strong>leaks</strong> when it is blocked forever on a channel nobody will ever use again. It never exits, its stack and everything it references stay in memory, and the count grows with every request until the service is restarted. The classic case: start several goroutines, take the first answer, walk away.</p>
+  <div class="live" data-title="Watching goroutines leak, then not leak">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// LEAKY: if the caller stops listening, the goroutine is stuck
+// on `ch &lt;- ...` forever. It can never be garbage collected.
+func firstResultLeaky() string {
+	ch := make(chan string) // unbuffered
+	for i := range 3 {
+		go func() {
+			time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+			ch &lt;- fmt.Sprint("replica ", i)
+		}()
+	}
+	return &lt;-ch // we read ONE value; the other two senders block forever
+}
+
+// FIXED: a buffer with room for every sender, so each can finish.
+func firstResultFixed() string {
+	ch := make(chan string, 3)
+	for i := range 3 {
+		go func() {
+			time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+			ch &lt;- fmt.Sprint("replica ", i)
+		}()
+	}
+	return &lt;-ch
+}
+
+func main() {
+	base := runtime.NumGoroutine()
+	for range 100 {
+		firstResultLeaky()
+	}
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("leaky: extra goroutines still alive:", runtime.NumGoroutine()-base)
+
+	base = runtime.NumGoroutine()
+	for range 100 {
+		firstResultFixed()
+	}
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("fixed: extra goroutines still alive:", runtime.NumGoroutine()-base)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="35-37,11-12" data-state="base=1; ch=unbuffered">We remember the starting goroutine count, then call the leaky version. It makes an <strong>unbuffered</strong> channel.</li>
+      <li data-lines="13-17" data-state="replicas=[0 1 2] sleeping 10/20/30ms">Three goroutines start, each sleeping a different time before sending.</li>
+      <li data-lines="16,19" data-state="replica 0 → received; return">At 10ms replica 0 sends and <code>return &lt;-ch</code> receives it. The function returns.</li>
+      <li data-lines="16" data-state="replica 1, 2 = BLOCKED forever">At 20ms and 30ms, replicas 1 and 2 try to send. Nobody will ever receive again, so they block <strong>forever</strong>. The GC cannot free a blocked goroutine.</li>
+      <li data-lines="36-40" data-state="calls=100; stuck=2 per call" data-out="leaky: extra goroutines still alive: 200">After 100 calls and a pause, 2 × 100 = 200 goroutines are stuck. In a server this grows until memory runs out.</li>
+      <li data-lines="42-44,24" data-state="base=201 (incl. the 200 stuck); ch=buffered (cap 3)">The fixed version is identical except the channel has room for all three results.</li>
+      <li data-lines="28,31" data-state="replica 0 → received; replicas 1, 2 → buffer">The first result is received. The late senders drop their values into the buffer and <strong>exit</strong>. The unread channel is then garbage collected.</li>
+      <li data-lines="46-47" data-state="stuck=0" data-out="fixed: extra goroutines still alive: 0">No goroutines left behind.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>leaky: extra goroutines still alive: 200
+fixed: extra goroutines still alive: 0</pre></div>
+  <p>100 calls, 2 abandoned senders per call: 200 goroutines that will never exit. The fix here is a buffer big enough for every sender. Other fixes: give every goroutine a way to be told to stop (a done channel or a <code>context</code>), and always ask "how does this goroutine end?" when you write <code>go</code>.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: no goroutine without an exit plan</div><p>For every <code>go</code> statement in a code review, ask: <em>who waits for it, and what makes it stop?</em> If the answer is "nothing" and "it can't", it is a leak waiting to happen. Watch <code>runtime.NumGoroutine()</code> (or the <code>go_goroutines</code> metric) on your dashboards; a line that only goes up is a leak. In tests, <code>go.uber.org/goleak</code> fails a test that leaves goroutines behind, and the <code>testing/synctest</code> package (stable since Go 1.25) helps test concurrent code deterministically.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Share memory by communicating</h2>
+  <p>A Go proverb: <em>"Don't communicate by sharing memory; share memory by communicating."</em> Instead of many goroutines reading and writing the same variable (and needing locks to avoid corrupting it), give the data to <strong>one owner goroutine</strong>, and let everyone else send it requests through channels. At any moment only one goroutine touches the data, so there is nothing to race on.</p>
+  <div class="live" data-title="One goroutine owns the state; others send requests">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// The balance is owned by ONE goroutine. Others never touch it;
+// they send requests over channels. No mutex needed.
+type deposit struct{ amount int }
+type query struct{ reply chan int }
+
+func bank(deposits &lt;-chan deposit, queries &lt;-chan query) {
+	balance := 0 // only this goroutine can see this variable
+	for {
+		select {
+		case d := &lt;-deposits:
+			balance += d.amount
+		case q := &lt;-queries:
+			q.reply &lt;- balance
+		}
+	}
+}
+
+func main() {
+	deposits := make(chan deposit)
+	queries := make(chan query)
+	go bank(deposits, queries)
+
+	var wg sync.WaitGroup
+	for range 1000 {
+		wg.Go(func() { deposits &lt;- deposit{10} })
+	}
+	wg.Wait()
+
+	reply := make(chan int)
+	queries &lt;- query{reply}
+	fmt.Println("balance:", &lt;-reply) // always 10000
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="26-28,13-14" data-state="balance=0; owner=bank goroutine"><code>main</code> creates two unbuffered channels and starts <code>bank</code>. The <code>balance</code> variable lives only inside that goroutine, so no other goroutine can even reach it.</li>
+      <li data-lines="15-17" data-state="bank=waiting in select"><code>bank</code> loops forever, parked in <code>select</code> until a deposit or a query arrives.</li>
+      <li data-lines="31-32" data-state="depositors=1000 goroutines">1000 goroutines each try to send <code>deposit{10}</code>. Because the channel is unbuffered, each sender blocks until <code>bank</code> takes its value.</li>
+      <li data-lines="17-18" data-state="balance=10, 20, 30 ... ">The bank receives deposits <strong>one at a time</strong>, in whatever order the senders arrive. Only one goroutine ever writes <code>balance</code>, so there is no data race and no mutex.</li>
+      <li data-lines="34" data-state="balance=10000; all sends done"><code>wg.Wait()</code> returns once every send has been received, so all 1000 deposits are already applied.</li>
+      <li data-lines="36-37,19" data-state="reply=chan int"><code>main</code> sends a <code>query</code> carrying its own reply channel. The <code>select</code> picks the query case.</li>
+      <li data-lines="20,38" data-state="balance=10000" data-out="balance: 10000">The bank sends the balance back on <code>reply</code>, and <code>main</code> prints it. Every run gives 10000, even though the deposit order differs every time.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>balance: 10000</pre></div>
+  <p>A thousand goroutines deposit concurrently, and the balance is always exactly 10000, without a single mutex. The <code>query</code> struct carries its own <code>reply</code> channel: a common request/response pattern over channels.</p>
+  <div class="callout tip"><div class="callout-title">Channels or mutex?</div><p>The proverb is a guideline, not a law. Use <strong>channels</strong> to pass ownership of data, distribute work, or signal events (done, results, cancellation). Use a <strong><code>sync.Mutex</code></strong> to protect a small piece of shared state such as a cache or counter (Chapter 13). If you find yourself building a channel-based lock, use a mutex. And always run tests with <code>go test -race</code> to catch data races either way.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Patterns: generators, done channels, tickers and timers</h2>
+  <h3>Generator + done channel</h3>
+  <p>A <strong>generator</strong> is a function that returns a receive-only channel and fills it from its own goroutine. The consumer just ranges over it. But what if the consumer stops early? Then the generator would block forever on its next send: a leak. The cure is a <strong>done channel</strong>: the consumer closes it to say "stop", and the generator <code>select</code>s on it alongside every send. Closing is a <em>broadcast</em>: every goroutine receiving from <code>done</code> wakes up at once, so one close can stop a hundred workers.</p>
+  <div class="live" data-title="A generator stopped by a done channel">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// Generator: a function that returns a receive-only channel and
+// produces values on it from its own goroutine.
+// The done channel lets the CONSUMER say "stop, I'm finished".
+func fib(done &lt;-chan struct{}) &lt;-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		defer fmt.Println("  (fib goroutine exits cleanly)")
+		a, b := 0, 1
+		for {
+			select {
+			case out &lt;- a:
+				a, b = b, a+b
+			case &lt;-done:
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func main() {
+	done := make(chan struct{})
+	numbers := fib(done) // infinite stream
+
+	for n := range numbers {
+		if n &gt; 50 {
+			break
+		}
+		fmt.Print(n, " ")
+	}
+	fmt.Println()
+
+	close(done) // broadcast: every receiver of done wakes up
+	time.Sleep(10 * time.Millisecond)
+	fmt.Println("goroutines left:", runtime.NumGoroutine())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="31-32,12-14" data-state="done=open; out=unbuffered"><code>fib</code> creates <code>out</code>, starts a producer goroutine, and returns the channel immediately. Nothing has been computed yet.</li>
+      <li data-lines="17-21,34" data-state="a=0; b=1 → a=1; b=1; n=0">The producer offers <code>a</code> on <code>out</code>. Main's <code>range</code> receives 0, and only then can the producer advance.</li>
+      <li data-lines="34-38" data-state="n=0, 1, 1, 2 ... 34">Each receive lets the producer compute one more number. Producer and consumer take turns, one value at a time.</li>
+      <li data-lines="35-36" data-state="n=55; producer=offering 89" data-out="0 1 1 2 3 5 8 13 21 34 ">55 is over 50, so <code>main</code> breaks. The producer has already moved on and is now blocked in <code>select</code>, offering 89 that nobody will take.</li>
+      <li data-lines="40" data-state="n=55">A newline ends the row of numbers.</li>
+      <li data-lines="42,22-23" data-state="done=closed; producer=returning"><code>close(done)</code> makes <code>&lt;-done</code> ready for every receiver at once. The producer's <code>select</code> takes that case and returns.</li>
+      <li data-lines="16,15" data-state="deferred: Println, then close(out)" data-out="  (fib goroutine exits cleanly)">Deferred calls run last-in first-out: the message prints first, then <code>out</code> is closed.</li>
+      <li data-lines="43-44" data-state="goroutines=1" data-out="goroutines left: 1">After a short pause only <code>main</code> is left. Without <code>done</code>, the producer would leak forever.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>0 1 1 2 3 5 8 13 21 34 
+  (fib goroutine exits cleanly)
+goroutines left: 1</pre></div>
+  <p><code>chan struct{}</code> is the conventional type for pure signals: <code>struct{}</code> takes zero bytes, and the type says "no data here, only the event". In modern code, <code>ctx.Done()</code> from the <code>context</code> package is exactly this kind of channel, and it is the standard way to pass cancellation through an application (Chapter 14).</p>
+  <div class="callout tip"><p>Since Go 1.23 you can also write generators as <strong>range-over-func iterators</strong> (<code>iter.Seq[int]</code>), which need no goroutine and cannot leak. Use channel generators when production really must run concurrently with consumption; use iterators for plain sequences.</p></div>
+
+  <h3>Ticker and timer</h3>
+  <p><code>time.NewTimer(d)</code> delivers one value on its channel <code>C</code> after <code>d</code>. <code>time.NewTicker(d)</code> delivers a value every <code>d</code>, forever, until you <code>Stop</code> it. Both are just channels, so they combine naturally in a <code>select</code>:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+	since := func() int64 { return time.Since(start).Milliseconds() / 10 * 10 }
+
+	// Timer: fires ONCE. Can be stopped or reset.
+	timer := time.NewTimer(250 * time.Millisecond)
+
+	// Ticker: fires REPEATEDLY. Always Stop it when done.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case &lt;-ticker.C:
+			fmt.Printf("tick  at ~%dms\n", since())
+		case &lt;-timer.C:
+			fmt.Printf("timer at ~%dms -&gt; stop\n", since())
+			return
+		}
+	}
+}</code></pre></div>
+  <div class="output"><pre>tick  at ~100ms
+tick  at ~200ms
+timer at ~250ms -&gt; stop</pre></div>
+  <p>Typical uses: a ticker for periodic work (flush metrics every 10 s, poll a queue), a timer for "give up after X" or debouncing. Always <code>defer ticker.Stop()</code>.</p>
+
+  <!-- ============================================================ -->
+  <h2>Putting it together: a concurrent URL checker</h2>
+  <p>Let's check six websites. Doing it one at a time takes the <em>sum</em> of all response times. Doing it concurrently takes about the time of the <em>slowest</em> one, and with a per-URL timeout, never longer than the timeout. The network is simulated with random sleeps so you can run it offline; replace <code>fakeFetch</code> with <code>http.Get</code> and the structure stays the same.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math/rand/v2"
+	"time"
+)
+
+type Result struct {
+	URL     string
+	Status  string
+	Latency time.Duration
+}
+
+// fakeFetch simulates an HTTP GET with a random delay.
+func fakeFetch(url string) (string, time.Duration) {
+	d := time.Duration(20+rand.IntN(100)) * time.Millisecond
+	if url == "https://slow.example" {
+		d = 2 * time.Second // this server hangs
+	}
+	time.Sleep(d)
+	if url == "https://down.example" {
+		return "503", d
+	}
+	return "200", d
+}
+
+// check fetches one URL but never waits longer than timeout.
+func check(url string, timeout time.Duration) Result {
+	done := make(chan Result, 1) // buffered: the fetch goroutine can always finish
+	go func() {
+		status, d := fakeFetch(url)
+		done &lt;- Result{url, status, d}
+	}()
+	select {
+	case r := &lt;-done:
+		return r
+	case &lt;-time.After(timeout):
+		return Result{url, "TIMEOUT", timeout}
+	}
+}
+
+func main() {
+	urls := []string{
+		"https://go.dev", "https://pkg.go.dev", "https://down.example",
+		"https://github.com", "https://example.com", "https://slow.example",
+	}
+
+	start := time.Now()
+	results := make(chan Result)
+	for _, u := range urls {
+		go func() { results &lt;- check(u, 150*time.Millisecond) }()
+	}
+
+	var total time.Duration
+	for range urls { // we know exactly how many results to expect
+		r := &lt;-results
+		fmt.Printf("%-22s %-8s %v\n", r.URL, r.Status, r.Latency.Round(time.Millisecond))
+		total += r.Latency
+	}
+	fmt.Printf("wall time %v; one-by-one would take ~%v\n",
+		time.Since(start).Round(10*time.Millisecond), total.Round(10*time.Millisecond))
+}</code></pre></div>
+  <div class="output" data-label="one run (latencies are random)"><pre>https://pkg.go.dev     200      29ms
+https://github.com     200      39ms
+https://down.example   503      48ms
+https://go.dev         200      61ms
+https://example.com    200      111ms
+https://slow.example   TIMEOUT  150ms
+wall time 150ms; one-by-one would take ~440ms</pre></div>
+  <p>What to notice:</p>
+  <ul>
+    <li><strong>Fan-out</strong>: one goroutine per URL. <strong>Fan-in</strong>: all of them send to one <code>results</code> channel, and <code>main</code> receives exactly <code>len(urls)</code> times, so it needs no WaitGroup and no close.</li>
+    <li>Results arrive in <strong>completion order</strong>, not input order. If you need input order, send an index along with each result and store into a slice.</li>
+    <li><code>check</code> uses <code>select</code> + <code>time.After</code> for a per-URL timeout. The <code>done</code> channel has a buffer of 1, so when we give up on <code>slow.example</code>, its fetch goroutine can still complete its send later and exit. Without that buffer it would leak, once per timeout, forever.</li>
+    <li>The whole thing took 150 ms of wall time for about 440 ms of total work.</li>
+  </ul>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: how this looks in production</div><p>For real HTTP calls you would: bound concurrency (a worker pool or <code>errgroup.SetLimit</code>, so 10,000 URLs do not open 10,000 sockets at once), pass a <code>context.Context</code> with a deadline to <code>http.NewRequestWithContext</code> so timed-out requests are actually cancelled (our version stops <em>waiting</em>, but the fetch keeps running), and reuse one <code>http.Client</code> with its own <code>Timeout</code>. Chapters 13 and 14 build exactly that.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Practice</h2>
+  <details class="exercise">
+    <summary>Exercise 1: a three-stage pipeline</summary>
+    <p>Build <code>gen(nums ...int) &lt;-chan int</code>, <code>square(in &lt;-chan int) &lt;-chan int</code> and <code>sum(in &lt;-chan int) int</code>, each stage running in its own goroutine and connected by channels, so that <code>sum(square(gen(1, 2, 3, 4, 5)))</code> prints 55. Every stage must close its output channel so the next stage's <code>range</code> ends.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="A three-stage pipeline, value by value">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// Pipeline: gen -&gt; square -&gt; sum, each stage its own goroutine,
+// connected by channels. Each stage closes its output when done.
+func gen(nums ...int) &lt;-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			out &lt;- n
+		}
+	}()
+	return out
+}
+
+func square(in &lt;-chan int) &lt;-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for n := range in {
+			out &lt;- n * n
+		}
+	}()
+	return out
+}
+
+func sum(in &lt;-chan int) int {
+	total := 0
+	for n := range in {
+		total += n
+	}
+	return total
+}
+
+func main() {
+	fmt.Println(sum(square(gen(1, 2, 3, 4, 5)))) // 1+4+9+16+25
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="38,7-9" data-state="stages: gen=started">Arguments are evaluated inside out. <code>gen(1, 2, 3, 4, 5)</code> runs first: it makes a channel, starts a goroutine, and returns the channel at once.</li>
+      <li data-lines="38,18-20" data-state="stages: gen, square=started"><code>square</code> gets gen's channel, starts its own goroutine, and returns a new channel. Still no numbers have moved.</li>
+      <li data-lines="29-31" data-state="total=0; sum=waiting"><code>sum</code> runs on <code>main</code>'s goroutine and starts ranging over square's output. Now values start flowing.</li>
+      <li data-lines="12,22-23,31-32" data-state="n=1 → 1; total=1">gen sends 1, square receives it and sends 1 × 1, sum adds it. Each hop is an unbuffered handoff, so each stage waits for the next.</li>
+      <li data-lines="12,22-23,31-32" data-state="n=2 → 4; total=5">Value 2 becomes 4. While sum adds it, gen can already be handing 3 to square: the stages overlap.</li>
+      <li data-lines="31-32" data-state="n=3,4,5 → 9,16,25; total=55">3, 4 and 5 follow the same path. Total is now 55.</li>
+      <li data-lines="10" data-state="gen out=closed">gen's loop ends, and its deferred <code>close(out)</code> runs.</li>
+      <li data-lines="22,21" data-state="square out=closed">square's <code>range in</code> sees the close and ends, so square closes <strong>its</strong> output. The close ripples downstream.</li>
+      <li data-lines="31,34,38" data-state="total=55" data-out="55">sum's <code>range</code> ends too, it returns 55, and <code>main</code> prints it. Every goroutine has exited.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>55</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: collect up to N values or give up</summary>
+    <p>Write <code>collect(in &lt;-chan string, max int, wait time.Duration) []string</code> that returns as soon as it has <code>max</code> values, or the channel is closed, or <code>wait</code> has passed in total, whichever comes first. Make sure the producer goroutine in your test can never leak.</p>
+    <p>Hint: one <code>time.After</code> created before the loop; comma-ok to detect the close; a buffered channel in the producer.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="Collect until max, closed, or deadline">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Debounce-style "first of N or timeout": collect up to max
+// values from in, but give up after wait. Returns what it got.
+func collect(in &lt;-chan string, max int, wait time.Duration) []string {
+	var got []string
+	deadline := time.After(wait) // ONE timer for the whole call
+	for len(got) &lt; max {
+		select {
+		case v, ok := &lt;-in:
+			if !ok {
+				return got // producer finished early
+			}
+			got = append(got, v)
+		case &lt;-deadline:
+			return got
+		}
+	}
+	return got
+}
+
+func producer(delay time.Duration, items ...string) &lt;-chan string {
+	ch := make(chan string, len(items)) // buffered: never leaks
+	go func() {
+		defer close(ch)
+		for _, it := range items {
+			time.Sleep(delay)
+			ch &lt;- it
+		}
+	}()
+	return ch
+}
+
+func main() {
+	fmt.Println(collect(producer(10*time.Millisecond, "a", "b", "c", "d"), 3, time.Second))
+	fmt.Println(collect(producer(40*time.Millisecond, "a", "b", "c", "d"), 3, 100*time.Millisecond))
+	fmt.Println(collect(producer(1*time.Millisecond, "only"), 3, time.Second))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="40,27-30" data-state="call 1: delay=10ms; items=[a b c d]; max=3; wait=1s">First call: the producer will send an item every 10ms into a buffer big enough for all of them.</li>
+      <li data-lines="12" data-state="deadline=1s timer; got=[]">One timer is created for the <strong>whole</strong> call, not per loop. A <code>time.After</code> inside the loop would restart the clock on every value.</li>
+      <li data-lines="13-19" data-state="got=[a b c]; t≈30ms">Items arrive at 10, 20 and 30ms. Each one wins the <code>select</code>. Now <code>len(got)</code> is 3, the loop condition is false.</li>
+      <li data-lines="24,40" data-state="got=[a b c]" data-out="[a b c]">We return 3 items. The producer still sends <code>d</code> into its buffer and exits, so nothing leaks.</li>
+      <li data-lines="41,12" data-state="call 2: delay=40ms; wait=100ms">Second call: a slow producer (every 40ms) and a short deadline (100ms).</li>
+      <li data-lines="15-19" data-state="got=[a b]; t≈80ms">Items arrive at 40 and 80ms. The third would arrive at 120ms.</li>
+      <li data-lines="20-21" data-state="got=[a b]; t=100ms" data-out="[a b]">At 100ms the deadline case wins first, and we return what we have.</li>
+      <li data-lines="42,15-17" data-state="call 3: items=[only]; got=[only]; ok=false">Third call: one item arrives, then the producer closes the channel. The next receive gets <code>ok == false</code>.</li>
+      <li data-lines="17,42" data-state="got=[only]" data-out="[only]">The producer finished early, so we return immediately instead of waiting the full second.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>[a b c]
+[a b]
+[only]</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: fix your own main.go</summary>
+    <p>The channel code at the end of your learning <code>main.go</code> deadlocks (see the deadlock section). Fix it in two different ways, and explain in one sentence why each works.</p>
+    <div class="solution-label">Solution</div>
+    <p>(1) Send from a new goroutine: <code>go func() { messageChan &lt;- "Hello, World!" }()</code>. The send now waits in another goroutine while <code>main</code> reaches the receive. (2) Give the channel a buffer: <code>make(chan string, 1)</code>. The send drops the value into the buffer and returns immediately, and the receive takes it out. Option 1 is the more typical real-world shape; option 2 works only because exactly one value is sent before the receive.</p>
+  </details>
+
+  <div class="quiz" data-answer="0">
+    <div class="quiz-q">A goroutine runs <code>for v := range jobs { ... }</code>. The producer finishes sending but never calls <code>close(jobs)</code>. Other goroutines in the server keep running. What happens to the consumer?</div>
+    <div class="quiz-opts"><button>It blocks forever: a goroutine leak</button><button>The runtime reports "all goroutines are asleep - deadlock!"</button><button>range ends automatically once the channel is empty</button><button>It panics</button></div>
+    <div class="quiz-explain"><code>range</code> over a channel ends only when the channel is closed. Without <code>close</code>, the consumer waits for a value that never comes. Because other goroutines are still alive, the runtime cannot call it a deadlock; the goroutine simply leaks.</div>
+  </div>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Concurrency is structure (independent tasks); parallelism is simultaneous execution. Go lets you write the first and the runtime provides the second, up to <code>GOMAXPROCS</code>.</li>
+      <li><code>go f()</code> starts a goroutine: ~2 KB growable stack, scheduled by the runtime (G on P on M), not the OS. When <code>main</code> returns, all goroutines die. Wait with WaitGroup (<code>wg.Go</code> in 1.25+) or channels, never with sleep.</li>
+      <li>Unbuffered channels are a synchronized handoff; buffered channels are a FIFO queue that blocks only when full or empty.</li>
+      <li>Use direction types (<code>chan&lt;-</code>, <code>&lt;-chan</code>) in signatures. Only the sender closes; <code>range</code> stops on close; comma-ok detects it. Nil channels block forever, useful for disabling <code>select</code> cases.</li>
+      <li><code>select</code> waits on many operations; add <code>default</code> for non-blocking, <code>time.After</code> or a context for timeouts.</li>
+      <li>"all goroutines are asleep - deadlock!" means every goroutine is blocked. Partial blocks are silent leaks: every goroutine needs an exit plan (done channel, context, adequately sized buffer).</li>
+      <li>Share memory by communicating: give data one owner goroutine, or use a mutex for small shared state. Always test with <code>-race</code>.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

@@ -1,0 +1,1353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 03 · Control Flow — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="03">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part I · Chapter 03</div>
+  <h1>Control Flow</h1>
+  <p class="lead">Control flow is how a program makes decisions and repeats work. Go keeps it small on purpose: one <code>if</code>, one loop keyword (<code>for</code>), a <code>switch</code> that's safer than C's, and <code>defer</code> — a quietly brilliant tool for cleanup. Master these and you can read any Go function.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Beginner</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li><code>if</code> / <code>else</code>, and the <code>if x := …; cond</code> init statement that keeps scopes tiny</li>
+      <li>Every form of <code>for</code>: classic, while-style, infinite, and <code>range</code> over slices, maps, strings, channels, integers and iterator functions</li>
+      <li>Why Go 1.22 changed loop variables to be per-iteration, and the bug it fixed</li>
+      <li><code>break</code>, <code>continue</code> and labels for nested loops</li>
+      <li><code>switch</code> without fallthrough, <code>fallthrough</code>, multi-value cases, tagless switches and a preview of type switches</li>
+      <li><code>goto</code>, and why you'll rarely need it</li>
+      <li><code>defer</code>: LIFO order, when arguments are evaluated, cleanup patterns and the defer-in-a-loop gotcha</li>
+      <li>The "happy path on the left" style that makes Go code easy to scan</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>if and else</h2>
+  <p>An <code>if</code> runs a block only when a condition is <code>true</code>. Go's version looks like C's with two differences: <strong>no parentheses</strong> around the condition, and <strong>braces are always required</strong>, even for a one-line body.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func classify(n int) string {
+	if n &lt; 0 {
+		return "negative"
+	} else if n == 0 {
+		return "zero"
+	} else if n &lt; 10 {
+		return "small"
+	} else {
+		return "large"
+	}
+}
+
+func main() {
+	for _, n := range []int{-5, 0, 7, 42} {
+		fmt.Println(n, classify(n))
+	}
+}</code></pre></div>
+  <div class="output"><pre>-5 negative
+0 zero
+7 small
+42 large</pre></div>
+  <p>Requiring braces removes a whole class of bugs (the infamous Apple "goto fail" SSL bug came from a brace-less <code>if</code> in C). Forget them and Go tells you right away:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	x := 5
+	if x &gt; 3
+		fmt.Println("big")
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:8:21: syntax error: unexpected newline, expected { after if clause</pre></div>
+  <p>The condition must be a real <code>bool</code>. Go never treats <code>0</code>, <code>""</code> or <code>nil</code> as false: write <code>if n != 0</code>, <code>if s != ""</code>, <code>if p != nil</code>. And <code>&amp;&amp;</code> and <code>||</code> <strong>short-circuit</strong>: in <code>if p != nil &amp;&amp; p.Ready</code>, the right side is only evaluated if the left is true, so it's safe.</p>
+
+  <h3>The init statement: <code>if x := f(); cond</code></h3>
+  <p>An <code>if</code> can start with a short statement, separated from the condition by a semicolon. Variables declared there exist only inside the <code>if</code> and its <code>else</code> branches. This is the most idiomatic way to handle a function that returns a value and an error:</p>
+  <div class="live" data-title="if with an init statement">
+    <pre><code class="language-go">inputs := []string{"21", "oops"}
+for _, in := range inputs {
+	if n, err := strconv.Atoi(in); err != nil {
+		fmt.Println("bad input:", err)
+	} else if n &gt; 20 {
+		fmt.Println(n, "is big; doubled:", n*2)
+	} else {
+		fmt.Println(n, "is small")
+	}
+	// n and err don't exist here
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="in=&quot;21&quot;">We loop over two inputs. First, <code>in</code> is <code>"21"</code>.</li>
+      <li data-lines="3" data-state="in=&quot;21&quot;; n=21; err=nil">The init statement runs first: <code>Atoi</code> returns 21 and no error. Then the condition <code>err != nil</code> is checked: false.</li>
+      <li data-lines="5-6" data-state="in=&quot;21&quot;; n=21; err=nil" data-out="21 is big; doubled: 42">The <code>else if</code> can still see <code>n</code> and <code>err</code> — they're in scope for the whole if/else chain. <code>21 &gt; 20</code>, so we print.</li>
+      <li data-lines="10-11" data-state="in=&quot;21&quot;">After the closing brace, <code>n</code> and <code>err</code> are gone. Using them here would be a compile error. Tiny scope = fewer bugs.</li>
+      <li data-lines="2-3" data-state="in=&quot;oops&quot;; n=0; err=invalid syntax">Second iteration: parsing <code>"oops"</code> fails, so <code>err</code> is non-nil.</li>
+      <li data-lines="4" data-state="in=&quot;oops&quot;; n=0; err=invalid syntax" data-out="bad input: strconv.Atoi: parsing &quot;oops&quot;: invalid syntax">The first branch runs and the rest are skipped.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>21 is big; doubled: 42
+bad input: strconv.Atoi: parsing "oops": invalid syntax</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: when NOT to use the init form</div><p>The init form is great when the value is only needed for the check. But if you need <code>n</code> <em>after</em> the <code>if</code>, don't contort the code with an <code>else</code> branch — declare it outside:</p>
+  <div class="code" data-file="idiomatic.go"><pre><code class="language-go">n, err := strconv.Atoi(in)
+if err != nil {
+	return fmt.Errorf("parse %q: %w", in, err)
+}
+// use n freely here, at the left margin</code></pre></div>
+  <p>Linters like <code>revive</code> flag an <code>else</code> after a block that ends in <code>return</code> — the "indent-error-flow" rule. We'll see why in the happy-path section.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>for: Go's only loop</h2>
+  <p>Go has no <code>while</code>, no <code>do-while</code>, no <code>foreach</code>. It has <code>for</code>, which takes several shapes. One keyword, less to remember:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	// 1. Classic three-part loop: init; condition; post
+	for i := 0; i &lt; 3; i++ {
+		fmt.Print(i, " ")
+	}
+	fmt.Println()
+
+	// 2. "While" loop: condition only
+	n := 1
+	for n &lt; 100 {
+		n *= 3
+	}
+	fmt.Println("n =", n)
+
+	// 3. Infinite loop: no condition, exit with break (or return)
+	count := 0
+	for {
+		count++
+		if count == 4 {
+			break
+		}
+	}
+	fmt.Println("count =", count)
+
+	// 4. Range over an integer (Go 1.22+)
+	for i := range 3 {
+		fmt.Print(i, " ")
+	}
+	fmt.Println()
+
+	// 5. Counting down, stepping by 2
+	for i := 10; i &gt; 0; i -= 2 {
+		fmt.Print(i, " ")
+	}
+	fmt.Println()
+}</code></pre></div>
+  <div class="output"><pre>0 1 2 
+n = 243
+count = 4
+0 1 2 
+10 8 6 4 2</pre></div>
+  <table>
+    <thead><tr><th>Form</th><th>Syntax</th><th>Equivalent in other languages</th></tr></thead>
+    <tbody>
+      <tr><td>Classic</td><td><code>for init; cond; post { }</code></td><td>C/Java <code>for (int i = 0; i &lt; n; i++)</code></td></tr>
+      <tr><td>Condition only</td><td><code>for cond { }</code></td><td><code>while (cond)</code></td></tr>
+      <tr><td>Infinite</td><td><code>for { }</code></td><td><code>while (true)</code></td></tr>
+      <tr><td>Range</td><td><code>for i, v := range x { }</code></td><td><code>foreach</code>, Python <code>for … in enumerate(…)</code></td></tr>
+      <tr><td>Range over int (1.22+)</td><td><code>for i := range n { }</code></td><td>Python <code>for i in range(n)</code></td></tr>
+    </tbody>
+  </table>
+  <p>In the classic form, any of the three parts can be empty: <code>for ; i &lt; 10; </code> is legal (gofmt simplifies it to <code>for i &lt; 10</code>). The <code>init</code> variable is scoped to the loop. And the <code>post</code> statement must be a simple statement — Go has <code>i++</code> as a <em>statement</em>, not an expression, so <code>x = i++</code> isn't allowed and there's no <code>++i</code>.</p>
+
+  <h3>A while-style loop in action</h3>
+  <p>The Collatz sequence: if <code>n</code> is even halve it, if odd make it <code>3n+1</code>, until you reach 1. We don't know in advance how many steps it takes, so a condition-only loop fits perfectly.</p>
+  <div class="live" data-title="Collatz: a condition-only for loop">
+    <pre><code class="language-go">n := 6
+steps := 0
+for n != 1 {
+	if n%2 == 0 {
+		n /= 2
+	} else {
+		n = 3*n + 1
+	}
+	steps++
+}
+fmt.Println("steps:", steps)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="n=6; steps=0">Start with 6.</li>
+      <li data-lines="3-5" data-state="n=3; steps=0">Condition <code>6 != 1</code> is true, so we enter. 6 is even → <code>n /= 2</code> (short for <code>n = n / 2</code>) → 3.</li>
+      <li data-lines="9" data-state="n=3; steps=1">Count the step. Then we jump back to the top and re-check the condition.</li>
+      <li data-lines="6-7" data-state="n=10; steps=1">3 is odd → the <code>else</code> branch: 3×3+1 = 10.</li>
+      <li data-lines="9" data-state="n=10; steps=2">Step 2.</li>
+      <li data-lines="3-9" data-state="n=5; steps=3">10 → 5.</li>
+      <li data-lines="3-9" data-state="n=16; steps=4">5 → 16.</li>
+      <li data-lines="3-9" data-state="n=1; steps=8">…16 → 8 → 4 → 2 → 1, four more steps.</li>
+      <li data-lines="3" data-state="n=1; steps=8">Now <code>1 != 1</code> is false: the loop ends without running the body again.</li>
+      <li data-lines="11" data-state="n=1; steps=8" data-out="steps: 8">We print the result.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>steps: 8</pre></div>
+
+  <!-- ============================================================ -->
+  <h2>range: looping over things</h2>
+  <p><code>range</code> iterates over the elements of a collection. What it gives you depends on what you range over:</p>
+  <table>
+    <thead><tr><th>Range over</th><th>First value</th><th>Second value</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>slice / array</td><td>index <code>int</code></td><td>copy of element</td><td>in order</td></tr>
+      <tr><td>string</td><td>byte index of the rune</td><td><code>rune</code></td><td>decodes UTF-8</td></tr>
+      <tr><td>map</td><td>key</td><td>value</td><td>order is unspecified</td></tr>
+      <tr><td>channel</td><td>element</td><td>—</td><td>until the channel is closed</td></tr>
+      <tr><td>integer <code>n</code> (1.22+)</td><td>0 … n−1</td><td>—</td><td></td></tr>
+      <tr><td>iterator func (1.23+)</td><td colspan="2">whatever the function yields</td><td><code>iter.Seq</code>, <code>iter.Seq2</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Slices and arrays</h3>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	fruits := []string{"apple", "banana", "cherry"}
+
+	for i, f := range fruits {
+		fmt.Println(i, f)
+	}
+	for i := range fruits { // index only
+		fmt.Print(i, " ")
+	}
+	fmt.Println()
+	for _, f := range fruits { // value only
+		fmt.Print(f, " ")
+	}
+	fmt.Println()
+
+	// The value is a COPY. Modifying it doesn't change the slice:
+	nums := []int{1, 2, 3}
+	for _, v := range nums {
+		v *= 10
+	}
+	fmt.Println(nums)
+	// Use the index to modify in place:
+	for i := range nums {
+		nums[i] *= 10
+	}
+	fmt.Println(nums)
+
+	// The range expression is evaluated once, before the loop starts:
+	for i, v := range nums {
+		if i == 0 {
+			nums = append(nums, 99) // doesn't extend this loop
+		}
+		fmt.Print(v, " ")
+	}
+	fmt.Println(len(nums))
+}</code></pre></div>
+  <div class="output"><pre>0 apple
+1 banana
+2 cherry
+0 1 2 
+apple banana cherry 
+[1 2 3]
+[10 20 30]
+10 20 30 4</pre></div>
+  <p>Three important facts are hiding in that output:</p>
+  <ol>
+    <li><code>v</code> is a <strong>copy</strong> of each element. Changing <code>v</code> changes nothing in the slice. To modify in place, index with <code>nums[i]</code>.</li>
+    <li>Use <code>_</code> for the index if you only want values; drop the second variable if you only want indexes.</li>
+    <li>The range expression is evaluated <strong>once</strong>, before the loop starts. Appending inside the loop doesn't make it run longer (it printed 3 values, but the slice now has 4).</li>
+  </ol>
+  <div class="callout warn"><div class="callout-title">Gotcha: copying big elements</div><p>Because <code>v</code> is a copy, ranging over a slice of large structs copies each struct every iteration. Usually that's fine, but in hot loops over big structs, prefer <code>for i := range items { p := &amp;items[i]; … }</code>. Bonus: that also lets you modify the element.</p></div>
+
+  <h3>Strings: range decodes runes</h3>
+  <p>Remember from Chapter 02 that a string is bytes, and characters like <code>é</code> take more than one byte. <code>range</code> over a string is smart: it decodes UTF-8 and gives you whole <strong>runes</strong>, along with the byte index where each one starts. A classic index loop gives you raw bytes instead.</p>
+  <div class="live" data-title="range over a string vs. indexing bytes">
+    <pre><code class="language-go">s := "héllo"
+for i, r := range s {
+	fmt.Printf("%d:%c ", i, r)
+}
+fmt.Println()
+for i := 0; i &lt; len(s); i++ {
+	fmt.Printf("%d:%x ", i, s[i])
+}
+fmt.Println()</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="s=&quot;héllo&quot;; len(s)=6">5 characters, but 6 bytes: <code>é</code> is encoded as two bytes, <code>c3 a9</code>.</li>
+      <li data-lines="2-3" data-state="i=0; r='h'">First iteration: rune <code>'h'</code> starts at byte 0.</li>
+      <li data-lines="2-3" data-state="i=1; r='é'">Second: <code>range</code> decodes both bytes 1 and 2 into the single rune <code>'é'</code>, reported at index 1.</li>
+      <li data-lines="2-3" data-state="i=3; r='l'">Third: the index <strong>jumps to 3</strong>. Indexes from <code>range</code> on a string are byte offsets, not character counts.</li>
+      <li data-lines="4-5" data-state="" data-out="0:h 1:é 3:l 4:l 5:o ">…and so on for <code>l</code>, <code>o</code>. The line is complete.</li>
+      <li data-lines="6-7" data-state="i=0; s[i]=0x68">The byte loop: <code>s[i]</code> is a single byte. Byte 0 is <code>0x68</code> = <code>'h'</code>.</li>
+      <li data-lines="6-7" data-state="i=1; s[i]=0xc3">Byte 1 is <code>0xc3</code> — only <em>half</em> of <code>é</code>. Printed as a character it would be garbage.</li>
+      <li data-lines="8-9" data-state="" data-out="0:68 1:c3 2:a9 3:6c 4:6c 5:6f">All 6 bytes. Use this form only when you really want bytes (e.g. parsing ASCII protocols).</li>
+    </ol>
+  </div>
+  <div class="output"><pre>0:h 1:é 3:l 4:l 5:o 
+0:68 1:c3 2:a9 3:6c 4:6c 5:6f</pre></div>
+
+  <h3>Maps: order is not guaranteed</h3>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+func main() {
+	ages := map[string]int{"carol": 41, "alice": 30, "bob": 25, "dave": 19, "erin": 52}
+
+	// Map iteration order is unspecified and deliberately varies.
+	for range 3 {
+		for name := range ages {
+			fmt.Print(name, " ")
+		}
+		fmt.Println()
+	}
+
+	// For a stable order, sort the keys first.
+	fmt.Println("--- sorted ---")
+	for _, name := range slices.Sorted(maps.Keys(ages)) {
+		fmt.Println(name, ages[name])
+	}
+}</code></pre></div>
+  <div class="output"><pre>carol alice bob dave erin 
+carol alice bob dave erin 
+bob dave erin carol alice 
+--- sorted ---
+alice 30
+bob 25
+carol 41
+dave 19
+erin 52</pre></div>
+  <p class="muted">(Your first three lines will almost certainly differ — and differ between runs.)</p>
+  <p>Go deliberately randomizes map iteration order so that nobody accidentally depends on it. If you need a stable order (for output, tests, or deterministic hashing), collect and sort the keys. <code>maps.Keys</code> returns an iterator over the keys and <code>slices.Sorted</code> collects it into a sorted slice — both arrived in Go 1.23. Chapter 05 covers maps in depth.</p>
+
+  <h3>Channels</h3>
+  <p>Ranging over a channel receives values until the channel is <strong>closed</strong>. This is the standard way for one goroutine to consume everything another produces. (Goroutines and channels are Chapter 12's topic — this is just a preview.)</p>
+  <div class="live" data-title="range over a channel: a goroutine handoff">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int)
+	go func() {
+		for i := 1; i &lt;= 3; i++ {
+			ch &lt;- i * i // send
+		}
+		close(ch) // no more values: ends the range loop
+	}()
+	for v := range ch { // receives until ch is closed
+		fmt.Println("got", v)
+	}
+	fmt.Println("channel closed, loop done")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="ch=unbuffered">An <strong>unbuffered</strong> channel: every send waits until a receiver is ready, so the two goroutines hand values over directly.</li>
+      <li data-lines="7,13" data-state="ch=unbuffered"><code>go func(){...}()</code> starts a second goroutine and returns immediately. <code>main</code> reaches <code>range ch</code> and blocks, waiting for a value.</li>
+      <li data-lines="8-9" data-state="i=1; sending=1">The sender goroutine computes <code>1*1</code> and sends. Because <code>main</code> is waiting, the handoff happens at once.</li>
+      <li data-lines="13-14" data-state="v=1" data-out="got 1"><code>main</code> wakes up with <code>v=1</code> and prints it. Meanwhile the sender moves on to <code>i=2</code>.</li>
+      <li data-lines="8-9,13-14" data-state="i=2; v=4" data-out="got 4">Second handoff: 4.</li>
+      <li data-lines="8-9,13-14" data-state="i=3; v=9" data-out="got 9">Third handoff: 9. The sender's loop ends.</li>
+      <li data-lines="11" data-state="ch=closed"><code>close(ch)</code> says "no more values". <strong>Without it</strong>, <code>main</code> would wait forever and the runtime would crash with "all goroutines are asleep - deadlock!".</li>
+      <li data-lines="13,16" data-state="ch=closed" data-out="channel closed, loop done">Receiving from a closed, empty channel ends the <code>range</code> loop, and <code>main</code> prints its final line.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>got 1
+got 4
+got 9
+channel closed, loop done</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: forgetting to close</div><p>If the producer never calls <code>close(ch)</code>, the <code>range</code> loop waits forever. If that's the only goroutine left, the runtime detects it and crashes with <code>fatal error: all goroutines are asleep - deadlock!</code>. In a server with other goroutines alive, it just silently hangs — a goroutine leak.</p></div>
+
+  <h3>Integers (Go 1.22+)</h3>
+  <p><code>for i := range 10</code> counts from 0 to 9. It's shorter than the classic form and reads like English. If you don't need the counter, write <code>for range 10 { … }</code>. If <code>n</code> is zero or negative, the loop body doesn't run at all.</p>
+
+  <h3>Iterator functions (Go 1.23+)</h3>
+  <p>Since Go 1.23 you can <code>range</code> over a <em>function</em>. An iterator is a function that takes a <code>yield</code> callback and calls it once per value. The loop body becomes <code>yield</code>; if the body executes <code>break</code>, <code>yield</code> returns <code>false</code> and the iterator should stop. The standard library uses this widely: <code>maps.Keys</code>, <code>slices.Values</code>, <code>slices.Backward</code>, <code>strings.SplitSeq</code> (1.24) and more.</p>
+  <div class="live" data-title="range over an iterator function">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"iter"
+	"maps"
+	"slices"
+)
+
+// Countdown returns an iterator: a function that "pushes" values to yield.
+func Countdown(from int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := from; i &gt; 0; i-- {
+			if !yield(i) { // the loop body ran "break"
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	for n := range Countdown(5) {
+		if n == 2 {
+			break
+		}
+		fmt.Print(n, " ")
+	}
+	fmt.Println()
+
+	// The standard library returns iterators too.
+	m := map[string]int{"b": 2, "a": 1, "c": 3}
+	for k := range slices.Values(slices.Sorted(maps.Keys(m))) {
+		fmt.Print(k, " ")
+	}
+	fmt.Println()
+	for i, v := range slices.Backward([]string{"x", "y", "z"}) {
+		fmt.Print(i, v, " ")
+	}
+	fmt.Println()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="22,11-12" data-state="from=5"><code>Countdown(5)</code> doesn't loop yet: it just returns a function. The <code>range</code> statement then calls that function, passing the <strong>loop body</strong> as <code>yield</code>.</li>
+      <li data-lines="13-14,23,26" data-state="i=5; n=5">The iterator's own <code>for</code> starts at 5 and calls <code>yield(5)</code>. Control jumps into the loop body with <code>n=5</code>: not 2, so it prints <code>5 </code> (no newline yet). The body finishes, so <code>yield</code> returns <code>true</code>.</li>
+      <li data-lines="13-14,23,26" data-state="i=4; n=4">Back in the iterator, <code>i--</code> and <code>yield(4)</code>: the body prints <code>4 </code>.</li>
+      <li data-lines="13-14,23,26" data-state="i=3; n=3">Same for 3.</li>
+      <li data-lines="14,23-24" data-state="i=2; n=2"><code>yield(2)</code>: now <code>n == 2</code> and the body executes <code>break</code>. That makes <code>yield</code> return <code>false</code>…</li>
+      <li data-lines="14-15" data-state="i=2">…so the iterator must stop: <code>!yield(i)</code> is true and it returns. <strong>Gotcha:</strong> an iterator that keeps calling <code>yield</code> after <code>false</code> makes the program panic.</li>
+      <li data-lines="28" data-out="5 4 3 "><code>Println()</code> ends the line that the three <code>Print</code> calls built.</li>
+      <li data-lines="31-35" data-state="m=map[a:1 b:2 c:3]" data-out="a b c "><code>maps.Keys</code> and <code>slices.Values</code> are iterators too. <code>slices.Sorted</code> collects the keys into a sorted slice so the order is stable.</li>
+      <li data-lines="36-39" data-state="i=2,1,0; v=z,y,x" data-out="2z 1y 0x"><code>slices.Backward</code> yields index/value pairs from the end. <code>Print</code> only adds spaces between operands when neither is a string, so <code>2</code> and <code>"z"</code> are glued together.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>5 4 3 
+a b c 
+2z 1y 0x</pre></div>
+  <p><code>iter.Seq[int]</code> is just a named type for <code>func(yield func(int) bool)</code>. It uses <em>generics</em> (Chapter 09); Chapter 04 covers function values and closures that make this work. For now, it's enough to recognize the pattern when you see it.</p>
+
+  <!-- ============================================================ -->
+  <h2>Go 1.22: each iteration gets its own variable</h2>
+  <p>This is one of the most important changes in Go's history, and you'll still meet old code and blog posts about it, so let's understand it properly.</p>
+  <p><strong>Before Go 1.22</strong>, a loop like <code>for i := 0; i &lt; 3; i++</code> created <em>one</em> variable <code>i</code> and updated it each time. Anything that captured <code>i</code> — a closure, a goroutine, a pointer <code>&amp;i</code> — saw that single shared variable, which ended up holding its final value. <strong>Since Go 1.22</strong>, each iteration gets a <em>fresh</em> copy of the loop variable.</p>
+  <p>Here's the same program compiled both ways. The behavior is chosen by the <code>go</code> line in <code>go.mod</code>, so old modules keep their old meaning:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var prints []func()
+	for i := 0; i &lt; 3; i++ {
+		prints = append(prints, func() { fmt.Print(i, " ") })
+	}
+	for _, p := range prints {
+		p()
+	}
+	fmt.Println()
+
+	var ptrs []*int
+	for i := range 3 {
+		ptrs = append(ptrs, &amp;i)
+	}
+	fmt.Println(*ptrs[0], *ptrs[1], *ptrs[2])
+}</code></pre></div>
+  <div class="compare">
+    <div class="bad">
+      <div class="output" data-label="go.mod says go 1.21 (old semantics)"><pre>3 3 3 
+3 3 3</pre></div>
+    </div>
+    <div class="good">
+      <div class="output" data-label="go.mod says go 1.23 (per-iteration)"><pre>0 1 2 
+0 1 2</pre></div>
+    </div>
+  </div>
+  <p class="muted">(For the Go 1.21 module the <code>range 3</code> loop was replaced by the classic form, since range-over-int didn't exist yet. Both were run with the same go1.27.1 toolchain.)</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="760" height="230" fill="#262624" rx="10"/>
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <text x="190" y="30" text-anchor="middle" fill="#e0b45c" font-size="14" font-weight="600">Before 1.22: one shared i</text>
+      <text x="570" y="30" text-anchor="middle" fill="#8fbf7f" font-size="14" font-weight="600">1.22+: a fresh i per iteration</text>
+      <!-- left: closures -->
+      <rect x="40" y="55" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="80" y="77" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #0</text>
+      <rect x="40" y="105" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="80" y="127" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #1</text>
+      <rect x="40" y="155" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="80" y="177" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #2</text>
+      <rect x="230" y="100" width="100" height="44" rx="6" fill="#2e2d2a" stroke="#e0b45c"/><text x="280" y="127" text-anchor="middle" fill="#e0b45c" font-size="13" font-family="JetBrains Mono, monospace">i = 3</text>
+      <path d="M120 72 L228 112" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <path d="M120 122 L228 122" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <path d="M120 172 L228 132" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <text x="190" y="215" text-anchor="middle" fill="#a8a49a" font-size="12">all print 3 3 3</text>
+      <line x1="380" y1="45" x2="380" y2="200" stroke="#3a3936"/>
+      <!-- right -->
+      <rect x="420" y="55" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="460" y="77" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #0</text>
+      <rect x="420" y="105" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="460" y="127" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #1</text>
+      <rect x="420" y="155" width="80" height="34" rx="6" fill="#2e2d2a" stroke="#3a3936"/><text x="460" y="177" text-anchor="middle" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">func #2</text>
+      <rect x="610" y="55" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/><text x="655" y="77" text-anchor="middle" fill="#8fbf7f" font-size="12" font-family="JetBrains Mono, monospace">i = 0</text>
+      <rect x="610" y="105" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/><text x="655" y="127" text-anchor="middle" fill="#8fbf7f" font-size="12" font-family="JetBrains Mono, monospace">i = 1</text>
+      <rect x="610" y="155" width="90" height="34" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/><text x="655" y="177" text-anchor="middle" fill="#8fbf7f" font-size="12" font-family="JetBrains Mono, monospace">i = 2</text>
+      <path d="M500 72 L608 72" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <path d="M500 122 L608 122" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <path d="M500 172 L608 172" stroke="#d97757" stroke-width="1.5" marker-end="url(#a3)"/>
+      <text x="570" y="215" text-anchor="middle" fill="#a8a49a" font-size="12">print 0 1 2</text>
+    </svg>
+    <figcaption>Closures capture <em>variables</em>, not values. Go 1.22 gives each iteration its own variable.</figcaption>
+  </figure>
+
+  <p>The old behavior caused real outages: a loop starting goroutines that all processed the last item, or a slice of pointers that all pointed to the same element. People defended against it with the strange-looking line <code>i := i</code> inside the loop. In Go 1.22+ modules that line is unnecessary (harmless, but delete it when you see it).</p>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: upgrading old modules</div><p>Bumping a module's <code>go</code> line from 1.21 to 1.22+ changes loop semantics for every loop in the module. In practice this only fixes bugs, but a test that accidentally relied on the old behavior could change. Upgrade the <code>go</code> line deliberately, run the full test suite with <code>-race</code>, and use <code>go vet</code> — its <code>loopclosure</code> check targets exactly this. The Go team's <code>bisect</code> tool can even pinpoint which loop changed behavior.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>break, continue and labels</h2>
+  <p><code>break</code> exits the innermost loop immediately. <code>continue</code> skips the rest of the current iteration and moves to the next one. When loops are nested, put a <strong>label</strong> (a name followed by a colon) on an outer loop and you can <code>break</code> or <code>continue</code> <em>that</em> loop from inside the inner one.</p>
+  <div class="live" data-title="Labeled break and continue in nested loops">
+    <pre><code class="language-go">grid := [][]int{
+	{1, 2, 3},
+	{4, -1, 6},
+	{7, 8, 9},
+}
+outer:
+for r, row := range grid {
+	for c, v := range row {
+		if v == 2 {
+			continue outer // skip the rest of this row
+		}
+		if v &lt; 0 {
+			fmt.Println("negative at", r, c)
+			break outer // leave BOTH loops
+		}
+		fmt.Println("visit", v)
+	}
+}
+fmt.Println("done")</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-5" data-state="">A 3×3 grid with one negative number.</li>
+      <li data-lines="6-7" data-state="r=0">The label <code>outer:</code> names the outer loop. We start row 0.</li>
+      <li data-lines="16" data-state="r=0; c=0; v=1" data-out="visit 1">Value 1: neither check matches, so we visit it.</li>
+      <li data-lines="8-10" data-state="r=0; c=1; v=2">Value 2: <code>continue outer</code> abandons the <em>rest of row 0</em> (value 3 is never visited) and jumps to the next iteration of the <strong>outer</strong> loop.</li>
+      <li data-lines="7-8" data-state="r=1; c=0; v=4" data-out="visit 4">Row 1 begins. Value 4 is visited.</li>
+      <li data-lines="12-14" data-state="r=1; c=1; v=-1" data-out="negative at 1 1">Value −1: we print its position and <code>break outer</code> leaves <strong>both</strong> loops at once. Row 2 is never touched.</li>
+      <li data-lines="19" data-state="" data-out="done">Execution continues after the outer loop.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>visit 1
+visit 4
+negative at 1 1
+done</pre></div>
+
+  <h3>The switch-inside-a-loop trap</h3>
+  <p>Inside a <code>switch</code> (or <code>select</code>), a plain <code>break</code> exits the <em>switch</em>, not the surrounding loop. This surprises everyone once. Use a label:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	cmds := []string{"run", "skip", "stop", "run"}
+loop:
+	for i, c := range cmds {
+		switch c {
+		case "skip":
+			continue
+		case "stop":
+			break loop // a plain break would only exit the switch!
+		}
+		fmt.Println(i, c)
+	}
+	fmt.Println("exited loop")
+}</code></pre></div>
+  <div class="output"><pre>0 run
+exited loop</pre></div>
+  <p><code>continue</code> has no such problem — it always refers to a loop, since a <code>switch</code> has nothing to continue.</p>
+  <div class="callout tip"><p>Labels are scoped to the function, and an unused label is a compile error (just like an unused variable). Name them for what they loop over: <code>rows:</code>, <code>retry:</code>, <code>events:</code>. If you find yourself needing labels often, consider moving the inner loop into its own function and using <code>return</code> — it's usually clearer.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>switch</h2>
+  <p>A <code>switch</code> compares a value against a list of <code>case</code>s and runs the first one that matches. Go's switch is friendlier than C's in several ways:</p>
+  <ul>
+    <li><strong>No automatic fallthrough.</strong> Each case ends by itself; no <code>break</code> needed. Forgetting <code>break</code> was a classic C bug.</li>
+    <li>A case can list <strong>several values</strong>: <code>case "sat", "sun":</code>.</li>
+    <li>Cases can be <strong>any expression</strong>, not just constants — and values don't need to be integers.</li>
+    <li>With <strong>no tag</strong> (<code>switch {</code>), each case is a boolean condition. It's the idiomatic replacement for long <code>if/else if</code> chains.</li>
+    <li>It can have an <strong>init statement</strong>, like <code>if</code>.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func weekdayKind(d time.Weekday) string {
+	switch d {
+	case time.Saturday, time.Sunday: // several values in one case
+		return "weekend"
+	default:
+		return "weekday"
+	}
+}
+
+func grade(score int) string {
+	switch { // tagless switch = cleaner if/else-if chain
+	case score &gt;= 90:
+		return "A"
+	case score &gt;= 80:
+		return "B"
+	case score &gt;= 70:
+		return "C"
+	default:
+		return "F"
+	}
+}
+
+func main() {
+	fmt.Println(weekdayKind(time.Saturday), weekdayKind(time.Wednesday))
+	fmt.Println(grade(95), grade(85), grade(42))
+
+	// switch with an init statement
+	switch h := 14; {
+	case h &lt; 12:
+		fmt.Println("morning")
+	case h &lt; 18:
+		fmt.Println("afternoon")
+	default:
+		fmt.Println("evening")
+	}
+
+	// cases are evaluated top to bottom, and can be any expression
+	x := 5
+	switch x {
+	case 1 + 4:
+		fmt.Println("five")
+	}
+}</code></pre></div>
+  <div class="output"><pre>weekend weekday
+A B F
+afternoon
+five</pre></div>
+  <p>Cases are tried top to bottom, and the first match wins — so order matters in a tagless switch (<code>score &gt;= 90</code> must come before <code>score &gt;= 80</code>). <code>default</code> runs when nothing matches; it can be placed anywhere but conventionally goes last. Duplicate constant cases are caught at compile time:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	x := 1
+	switch x {
+	case 1:
+		fmt.Println("one")
+	case 1:
+		fmt.Println("uno")
+	}
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:10:7: duplicate case 1 (constant of type int) in expression switch
+	./main.go:8:7: previous case</pre></div>
+
+  <h3>fallthrough</h3>
+  <p>When you <em>do</em> want C-style fall-through, say so explicitly with <code>fallthrough</code> as the last statement of a case. It transfers control to the <em>next case's body</em> — <strong>without checking that case's condition</strong>.</p>
+  <div class="live" data-title="fallthrough skips the next case's check">
+    <pre><code class="language-go">level := 2
+switch level {
+case 1:
+	fmt.Println("one")
+case 2:
+	fmt.Println("two")
+	fallthrough
+case 3:
+	fmt.Println("three")
+	fallthrough
+case 4:
+	fmt.Println("four")
+case 5:
+	fmt.Println("five")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="level=2">We switch on <code>level</code>, which is 2.</li>
+      <li data-lines="3" data-state="level=2">Is it 1? No. Skip this case.</li>
+      <li data-lines="5-6" data-state="level=2" data-out="two">Is it 2? Yes — run its body.</li>
+      <li data-lines="7-9" data-state="level=2" data-out="three"><code>fallthrough</code> jumps straight into case 3's body. Note: <code>level == 3</code> is <strong>never checked</strong>. It's false, yet the body runs.</li>
+      <li data-lines="10-12" data-state="level=2" data-out="four">Another <code>fallthrough</code> into case 4.</li>
+      <li data-lines="13-15" data-state="level=2">Case 4 has no <code>fallthrough</code>, so the switch ends here. Case 5 is not run.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>two
+three
+four</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: fallthrough is rare for a reason</div><p><code>fallthrough</code> can't be used in the last case or in a type switch, and it ignores the next condition — which readers rarely expect. In real code it's almost always clearer to list multiple values in one case (<code>case 2, 3, 4:</code>) or to call a shared function. Many Go programmers go years without writing it.</p></div>
+
+  <h3>Type switch (preview)</h3>
+  <p>A <strong>type switch</strong> branches on the <em>dynamic type</em> of an interface value rather than on its value. <code>any</code> is the interface that can hold a value of any type. The special syntax <code>v.(type)</code> only works in a switch. Interfaces get a full treatment in Chapter 08 — here's what it looks like:</p>
+  <div class="live" data-title="Type switch: one value, five types">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func describe(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "nil"
+	case int, int64:
+		return fmt.Sprintf("an integer: %v", x) // x is still 'any' here
+	case string:
+		return fmt.Sprintf("a string of length %d", len(x)) // x is a string
+	case error:
+		return "an error: " + x.Error()
+	default:
+		return fmt.Sprintf("something else: %T", x)
+	}
+}
+
+func main() {
+	fmt.Println(describe(42))
+	fmt.Println(describe("hello"))
+	fmt.Println(describe(fmt.Errorf("boom")))
+	fmt.Println(describe(3.14))
+	fmt.Println(describe(nil))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="21,5-6" data-state="v=42 (int)"><code>42</code> is stored in the <code>any</code> parameter along with its dynamic type, <code>int</code>. <code>v.(type)</code> asks for that dynamic type.</li>
+      <li data-lines="9-10" data-state="v=42 (int); x=42 (any)" data-out="an integer: 42">The <code>int, int64</code> case matches. <strong>Gotcha:</strong> with more than one type in a case, <code>x</code> keeps type <code>any</code> — Go can't pick one for you.</li>
+      <li data-lines="22,11-12" data-state="v=&quot;hello&quot; (string); x=&quot;hello&quot; (string)" data-out="a string of length 5">A single-type case: here <code>x</code> really is a <code>string</code>, so <code>len(x)</code> compiles.</li>
+      <li data-lines="23,13-14" data-state="v=boom (*errors.errorString); x=boom (error)" data-out="an error: boom">Cases can name interfaces. The concrete type returned by <code>fmt.Errorf</code> implements <code>error</code>, so this case matches and <code>x.Error()</code> is callable.</li>
+      <li data-lines="24,15-16" data-state="v=3.14 (float64); x=3.14 (any)" data-out="something else: float64">No case lists <code>float64</code>, so <code>default</code> runs. <code>%T</code> reveals the dynamic type.</li>
+      <li data-lines="25,7-8" data-state="v=nil; x=nil" data-out="nil">A nil interface has no dynamic type at all; only <code>case nil</code> matches it.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>an integer: 42
+a string of length 5
+an error: boom
+something else: float64
+nil</pre></div>
+  <p>In a case with a single type (<code>case string:</code>), <code>x</code> has that type, so <code>len(x)</code> works. In a case listing several types (<code>case int, int64:</code>), <code>x</code> keeps the original interface type, since Go can't know which one it is.</p>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">In Go, what does this print? <code>switch x := 2; x { case 1, 2: fmt.Print("A"); case 3: fmt.Print("B") }</code></div>
+    <div class="quiz-opts">
+      <button>AB</button>
+      <button>A</button>
+      <button>B</button>
+      <button>Nothing — it doesn't compile without <code>break</code></button>
+    </div>
+    <div class="quiz-explain"><code>x</code> is 2, which matches <code>case 1, 2</code>, so <code>A</code> prints. Go cases never fall through unless you write <code>fallthrough</code>, so case 3 doesn't run. No <code>break</code> is required.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>goto (rarely)</h2>
+  <p>Yes, Go has <code>goto</code>. It jumps to a label in the same function. It exists mostly for generated code (parsers, state machines) and a few low-level spots in the standard library. You'll almost never write it.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	attempt := 0
+retry:
+	attempt++
+	if attempt &lt; 3 {
+		fmt.Println("attempt", attempt, "failed")
+		goto retry
+	}
+	fmt.Println("succeeded on attempt", attempt)
+}</code></pre></div>
+  <div class="output"><pre>attempt 1 failed
+attempt 2 failed
+succeeded on attempt 3</pre></div>
+  <p>Go limits <code>goto</code> to keep it from creating chaos: you can't jump into a block, and you can't jump over a variable declaration (the variable would exist but never be initialized):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	goto end
+	x := 1
+	fmt.Println(x)
+end:
+	fmt.Println("end")
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:6:7: goto end jumps over declaration of x at ./main.go:7:4</pre></div>
+  <p>The retry example above is clearer as a <code>for</code> loop. Prefer loops, <code>break</code>/<code>continue</code> with labels, and early <code>return</code>s.</p>
+
+  <!-- ============================================================ -->
+  <h2>defer: run this when the function returns</h2>
+  <p>A <code>defer</code> statement schedules a function call to run <strong>just before the surrounding function returns</strong> — whether it returns normally, returns early from an error check, or panics. It's Go's tool for cleanup: closing files, unlocking mutexes, finishing a trace span. You write the cleanup right next to the setup, so you can't forget it.</p>
+  <div class="code" data-file="pattern.go"><pre><code class="language-go">f, err := os.Open(path)
+if err != nil {
+	return err
+}
+defer f.Close() // cleanup lives next to the acquisition
+
+mu.Lock()
+defer mu.Unlock()</code></pre></div>
+
+  <h3>The three rules of defer</h3>
+  <ol>
+    <li><strong>Deferred calls run in LIFO order</strong> — last in, first out, like a stack of plates. The most recently deferred runs first. This matches how resources nest: what you opened last is closed first.</li>
+    <li><strong>Arguments are evaluated immediately</strong>, at the <code>defer</code> statement, not when the call finally runs. The function is called later; its arguments are fixed now.</li>
+    <li><strong>Deferred functions can read and modify named result values</strong> of the surrounding function.</li>
+  </ol>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="760" height="240" fill="#262624" rx="10"/>
+      <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <text x="150" y="30" text-anchor="middle" fill="#7fa6d9" font-size="14" font-weight="600">as the function runs: push</text>
+      <text x="150" y="60" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace" text-anchor="middle">defer A()</text>
+      <text x="150" y="85" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace" text-anchor="middle">defer B()</text>
+      <text x="150" y="110" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace" text-anchor="middle">defer C()</text>
+      <text x="150" y="140" fill="#a8a49a" font-size="12" font-family="JetBrains Mono, monospace" text-anchor="middle">return</text>
+      <!-- stack -->
+      <rect x="320" y="60" width="130" height="36" rx="5" fill="#2e2d2a" stroke="#e0b45c"/><text x="385" y="83" text-anchor="middle" fill="#e0b45c" font-size="13" font-family="JetBrains Mono, monospace">C  (top)</text>
+      <rect x="320" y="100" width="130" height="36" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="385" y="123" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">B</text>
+      <rect x="320" y="140" width="130" height="36" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="385" y="163" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">A</text>
+      <text x="385" y="200" text-anchor="middle" fill="#a8a49a" font-size="12">defer stack (per call)</text>
+      <path d="M215 85 L315 100" stroke="#7fa6d9" stroke-width="1.5" marker-end="url(#a4)"/>
+      <text x="610" y="30" text-anchor="middle" fill="#8fbf7f" font-size="14" font-weight="600">on return: pop</text>
+      <text x="610" y="70" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">1. C()</text>
+      <text x="610" y="100" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">2. B()</text>
+      <text x="610" y="130" text-anchor="middle" fill="#ece9e1" font-size="13" font-family="JetBrains Mono, monospace">3. A()</text>
+      <path d="M455 100 L555 100" stroke="#8fbf7f" stroke-width="1.5" marker-end="url(#a4)"/>
+      <text x="380" y="228" text-anchor="middle" fill="#a8a49a" font-size="12">Arguments are captured when each defer statement runs; the calls happen in reverse order at return.</text>
+    </svg>
+    <figcaption>defer is a per-function stack: last deferred, first run.</figcaption>
+  </figure>
+
+  <div class="live" data-title="defer: LIFO order and argument evaluation">
+    <pre><code class="language-go">fmt.Println("start")
+for i := 1; i &lt;= 3; i++ {
+	defer fmt.Println("deferred", i)
+}
+x := 10
+defer fmt.Println("x at defer time:", x)
+defer func() { fmt.Println("x in closure:", x) }()
+x = 20
+fmt.Println("end of main, x =", x)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="defer stack=[]" data-out="start">Normal code runs normally.</li>
+      <li data-lines="2-3" data-state="i=1; defer stack=[&quot;deferred 1&quot;]">First iteration: <code>defer</code> does <strong>not</strong> print now. It evaluates the arguments (<code>"deferred", 1</code>) and pushes the call onto the defer stack.</li>
+      <li data-lines="2-4" data-state="defer stack=[d1 d2 d3]">Two more iterations push "deferred 2" and "deferred 3". Thanks to per-iteration loop variables (and immediate argument evaluation), each captured its own <code>i</code>.</li>
+      <li data-lines="5-6" data-state="x=10; defer stack=[d1 d2 d3 &quot;x at defer time: 10&quot;]">The argument <code>x</code> is evaluated <em>right now</em>: the value 10 is saved with the deferred call.</li>
+      <li data-lines="7" data-state="x=10; defer stack=[d1 d2 d3 x:10 closure]">This defer schedules a <em>closure</em> with no arguments. Nothing is evaluated yet; the closure will read <code>x</code> when it eventually runs.</li>
+      <li data-lines="8-9" data-state="x=20; defer stack=[d1 d2 d3 x:10 closure]" data-out="end of main, x = 20">We change <code>x</code> to 20 and print. Now <code>main</code> is about to return…</li>
+      <li data-lines="7" data-state="x=20; defer stack=[d1 d2 d3 x:10]" data-out="x in closure: 20">…so deferred calls run, last first. The closure reads <code>x</code> <em>now</em>: 20.</li>
+      <li data-lines="6" data-state="defer stack=[d1 d2 d3]" data-out="x at defer time: 10">This one's argument was frozen at 10 when the <code>defer</code> statement ran.</li>
+      <li data-lines="3" data-state="defer stack=[]" data-out="deferred 3\ndeferred 2\ndeferred 1">Finally the loop's three defers, in reverse order. The stack is empty and <code>main</code> truly returns.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>start
+end of main, x = 20
+x in closure: 20
+x at defer time: 10
+deferred 3
+deferred 2
+deferred 1</pre></div>
+
+  <h3>defer for cleanup</h3>
+  <p>Here's the canonical pattern. Every return path — the early error return and the normal one — closes the file, because the <code>defer</code> was registered right after the successful open:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func countBytes(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close() // runs on EVERY return path below
+
+	buf := make([]byte, 1024)
+	total := 0
+	for {
+		n, err := f.Read(buf)
+		total += n
+		if err != nil {
+			break // io.EOF at the end
+		}
+	}
+	return total, nil
+}
+
+func main() {
+	path := filepath.Join(os.TempDir(), "defer-demo.txt")
+	os.WriteFile(path, []byte("hello, defer!"), 0o644)
+	defer os.Remove(path)
+
+	n, err := countBytes(path)
+	fmt.Println(n, err)
+
+	_, err = countBytes("/no/such/file")
+	fmt.Println(err)
+}</code></pre></div>
+  <div class="output"><pre>13 &lt;nil&gt;
+open /no/such/file: no such file or directory</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: defer after the error check, not before</div><p>Always check the error <em>before</em> deferring the close. If <code>os.Open</code> fails, <code>f</code> is <code>nil</code>, and a deferred <code>f.Close()</code> on a nil file would return an error (or, for other types, panic). The order is always: acquire → check error → defer release.</p></div>
+
+  <h3>A neat trick: deferring a function that returns a function</h3>
+  <p>Because arguments — including the function expression itself — are evaluated at the <code>defer</code> statement, <code>defer trace("work")()</code> calls <code>trace</code> immediately (logging "enter") and defers the function it returns (logging "exit"):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func trace(name string) func() {
+	start := time.Now()
+	fmt.Println("enter", name)
+	return func() {
+		fmt.Println("exit", name, "after", time.Since(start).Round(10*time.Millisecond))
+	}
+}
+
+func work() {
+	defer trace("work")() // trace("work") runs NOW; the returned func runs at exit
+	time.Sleep(50 * time.Millisecond)
+	fmt.Println("working...")
+}
+
+func main() {
+	work()
+}</code></pre></div>
+  <div class="output"><pre>enter work
+working...
+exit work after 50ms</pre></div>
+  <p class="muted">(The duration is rounded to 10ms; your exact timing may differ slightly.)</p>
+
+  <h3>Modifying results and recovering from panics</h3>
+  <p>A deferred closure runs after the <code>return</code> statement has set the result values but before the caller receives them, so it can inspect or change <strong>named results</strong>. This is how you add context to every error a function returns, in one place. It's also the only place <code>recover()</code> works, which stops a panic from crashing the program (covered properly in Chapter 10):</p>
+  <div class="live" data-title="Deferred closures change named results">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Deferred closures can read and change named results.
+func doubleOnReturn() (result int) {
+	defer func() { result *= 2 }()
+	return 21 // sets result = 21, then the deferred func runs
+}
+
+func save() (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("save failed: %w", err) // add context on the way out
+		}
+	}()
+	return errors.New("disk full")
+}
+
+func main() {
+	fmt.Println(doubleOnReturn())
+	fmt.Println(save())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="24,9-10" data-state="result=0"><code>main</code> calls <code>doubleOnReturn</code>. The named result <code>result</code> starts at 0, and a deferred closure is registered. It captures <code>result</code> itself, not a copy.</li>
+      <li data-lines="11" data-state="result=21"><code>return 21</code> is really two steps: first assign <code>result = 21</code>, then run the deferred calls, then hand <code>result</code> to the caller.</li>
+      <li data-lines="10" data-state="result=42">The deferred closure doubles the named result after the <code>return</code> statement but before the caller sees it.</li>
+      <li data-lines="24" data-state="result=42" data-out="42">The caller receives 42, not 21.</li>
+      <li data-lines="25,14-15" data-state="err=nil"><code>save</code> registers a deferred closure that will inspect the named <code>err</code> on the way out.</li>
+      <li data-lines="20" data-state="err=disk full"><code>return errors.New("disk full")</code> assigns <code>err</code>.</li>
+      <li data-lines="16-17" data-state="err=save failed: disk full">The deferred function sees the non-nil error and wraps it with context using <code>%w</code>. This works for <em>every</em> return path in the function, so you write the wrapping once.</li>
+      <li data-lines="25" data-state="err=save failed: disk full" data-out="save failed: disk full"><code>main</code> prints the wrapped error.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>42
+save failed: disk full</pre></div>
+  <div class="live" data-title="recover turns a panic into an error">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func safeDivide(a, b int) (q int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2))
+	fmt.Println(safeDivide(1, 0))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="15,5-6" data-state="a=10; b=2; q=0; err=nil">First call, <code>safeDivide(10, 2)</code>. Named results <code>q</code> and <code>err</code> start at their zero values. The deferred closure is registered first, before any risky work.</li>
+      <li data-lines="11" data-state="a=10; b=2; q=5; err=nil"><code>a / b</code> is 5. <code>return</code> assigns <code>q=5, err=nil</code>.</li>
+      <li data-lines="6-7" data-state="a=10; b=2; q=5; err=nil; r=nil">The deferred function runs on the way out. <code>recover()</code> returns <code>nil</code> because nothing panicked, so it does nothing.</li>
+      <li data-lines="15" data-state="q=5; err=nil" data-out="5 &lt;nil>"><code>main</code> prints both results.</li>
+      <li data-lines="16,11" data-state="a=1; b=0; q=0; err=nil">Second call. Evaluating <code>1 / 0</code> <strong>panics</strong>: the <code>return</code> never completes and the function starts unwinding.</li>
+      <li data-lines="6-7" data-state="a=1; b=0; q=0; err=nil; r=runtime error: integer divide by zero">Deferred calls still run during a panic. Here <code>recover()</code> stops the panic and hands us its value.</li>
+      <li data-lines="8" data-state="q=0; err=recovered: runtime error: integer divide by zero">Because the results are <em>named</em>, the closure can set <code>err</code>. <code>q</code> was never assigned, so it stays 0.</li>
+      <li data-lines="16" data-state="q=0; err=recovered: runtime error: integer divide by zero" data-out="0 recovered: runtime error: integer divide by zero"><code>safeDivide</code> returns normally with an error instead of crashing the program.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>5 &lt;nil&gt;
+0 recovered: runtime error: integer divide by zero</pre></div>
+
+  <h3>The defer-in-a-loop gotcha</h3>
+  <p>Deferred calls run when the <strong>function</strong> returns — not at the end of a loop iteration or a block. Defer inside a loop and nothing gets cleaned up until the whole loop (and function) is done:</p>
+  <div class="live" data-title="defer in a loop vs. a helper function">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Resource struct{ id int }
+
+func Open(id int) *Resource {
+	fmt.Println("open", id)
+	return &amp;Resource{id}
+}
+func (r *Resource) Close() { fmt.Println("close", r.id) }
+
+func badProcessAll() {
+	for i := 1; i &lt;= 3; i++ {
+		r := Open(i)
+		defer r.Close() // all closes wait until the FUNCTION returns
+		fmt.Println("use", r.id)
+	}
+	fmt.Println("badProcessAll returning")
+}
+
+func process(id int) {
+	r := Open(id)
+	defer r.Close() // closes at the end of each call
+	fmt.Println("use", r.id)
+}
+
+func goodProcessAll() {
+	for i := 1; i &lt;= 3; i++ {
+		process(i)
+	}
+	fmt.Println("goodProcessAll returning")
+}
+
+func main() {
+	badProcessAll()
+	fmt.Println("-----")
+	goodProcessAll()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="36,14-15,8-9" data-state="i=1; deferred=[]" data-out="open 1"><code>badProcessAll</code> starts its loop and opens resource 1.</li>
+      <li data-lines="16-17" data-state="i=1; deferred=[Close 1]" data-out="use 1"><code>defer r.Close()</code> is registered, but it belongs to the <em>function</em>, not to the loop iteration. Nothing closes yet.</li>
+      <li data-lines="15-17" data-state="i=2; deferred=[Close 1, Close 2]" data-out="open 2\nuse 2">Second iteration: another resource opens, another close is queued. Resource 1 is <strong>still open</strong>.</li>
+      <li data-lines="15-17" data-state="i=3; deferred=[Close 1, Close 2, Close 3]" data-out="open 3\nuse 3">Third iteration. With 10,000 files instead of 3, you'd hit the OS limit on open files right here.</li>
+      <li data-lines="19" data-state="deferred=[Close 1, Close 2, Close 3]" data-out="badProcessAll returning">The loop is done and the function is about to return…</li>
+      <li data-lines="20,11" data-state="deferred=[]" data-out="close 3\nclose 2\nclose 1">…and only now do the deferred closes fire, in LIFO order: last registered, first run.</li>
+      <li data-lines="37" data-out="-----">The separator line.</li>
+      <li data-lines="38,30,23-25" data-state="i=1; deferred=[Close 1]" data-out="open 1\nuse 1"><code>goodProcessAll</code> moves each iteration's body into its own function <code>process</code>. The defer now belongs to <code>process</code>.</li>
+      <li data-lines="26,11" data-state="i=1; deferred=[]" data-out="close 1"><code>process</code> returns at the end of each call, so its defer fires immediately: resource 1 closes before resource 2 opens.</li>
+      <li data-lines="30,23-26" data-state="i=2" data-out="open 2\nuse 2\nclose 2">The same for 2…</li>
+      <li data-lines="30,23-26" data-state="i=3" data-out="open 3\nuse 3\nclose 3">…and for 3. At most one resource is open at any moment.</li>
+      <li data-lines="32" data-out="goodProcessAll returning">The loop finishes with nothing left to clean up.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>open 1
+use 1
+open 2
+use 2
+open 3
+use 3
+badProcessAll returning
+close 3
+close 2
+close 1
+-----
+open 1
+use 1
+close 1
+open 2
+use 2
+close 2
+open 3
+use 3
+close 3
+goodProcessAll returning</pre></div>
+  <p>With 3 resources this is harmless. With 10,000 files in a directory walk, the bad version keeps all 10,000 open at once and hits the operating system's open-file limit (<code>too many open files</code>). The fix is to move the loop body into its own function, so each <code>defer</code> runs at the end of each call — or to close explicitly at the end of each iteration.</p>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Files pile up"><pre><code class="language-go">for _, path := range paths {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close() // runs at function end!
+	process(f)
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ One file at a time"><pre><code class="language-go">for _, path := range paths {
+	if err := processFile(path); err != nil {
+		return err
+	}
+}
+
+// processFile opens, defers Close, processes.
+// Each call cleans up before the next starts.</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: don't ignore Close errors on writes</div><p><code>defer f.Close()</code> is fine for files you only <em>read</em>. For files you <em>write</em>, <code>Close</code> may be the moment buffered data is flushed — and where a "disk full" error surfaces. Silently dropping it means silently losing data. Use a named error result and capture it:</p>
+  <div class="code" data-file="write.go"><pre><code class="language-go">func writeReport(path string, data []byte) (err error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil &amp;&amp; err == nil {
+			err = cerr // report the Close error if nothing else failed
+		}
+	}()
+	_, err = f.Write(data)
+	return err
+}</code></pre></div>
+  <p>(Or use <code>errors.Join(err, f.Close())</code> to keep both.) As for cost: since Go 1.14, most defers are "open-coded" by the compiler and cost about as much as a normal function call, so don't avoid <code>defer</code> for performance.</p></div>
+
+  <div class="quiz" data-answer="0">
+    <div class="quiz-q">What does this print? <code>x := 1; defer fmt.Println(x); x = 2</code> (at the end of the function)</div>
+    <div class="quiz-opts">
+      <button>1</button>
+      <button>2</button>
+      <button>Nothing — defer only runs on panic</button>
+      <button>It depends on the Go version</button>
+    </div>
+    <div class="quiz-explain">The arguments of a deferred call are evaluated when the <code>defer</code> statement executes. At that moment <code>x</code> is 1, so the deferred call is <code>fmt.Println(1)</code>. To see the latest value, defer a closure instead: <code>defer func() { fmt.Println(x) }()</code>.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Early returns: keep the happy path left-aligned</h2>
+  <p>Put all the pieces of this chapter together and you get the single most recognizable trait of Go code: <strong>handle errors and edge cases first, return early, and let the main logic flow down the left margin</strong>. The "happy path" (what happens when everything goes right) is never buried inside nested <code>if</code>s.</p>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Nested pyramid"><pre><code class="language-go">func ship(o *Order) (string, error) {
+	if o != nil {
+		if o.Items &gt; 0 {
+			if o.Paid {
+				label := strings.ToUpper(o.ID)
+				return "shipped " + label, nil
+			} else {
+				return "", errors.New("not paid")
+			}
+		} else {
+			return "", errors.New("no items")
+		}
+	} else {
+		return "", errors.New("nil order")
+	}
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Guard clauses"><pre><code class="language-go">func ship(o *Order) (string, error) {
+	if o == nil {
+		return "", errors.New("nil order")
+	}
+	if o.Items == 0 {
+		return "", errors.New("no items")
+	}
+	if !o.Paid {
+		return "", errors.New("not paid")
+	}
+
+	label := strings.ToUpper(o.ID)
+	return "shipped " + label, nil
+}</code></pre></div></div>
+  </div>
+  <p>Both are correct. But in the good version you can read straight down: each <code>if</code> is a <strong>guard clause</strong> that rejects one bad case, and once you're past them, you know every precondition holds. Here it is running:</p>
+  <div class="live" data-title="Guard clauses on four orders">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type Order struct {
+	ID    string
+	Items int
+	Paid  bool
+}
+
+// Each check exits early; the main logic stays at the left margin.
+func ship(o *Order) (string, error) {
+	if o == nil {
+		return "", errors.New("nil order")
+	}
+	if o.Items == 0 {
+		return "", fmt.Errorf("order %s: no items", o.ID)
+	}
+	if !o.Paid {
+		return "", fmt.Errorf("order %s: not paid", o.ID)
+	}
+
+	label := strings.ToUpper(o.ID)
+	return "shipped " + label, nil
+}
+
+func main() {
+	orders := []*Order{nil, {ID: "a1"}, {ID: "b2", Items: 2}, {ID: "c3", Items: 1, Paid: true}}
+	for _, o := range orders {
+		msg, err := ship(o)
+		if err != nil {
+			fmt.Println("error:", err)
+			continue
+		}
+		fmt.Println(msg)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="32-34,16" data-state="o=nil">Four orders, each broken in a different way except the last. First iteration: <code>o</code> is <code>nil</code>, and we call <code>ship</code>.</li>
+      <li data-lines="17-18" data-state="o=nil">The very first guard catches it and returns immediately. Without this check, <code>o.Items</code> on line 20 would panic with a nil pointer dereference.</li>
+      <li data-lines="35-37" data-state="o=nil; err=nil order" data-out="error: nil order">Back in <code>main</code>, <code>err</code> is non-nil: print it and <code>continue</code> to the next order.</li>
+      <li data-lines="34,20-21" data-state="o={a1 0 false}; err=order a1: no items" data-out="error: order a1: no items">Order <code>a1</code> passes the nil check but has 0 items. The second guard returns an error that names the order.</li>
+      <li data-lines="34,23-24" data-state="o={b2 2 false}; err=order b2: not paid" data-out="error: order b2: not paid"><code>b2</code> has items but isn't paid: the third guard fires.</li>
+      <li data-lines="34,17-25" data-state="o={c3 1 true}"><code>c3</code> slips past all three guards. Every early-exit <code>if</code> has an empty "else": the happy path just continues down the left margin.</li>
+      <li data-lines="27-28" data-state="o={c3 1 true}; label=&quot;C3&quot;">The real work happens only once all preconditions are known to hold.</li>
+      <li data-lines="34,39" data-state="msg=&quot;shipped C3&quot;; err=nil" data-out="shipped C3">No error, so <code>main</code> prints the message. The loop ends.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>error: nil order
+error: order a1: no items
+error: order b2: not paid
+shipped C3</pre></div>
+  <div class="callout mental"><div class="callout-title">Mental model: a bouncer at the door</div><p>Guard clauses are bouncers. Each one turns away one kind of trouble at the door. Anyone who makes it inside the club (past the guards) is guaranteed to be on the list — so the code inside doesn't need to keep checking.</p></div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: the "line of sight" rule</div><p>A good Go function lets you squint at it and see the happy path as a straight line down the left edge, with short indented error-handling blocks that each end in <code>return</code> (or <code>continue</code>/<code>break</code> in loops). Practical rules: avoid <code>else</code> after a block that returns; extract deep nesting into helper functions; and when indentation passes three levels, treat it as a design smell worth a refactor in code review.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>1 · FizzBuzz, the Go way</summary>
+    <p>Print the numbers 1 to 15, but print <code>Fizz</code> for multiples of 3, <code>Buzz</code> for multiples of 5, and <code>FizzBuzz</code> for multiples of both. Use <code>range</code> over an integer and a tagless <code>switch</code>. Hint: the order of the cases matters.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	for i := range 16 {
+		if i == 0 {
+			continue
+		}
+		switch {
+		case i%15 == 0:
+			fmt.Println("FizzBuzz")
+		case i%3 == 0:
+			fmt.Println("Fizz")
+		case i%5 == 0:
+			fmt.Println("Buzz")
+		default:
+			fmt.Println(i)
+		}
+	}
+}</code></pre></div>
+    <div class="output"><pre>1
+2
+Fizz
+4
+Buzz
+Fizz
+7
+8
+Fizz
+Buzz
+11
+Fizz
+13
+14
+FizzBuzz</pre></div>
+    <p><code>i%15 == 0</code> must come first; otherwise 15 would match <code>i%3 == 0</code> and print <code>Fizz</code>. (A cleaner loop would be <code>for i := 1; i &lt;= 15; i++</code> — this version just shows <code>continue</code> too.)</p>
+  </details>
+
+  <details class="exercise">
+    <summary>2 · The first ten primes with a labeled continue</summary>
+    <p>Build a slice of the first 10 prime numbers. For each candidate <code>n</code>, test divisibility by the primes found so far; if any divides it, skip to the next candidate with a labeled <code>continue</code>. Optimization: stop testing once <code>p*p &gt; n</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="Labeled continue finds the primes">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var primes []int
+next:
+	for n := 2; len(primes) &lt; 10; n++ {
+		for _, p := range primes {
+			if p*p &gt; n {
+				break
+			}
+			if n%p == 0 {
+				continue next
+			}
+		}
+		primes = append(primes, n)
+	}
+	fmt.Println(primes)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6-8" data-state="primes=[]; n=2"><code>primes</code> starts as a nil slice. The outer loop's condition is <code>len(primes) &lt; 10</code>, not a bound on <code>n</code>: we don't know in advance how far we'll have to count.</li>
+      <li data-lines="9,17" data-state="primes=[2]; n=2">With no primes yet, the inner <code>range</code> runs zero times, so nothing can reject 2. It's appended.</li>
+      <li data-lines="9-11,17" data-state="primes=[2 3]; n=3; p=2"><code>n=3</code>: the first test is <code>p*p &gt; n</code> → 4 &gt; 3, so we've tested enough. <code>break</code> leaves only the <em>inner</em> loop, and 3 is appended.</li>
+      <li data-lines="13-14" data-state="primes=[2 3]; n=4; p=2"><code>n=4</code>: 4 &gt; 4 is false, but <code>4%2 == 0</code>. <code>continue next</code> abandons the inner loop <strong>and</strong> skips the <code>append</code>, jumping to the outer loop's <code>n++</code>.</li>
+      <li data-lines="9-11,17" data-state="primes=[2 3 5]; n=5; p=3"><code>n=5</code>: 2 doesn't divide it, then <code>p=3</code> gives 9 &gt; 5, so <code>break</code>. 5 is prime.</li>
+      <li data-lines="13-14" data-state="primes=[2 3 5]; n=9; p=3">Skipping ahead: 6 and 8 fall to <code>p=2</code>, 7 is appended, then <code>n=9</code> passes the 2-test but <code>9%3 == 0</code> sends it to the next candidate.</li>
+      <li data-lines="8,17" data-state="primes=[2 3 5 7 11 13 17 19 23 29]; n=29; len(primes)=10">The same pattern continues until 29 becomes the tenth prime. Then <code>n++</code> runs and the condition <code>len(primes) &lt; 10</code> is false, so the outer loop ends.</li>
+      <li data-lines="19" data-state="primes=[2 3 5 7 11 13 17 19 23 29]" data-out="[2 3 5 7 11 13 17 19 23 29]">The whole slice is printed.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>[2 3 5 7 11 13 17 19 23 29]</pre></div>
+    <p>The inner <code>break</code> exits only the inner loop (we've tested enough), while <code>continue next</code> skips the <code>append</code> by jumping to the next iteration of the outer loop.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>3 · Predict the defer output</summary>
+    <p>What does this program print? Think about LIFO order and which defer was registered first.</p>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	defer fmt.Println("!")
+	for i := range 3 {
+		defer fmt.Print(i, " ")
+	}
+	fmt.Print("go: ")
+}</code></pre></div>
+    <div class="solution-label">Solution</div>
+    <div class="output"><pre>go: 2 1 0 !</pre></div>
+    <p><code>"go: "</code> prints immediately. At return, defers run in reverse: the loop's defers were pushed last (0, 1, 2), so they pop as 2, 1, 0. The <code>"!"</code> defer was pushed first, so it runs last.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li><code>if</code> has no parentheses and always needs braces. <code>if v, err := f(); err != nil</code> scopes variables to the if/else chain.</li>
+      <li><code>for</code> is the only loop: classic, condition-only, infinite, and <code>range</code>.</li>
+      <li><code>range</code> gives copies of slice elements, decodes runes in strings (byte indexes!), iterates maps in random order, drains channels until closed, counts integers (1.22+) and drives iterator functions (1.23+).</li>
+      <li>Since Go 1.22 (by the module's <code>go</code> line), each loop iteration has its own variable — closures and goroutines capture the value you expect.</li>
+      <li>Labels let <code>break</code>/<code>continue</code> target an outer loop. A plain <code>break</code> inside a <code>switch</code> only exits the switch.</li>
+      <li><code>switch</code> cases don't fall through; list multiple values per case; use tagless switches instead of if-else chains. <code>fallthrough</code> skips the next condition.</li>
+      <li><code>defer</code> runs at function return, in LIFO order, with arguments evaluated immediately. Don't defer inside long loops; check errors before deferring <code>Close</code>.</li>
+      <li>Return early and keep the happy path left-aligned.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

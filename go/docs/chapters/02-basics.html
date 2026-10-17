@@ -1,0 +1,1427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 02 · Variables, Types &amp; Constants — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="02">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part I · Chapter 02</div>
+  <h1>Variables, Types &amp; Constants</h1>
+  <p class="lead">Every program is about storing values and transforming them. In this chapter you'll learn how Go names values, what types it gives them, why it refuses to convert between types behind your back, and how its surprisingly powerful constants (and the little word <code>iota</code>) work.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Beginner</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>Every way to declare a variable — <code>var</code>, <code>:=</code>, grouped and multiple assignment — and when to use which</li>
+      <li>What <em>zero values</em> are and why Go has no "uninitialized" variables</li>
+      <li>All the basic types: integer sizes, unsigned integers, floats, complex numbers, booleans, strings, <code>byte</code> and <code>rune</code></li>
+      <li>What happens on integer overflow, and why floating point is "wrong" (and what to do about it)</li>
+      <li>Why Go has no implicit conversions, and how to convert explicitly — including strings with <code>strconv</code></li>
+      <li>Untyped constants, their arbitrary precision, and every useful <code>iota</code> pattern</li>
+      <li>Named types vs type aliases, the blank identifier, scope and shadowing</li>
+      <li>Printing anything with <code>fmt</code> verbs: <code>%v %+v %#v %T %d %q %x</code> and friends</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Why types matter</h2>
+  <p>A <strong>variable</strong> is a named box in memory that holds a value. A <strong>type</strong> tells Go two things about that box: how many bytes it takes up, and which operations make sense on it. You can add two numbers, but not a number and a list. You can ask the length of a string, but not of a boolean.</p>
+  <p>Go is <strong>statically typed</strong>: every variable's type is fixed at compile time and never changes. That sounds restrictive if you come from Python or JavaScript, but it buys you a lot:</p>
+  <ul>
+    <li><strong>Mistakes are caught before the program runs.</strong> A typo that would crash a Python script at 2am in production fails the Go build on your laptop.</li>
+    <li><strong>Code documents itself.</strong> <code>func Charge(amountCents int64, currency string)</code> tells you exactly what to pass.</li>
+    <li><strong>Speed.</strong> The compiler knows the exact memory layout, so it generates tight machine code with no runtime type checks.</li>
+    <li><strong>Tooling.</strong> Autocomplete, rename and "find all usages" are exact, not guesses.</li>
+  </ul>
+  <p>And thanks to <strong>type inference</strong>, you rarely have to <em>write</em> the types: <code>count := 3</code> is clearly an <code>int</code>, and Go figures it out.</p>
+
+  <!-- ============================================================ -->
+  <h2>Declaring variables: var and :=</h2>
+  <p>Go has two ways to create a variable. Here are all the forms in one program:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// Package-level variables: must use var (no := outside functions).
+var appName = "inventory"
+var maxItems int = 100
+
+var (
+	debug   bool
+	version = "1.0.0"
+)
+
+func main() {
+	var count int           // type, no value -&gt; zero value
+	var price float64 = 9.5 // type and value
+	var label = "widget"    // value only, type inferred (string)
+	qty := 3                // short declaration: inferred int
+
+	var x, y int = 1, 2   // several of one type
+	var a, b = "hi", true // several, mixed types inferred
+	first, second := 10, 20
+
+	fmt.Println(appName, maxItems, debug, version)
+	fmt.Println(count, price, label, qty)
+	fmt.Println(x, y, a, b, first, second)
+}</code></pre></div>
+  <div class="output"><pre>inventory 100 false 1.0.0
+0 9.5 widget 3
+1 2 hi true 10 20</pre></div>
+
+  <h3>The long form: <code>var</code></h3>
+  <p><code>var name Type = value</code>. You may leave out the type (Go infers it from the value) <em>or</em> the value (the variable gets its type's <em>zero value</em>), but not both. Several declarations can be grouped in <code>var ( ... )</code>, which is common at package level.</p>
+  <h3>The short form: <code>:=</code></h3>
+  <p><code>name := value</code> declares <em>and</em> initializes in one go, with the type inferred. Read <code>:=</code> as "is defined as". It's the form you'll use most inside functions. Two rules:</p>
+  <ol>
+    <li><code>:=</code> only works <strong>inside functions</strong>. At package level, every statement must start with a keyword (<code>var</code>, <code>func</code>, <code>type</code>, …), so the parser can tell declarations apart quickly.</li>
+    <li><code>:=</code> must declare <strong>at least one new variable</strong> on its left side.</li>
+  </ol>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+name := "gopher"
+
+func main() {
+	fmt.Println(name)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:5:1: syntax error: non-declaration statement outside function body</pre></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	a := 1
+	a := 2
+	fmt.Println(a)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:7:4: no new variables on left side of :=</pre></div>
+  <p>The fix for the second error is plain assignment, <code>a = 2</code>, with a single <code>=</code>. Remember: <code>:=</code> <em>creates</em>; <code>=</code> <em>updates</em>.</p>
+
+  <table>
+    <thead><tr><th>Use…</th><th>When</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><code>x := value</code></td><td>The default inside functions when you have an initial value</td><td><code>user := loadUser(id)</code></td></tr>
+      <tr><td><code>var x T</code></td><td>You want the zero value and will fill it in later</td><td><code>var buf bytes.Buffer</code></td></tr>
+      <tr><td><code>var x T = value</code></td><td>The inferred type would be wrong</td><td><code>var ratio float64 = 1</code> (else it'd be <code>int</code>)</td></tr>
+      <tr><td><code>var ( … )</code></td><td>Package-level variables</td><td><code>var ( ErrNotFound = errors.New("not found") )</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Multiple assignment, swaps and the "one new variable" rule</h3>
+  <p>Go can assign several variables at once. All the right-hand values are evaluated <em>first</em>, then assigned — which makes swapping trivial. And when a function returns two values (very common: a result and an error), <code>:=</code> lets you reuse an existing variable as long as at least one on the left is new.</p>
+  <div class="live" data-title="Multiple assignment and redeclaration">
+    <pre><code class="language-go">n, err := strconv.Atoi("42")
+fmt.Println(n, err)
+
+m, err := strconv.Atoi("x7") // ok: m is new, err is reused
+fmt.Println(m, err)
+
+a, b := 1, 2
+a, b = b, a // swap: right side is evaluated first
+fmt.Println(a, b)
+
+a, b, c := b, a+b, 99 // c is new, so := is allowed
+fmt.Println(a, b, c)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="n=42; err=nil"><code>strconv.Atoi</code> converts a string to an int and returns two values: the number and an error. Both <code>n</code> and <code>err</code> are new, so <code>:=</code> declares both.</li>
+      <li data-lines="2" data-state="n=42; err=nil" data-out="42 &lt;nil&gt;"><code>nil</code> means "no error". It prints as <code>&lt;nil&gt;</code>.</li>
+      <li data-lines="4" data-state="n=42; m=0; err=invalid syntax">Here <code>m</code> is new but <code>err</code> already exists. That's allowed: <code>:=</code> declares <code>m</code> and simply <em>assigns</em> to the existing <code>err</code> (same variable, same scope). Parsing <code>"x7"</code> fails, so <code>m</code> is 0 and <code>err</code> describes the problem.</li>
+      <li data-lines="5" data-state="n=42; m=0; err=invalid syntax" data-out="0 strconv.Atoi: parsing &quot;x7&quot;: invalid syntax">Errors in Go are values that describe what went wrong (Chapter 10).</li>
+      <li data-lines="7" data-state="a=1; b=2">Two new variables at once.</li>
+      <li data-lines="8" data-state="a=2; b=1">The swap: Go evaluates the right side <code>(b, a)</code> = <code>(2, 1)</code> <em>completely</em>, then assigns. No temporary variable needed.</li>
+      <li data-lines="9" data-state="a=2; b=1" data-out="2 1">Printed.</li>
+      <li data-lines="11" data-state="a=1; b=3; c=99">Right side first: <code>b</code> is 1, <code>a+b</code> is 3, and 99. Then <code>a=1</code>, <code>b=3</code>, and the new <code>c=99</code>. Because <code>c</code> is new, <code>:=</code> is legal even though <code>a</code> and <code>b</code> exist.</li>
+      <li data-lines="12" data-state="a=1; b=3; c=99" data-out="1 3 99">Done.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>42 &lt;nil&gt;
+0 strconv.Atoi: parsing "x7": invalid syntax
+2 1
+1 3 99</pre></div>
+
+  <!-- ============================================================ -->
+  <h2>Shadowing: the same name, a different variable</h2>
+  <p>A <strong>scope</strong> is the region of code where a name is visible. Every pair of braces <code>{ }</code> opens a new scope. If you declare a variable with the same name as one in an outer scope, the inner one <strong>shadows</strong> (hides) the outer one until the closing brace. This is legal — and a classic source of bugs, especially with <code>err</code>.</p>
+  <div class="live" data-title="Shadowing: two variables named x, two named err">
+    <pre><code class="language-go">var err error
+x := 1
+if true {
+	x := 2 // NEW x, shadows the outer one
+	x++
+	fmt.Println("inner x:", x)
+
+	_, err := load() // NEW err! outer err stays nil
+	fmt.Println("inner err:", err)
+}
+fmt.Println("outer x:", x)
+fmt.Println("outer err:", err)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="outer err=nil; outer x=1">Two variables in <code>main</code>'s scope.</li>
+      <li data-lines="3-4" data-state="outer err=nil; outer x=1; inner x=2">Inside the <code>if</code> block, <code>x := 2</code> creates a <strong>brand-new</strong> variable that happens to be called <code>x</code>. The outer <code>x</code> still exists, untouched, just hidden.</li>
+      <li data-lines="5-6" data-state="outer err=nil; outer x=1; inner x=3" data-out="inner x: 3">We increment the inner <code>x</code> only.</li>
+      <li data-lines="8" data-state="outer err=nil; outer x=1; inner x=3; inner err=disk on fire">The bug: <code>_, err := load()</code> uses <code>:=</code>, and since we're in a new scope, it declares a <em>new</em> <code>err</code> instead of assigning to the outer one. The real error gets trapped in here.</li>
+      <li data-lines="9" data-state="outer err=nil; outer x=1; inner x=3; inner err=disk on fire" data-out="inner err: disk on fire">Inside, we can see it…</li>
+      <li data-lines="10-11" data-state="outer err=nil; outer x=1" data-out="outer x: 1">…but at the closing brace both inner variables disappear. The outer <code>x</code> is still 1.</li>
+      <li data-lines="12" data-state="outer err=nil; outer x=1" data-out="outer err: &lt;nil&gt;">And the outer <code>err</code> is still <code>nil</code> — the program thinks everything went fine. To fix it, declare nothing in the block and use plain assignment: <code>_, err = load()</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>inner x: 3
+inner err: disk on fire
+outer x: 1
+outer err: &lt;nil&gt;</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: := inside if/for blocks</div><p>Whenever you write <code>:=</code> inside a block and the name already exists outside, stop and ask: "do I want a new variable or to update the old one?" Shadowing <code>err</code> is one of the most common real-world Go bugs. The <code>shadow</code> analyzer (<code>go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@latest</code>) and <code>golangci-lint</code> can flag it.</p></div>
+
+  <h3>Scope levels</h3>
+  <p>From outermost to innermost:</p>
+  <ol>
+    <li><strong>Universe</strong> — predeclared names like <code>int</code>, <code>true</code>, <code>nil</code>, <code>len</code>, <code>append</code>.</li>
+    <li><strong>Package</strong> — top-level declarations, visible in every file of the package.</li>
+    <li><strong>File</strong> — imported package names (each file has its own imports).</li>
+    <li><strong>Function</strong> — parameters, results, and variables declared in the body.</li>
+    <li><strong>Block</strong> — anything inside <code>{ }</code>, plus the init statements of <code>if</code>, <code>for</code> and <code>switch</code>.</li>
+  </ol>
+  <div class="live" data-title="Four variables named level">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+var level = "package" // package scope: visible in every file of the package
+
+func main() {
+	fmt.Println(level)
+	level := "function" // shadows the package variable inside main
+	fmt.Println(level)
+	{
+		level := "block" // a bare block creates a new scope
+		fmt.Println(level)
+	}
+	for i := 0; i &lt; 1; i++ { // i only exists inside the loop
+		level := "loop"
+		fmt.Println(level, i)
+	}
+	fmt.Println(level)
+	show()
+}
+
+func show() { fmt.Println(level) }</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5" data-state="level(pkg)=&quot;package&quot;">A package-level <code>level</code> exists before <code>main</code> starts. Every function in the package can see it.</li>
+      <li data-lines="8" data-state="level(pkg)=&quot;package&quot;" data-out="package">Inside <code>main</code> there's no local <code>level</code> yet, so the name resolves outward to the package variable.</li>
+      <li data-lines="9" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;"><code>:=</code> declares a <em>new</em> variable in <code>main</code>'s scope. It doesn't change the package one; it hides (shadows) it from here on.</li>
+      <li data-lines="10" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;" data-out="function">The innermost <code>level</code> wins.</li>
+      <li data-lines="12-13" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;; level(block)=&quot;block&quot;" data-out="block">A bare <code>{ }</code> opens a new scope, and <code>:=</code> creates a third variable that lives only until the closing brace.</li>
+      <li data-lines="14" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;">The block ends and its <code>level</code> disappears.</li>
+      <li data-lines="15-17" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;; i=0; level(loop)=&quot;loop&quot;" data-out="loop 0">The loop's <code>i</code> and the body's <code>level</code> exist only inside the loop. One iteration runs.</li>
+      <li data-lines="19" data-state="level(pkg)=&quot;package&quot;; level(main)=&quot;function&quot;" data-out="function">After the loop we're back to <code>main</code>'s own <code>level</code>, untouched by the inner ones.</li>
+      <li data-lines="20,23" data-state="level(pkg)=&quot;package&quot;" data-out="package"><code>show</code> is a different function: <code>main</code>'s locals are invisible there, so it sees the package variable. Scope is decided by where code is <em>written</em>, not who calls it.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>package
+function
+block
+loop 0
+function
+package</pre></div>
+  <p>Notice the last two lines: after the blocks close, <code>main</code> sees its own <code>level</code> again, and <code>show()</code> — a different function — only ever sees the package-level one.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: scope as small as possible</div><p>Declare variables as close as possible to where they're used, in the smallest scope that works. A variable that lives for 3 lines is easy to reason about; one that lives for 300 is a liability. This is also why Go's <code>if v, err := f(); err != nil</code> form (Chapter 03) is so popular: <code>v</code> and <code>err</code> vanish after the <code>if</code>. And keep package-level mutable variables to a minimum — they're global state that every function (and goroutine) can touch.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Zero values: there's no such thing as "uninitialized"</h2>
+  <p>In C, a variable you didn't initialize contains whatever garbage was in that memory. In JavaScript you get <code>undefined</code>. In Go, every variable is <strong>always</strong> initialized: if you don't give a value, it gets the <strong>zero value</strong> for its type.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Point struct {
+	X, Y int
+}
+
+func main() {
+	var i int
+	var f float64
+	var b bool
+	var s string
+	var r rune
+	var p *int
+	var sl []int
+	var m map[string]int
+	var fn func()
+	var e error
+	var pt Point
+
+	fmt.Printf("int     %v\n", i)
+	fmt.Printf("float64 %v\n", f)
+	fmt.Printf("bool    %v\n", b)
+	fmt.Printf("string  %q\n", s)
+	fmt.Printf("rune    %v\n", r)
+	fmt.Printf("*int    %v\n", p)
+	fmt.Printf("[]int   %v (nil? %v)\n", sl, sl == nil)
+	fmt.Printf("map     %v (nil? %v)\n", m, m == nil)
+	fmt.Printf("func    nil? %v\n", fn == nil)
+	fmt.Printf("error   %v\n", e)
+	fmt.Printf("Point   %+v\n", pt)
+
+	// Zero values are usable:
+	sl = append(sl, 1)                    // append to a nil slice works
+	fmt.Println(len(m), m["missing"], sl) // reading a nil map works
+}</code></pre></div>
+  <div class="output"><pre>int     0
+float64 0
+bool    false
+string  ""
+rune    0
+*int    &lt;nil&gt;
+[]int   [] (nil? true)
+map     map[] (nil? true)
+func    nil? true
+error   &lt;nil&gt;
+Point   {X:0 Y:0}
+0 0 [1]</pre></div>
+  <table>
+    <thead><tr><th>Type</th><th>Zero value</th></tr></thead>
+    <tbody>
+      <tr><td>all numbers (<code>int</code>, <code>float64</code>, <code>rune</code>, …)</td><td><code>0</code></td></tr>
+      <tr><td><code>bool</code></td><td><code>false</code></td></tr>
+      <tr><td><code>string</code></td><td><code>""</code> (empty string)</td></tr>
+      <tr><td>pointers, slices, maps, channels, functions, interfaces (incl. <code>error</code>)</td><td><code>nil</code></td></tr>
+      <tr><td>arrays and structs</td><td>every element / field set to <em>its</em> zero value</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout mental"><div class="callout-title">Mental model: freshly wiped memory</div><p>Go hands you memory that's been wiped to all zero bytes. A zero <code>int</code> is all-zero bits; so is an empty string, <code>false</code>, and <code>nil</code>. That's why the zero values are what they are.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: make the zero value useful</div><p>This is a core Go design principle. The standard library is full of types that work without any constructor: <code>var mu sync.Mutex</code> is an unlocked mutex, <code>var buf bytes.Buffer</code> is an empty buffer ready to write, <code>var wg sync.WaitGroup</code> is ready to use. When you design your own types, aim for the same: if <code>Config{}</code> means "sensible defaults", callers don't need a constructor and can't forget to call one. A common trick is to make the zero value mean "default", e.g. treat <code>Timeout == 0</code> as "use 30 seconds".</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Numbers: integers</h2>
+  <p>Go has integer types of explicit sizes. The number is the size in <strong>bits</strong> (8 bits = 1 byte). Types starting with <code>u</code> are <strong>unsigned</strong>: they can't be negative, but reach twice as high.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+	"unsafe"
+)
+
+func main() {
+	fmt.Println("int8   ", math.MinInt8, "to", math.MaxInt8)
+	fmt.Println("int16  ", math.MinInt16, "to", math.MaxInt16)
+	fmt.Println("int32  ", math.MinInt32, "to", math.MaxInt32)
+	fmt.Println("int64  ", math.MinInt64, "to", math.MaxInt64)
+	fmt.Println("uint8  ", 0, "to", math.MaxUint8)
+	fmt.Println("uint16 ", 0, "to", math.MaxUint16)
+	fmt.Println("uint32 ", 0, "to", math.MaxUint32)
+	fmt.Println("uint64 ", 0, "to", uint64(math.MaxUint64))
+
+	var i int
+	var u uintptr
+	fmt.Println("int is", unsafe.Sizeof(i)*8, "bits; uintptr is", unsafe.Sizeof(u)*8, "bits")
+	fmt.Println("float32 max", math.MaxFloat32)
+	fmt.Println("float64 max", math.MaxFloat64)
+}</code></pre></div>
+  <div class="output"><pre>int8    -128 to 127
+int16   -32768 to 32767
+int32   -2147483648 to 2147483647
+int64   -9223372036854775808 to 9223372036854775807
+uint8   0 to 255
+uint16  0 to 65535
+uint32  0 to 4294967295
+uint64  0 to 18446744073709551615
+int is 64 bits; uintptr is 64 bits
+float32 max 3.4028234663852886e+38
+float64 max 1.7976931348623157e+308</pre></div>
+  <ul>
+    <li><code>int</code> and <code>uint</code> are 32 bits on 32-bit platforms and 64 bits on 64-bit ones (nearly everything today). <strong>Use <code>int</code> by default</strong> — for counts, indexes, lengths, loop counters. <code>len()</code> returns <code>int</code>.</li>
+    <li>Use sized types when the size matters: binary file formats, network protocols, database columns, or huge arrays where memory adds up (<code>[]int32</code> is half the size of <code>[]int64</code>).</li>
+    <li><code>uintptr</code> is an integer large enough to hold a memory address. You'll only see it in low-level <code>unsafe</code> code.</li>
+    <li><code>byte</code> is an alias for <code>uint8</code>; <code>rune</code> is an alias for <code>int32</code>. More on these with strings below.</li>
+  </ul>
+  <p>Integer literals can be written in several bases, and underscores can separate digits for readability:</p>
+  <div class="code" data-file="literals.go"><pre><code class="language-go">million := 1_000_000   // underscores are ignored
+hex     := 0xFF        // 255
+octal   := 0o755       // 493 (Unix file permissions!)
+binary  := 0b1010_0101 // 165
+char    := 'A'         // 65, a rune literal</code></pre></div>
+
+  <h3>Overflow wraps around — silently</h3>
+  <p>What happens when a value doesn't fit? At runtime, Go integer arithmetic <strong>wraps around</strong>, like a car odometer rolling from 999999 back to 000000. There is no error and no panic.</p>
+  <div class="live" data-title="Watch integers wrap around">
+    <pre><code class="language-go">var small int8 = 127
+small++
+fmt.Println(small)
+
+var u uint8 = 0
+u--
+fmt.Println(u)
+
+big := math.MaxInt64
+big++
+fmt.Println(big)
+
+var count uint = 3
+fmt.Println(count - 5)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="small=127 (int8 max)"><code>int8</code> holds −128 to 127. We start at the very top.</li>
+      <li data-lines="2-3" data-state="small=-128" data-out="-128">Adding one overflows. The bits <code>01111111</code> become <code>10000000</code>, which in two's complement (how computers store signed integers) means −128.</li>
+      <li data-lines="5-7" data-state="small=-128; u=255" data-out="255">Unsigned types wrap the other way: 0 minus 1 becomes the maximum, 255.</li>
+      <li data-lines="9-11" data-state="big=-9223372036854775808" data-out="-9223372036854775808">Same thing with a 64-bit <code>int</code>, just with bigger numbers.</li>
+      <li data-lines="13-14" data-state="count=3 (uint)" data-out="18446744073709551614">The sneaky one: <code>3 - 5</code> on an unsigned int is not −2; it wraps to nearly 2<sup>64</sup>. This is why Go uses <code>int</code> (signed) even for lengths: subtracting lengths would otherwise produce huge numbers instead of negatives.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>-128
+255
+-9223372036854775808
+18446744073709551614</pre></div>
+
+  <p>But when the overflow is visible at <em>compile time</em> — a constant that doesn't fit — Go refuses to compile:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var b byte = 256
+	var i int8 = 200 - 100 + 100
+	fmt.Println(b, i)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:6:15: cannot use 256 (untyped int constant) as byte value in variable declaration (overflows)
+./main.go:7:15: cannot use 200 - 100 + 100 (untyped int constant 200) as int8 value in variable declaration (overflows)</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: unsigned subtraction</div><p>Never use <code>uint</code> just because "this can't be negative". <code>if a - b &lt; 0</code> is <em>always false</em> for unsigned values, and an accidental <code>len(x) - 1</code> on an empty unsigned length becomes 18 quintillion. Use <code>int</code> unless you need bit manipulation or an exact wire format.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: checking for overflow</div><p>Overflow bugs show up in money, counters and size calculations (e.g. <code>width * height * 4</code> from untrusted input). When values come from outside, check bounds before you compute: <code>if n &gt; math.MaxInt32/4 { return errTooBig }</code>. For arbitrary-size integers use <code>math/big</code>. Note also that <code>math/bits.Add64</code> and <code>bits.Mul64</code> return a carry so you can detect overflow precisely.</p></div>
+
+  <h3>Integer division</h3>
+  <div class="live" data-title="Integer division and the divide-by-zero panic">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(7/2, -7/2, 7%3, -7%3) // truncates toward zero
+	fmt.Println(7.0 / 2)              // float division
+	zero := 0
+	fmt.Println(10 / zero) // integer division by zero: runtime panic
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6">All four expressions on this line use only untyped integer constants, so each one is <em>integer</em> arithmetic.</li>
+      <li data-lines="6" data-out="3 -3 1 -1">Integer <code>/</code> truncates toward zero: 7/2 is 3 and −7/2 is −3 (not −4). <code>%</code> takes the sign of the left operand, so −7%3 is −1.</li>
+      <li data-lines="7" data-out="3.5"><code>7.0</code> is a floating-point constant, so this is float division and the fraction survives.</li>
+      <li data-lines="8" data-state="zero=0">A <em>variable</em> holding 0. (Writing <code>10 / 0</code> with a literal would be caught at compile time.)</li>
+      <li data-lines="9" data-state="zero=0">Now <code>10 / zero</code> is evaluated at run time. The compiler couldn't see that <code>zero</code> is 0, so it couldn't stop you.</li>
+      <li data-lines="9" data-state="zero=0" data-out="panic: runtime error: integer divide by zero\n\ngoroutine 1 [running]:\nmain.main()\n	/home/you/demo/main.go:9 +0xac">Integer division by zero <strong>panics</strong> at run time: the program prints the error and a stack trace pointing at line 9, then exits with status 2. Floats would give <code>+Inf</code> instead.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Output (the program crashes)"><pre>3 -3 1 -1
+3.5
+panic: runtime error: integer divide by zero
+
+goroutine 1 [running]:
+main.main()
+	/home/you/demo/main.go:9 +0xac</pre></div>
+  <p>Integer division truncates toward zero (<code>-7/2</code> is <code>-3</code>, not <code>-4</code>), and the remainder <code>%</code> takes the sign of the left operand. Dividing an integer by zero <strong>panics</strong> — a runtime crash with a stack trace (Chapter 10 explains panics). Dividing by a constant zero (<code>10 / 0</code>) is caught at compile time.</p>
+
+  <!-- ============================================================ -->
+  <h2>Numbers: floats and complex</h2>
+  <p>Floating-point numbers hold fractions: <code>float32</code> (about 7 decimal digits of precision) and <code>float64</code> (about 15–16 digits). <strong>Use <code>float64</code></strong> — it's what untyped float constants become and what the <code>math</code> package uses. Floats follow the IEEE-754 standard, like every other language, which means they have the same famous quirks:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+)
+
+func main() {
+	a := 0.1
+	b := 0.2
+	fmt.Println(a+b, a+b == 0.3)
+	fmt.Println(math.Abs((a+b)-0.3) &lt; 1e-9) // compare with a tolerance
+
+	var f32 float32 = 16777216 // 2^24
+	fmt.Println(f32+1 == f32)  // float32 can't represent 16777217
+
+	fmt.Println(1/math.Inf(1), math.Inf(-1), math.NaN())
+	nan := math.NaN()
+	fmt.Println(nan == nan, math.IsNaN(nan))
+
+	zero := 0.0
+	fmt.Println(1/zero, -1/zero) // floats divide by zero -&gt; ±Inf, no panic
+
+	// Money: use integer cents, not floats.
+	priceCents := 1999
+	fmt.Printf("$%d.%02d\n", priceCents/100, priceCents%100)
+}</code></pre></div>
+  <div class="output"><pre>0.30000000000000004 false
+true
+true
+0 -Inf NaN
+false true
++Inf -Inf
+$19.99</pre></div>
+  <ul>
+    <li><code>0.1</code> can't be represented exactly in binary (just as 1/3 can't in decimal), so <code>0.1 + 0.2</code> is a tiny bit off. <strong>Never compare floats with <code>==</code></strong> after arithmetic; check whether the difference is within a small tolerance.</li>
+    <li><code>float32</code> runs out of precision surprisingly soon: above 2<sup>24</sup> it can't even represent every integer.</li>
+    <li>Float division by zero gives <code>+Inf</code> or <code>-Inf</code> instead of panicking. <code>NaN</code> ("not a number") is not equal to anything, <em>including itself</em> — use <code>math.IsNaN</code>.</li>
+  </ul>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: never store money in floats</div><p>$0.10 + $0.20 should be $0.30, not $0.30000000000000004. Store money as an integer number of the smallest unit (<code>int64</code> cents), or use a decimal library such as <code>github.com/shopspring/decimal</code>. Payment APIs like Stripe do exactly this — amounts are integers in cents.</p></div>
+
+  <h3>Complex numbers</h3>
+  <p>Go has built-in complex numbers — rare among mainstream languages, and handy for signal processing and scientific code. <code>complex128</code> (two <code>float64</code>s) is the default; <code>complex64</code> also exists. Write the imaginary part with <code>i</code>:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math/cmplx"
+)
+
+func main() {
+	c := 3 + 4i // complex128
+	fmt.Println(c, real(c), imag(c), cmplx.Abs(c))
+	fmt.Println(c * c)
+	fmt.Println(cmplx.Sqrt(-1))
+	fmt.Printf("%T\n", c)
+}</code></pre></div>
+  <div class="output"><pre>(3+4i) 3 4 5
+(-7+24i)
+(0+1i)
+complex128</pre></div>
+  <p>You'll probably never need them in web services. It's enough to know they exist.</p>
+
+  <!-- ============================================================ -->
+  <h2>Booleans, strings, bytes and runes</h2>
+  <p>A <code>bool</code> is <code>true</code> or <code>false</code>. Go never treats numbers or strings as booleans: <code>if 1 { }</code> and <code>if name { }</code> are compile errors. Write <code>if n != 0</code> or <code>if name != ""</code>.</p>
+  <p>A <code>string</code> is an <strong>immutable sequence of bytes</strong>, by convention holding UTF-8 encoded text. That definition has consequences:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	ok := true
+	ready := !ok || len("go") == 2 // &amp;&amp; and || short-circuit
+	fmt.Println(ok, ready)
+
+	s := "héllo, 世界"
+	fmt.Println(len(s))         // bytes, not characters
+	fmt.Println(s[0], s[1])     // indexing gives bytes (uint8)
+	fmt.Println(string(s[0]))   // 104 -&gt; "h"
+	fmt.Println([]rune(s)[1])   // rune (int32) for 'é'
+	fmt.Println(len([]rune(s))) // number of code points
+
+	var b byte = 'A' // byte is an alias for uint8
+	var r rune = '世' // rune is an alias for int32
+	fmt.Println(b, r, string(r))
+	fmt.Printf("%c %c %U\n", b, r, r)
+
+	raw := `C:\path\no\escapes
+second line`
+	fmt.Println(raw)
+	fmt.Println("tab:\tquote:\" newline-&gt;\nunicode: \u00e9")
+}</code></pre></div>
+  <div class="output"><pre>true true
+14
+104 195
+h
+233
+9
+65 19990 世
+A 世 U+4E16
+C:\path\no\escapes
+second line
+tab:	quote:" newline-&gt;
+unicode: é</pre></div>
+  <ul>
+    <li><code>len(s)</code> counts <strong>bytes</strong>, not characters. <code>é</code> takes 2 bytes in UTF-8 and each Chinese character takes 3, so our 9-character string is 14 bytes long.</li>
+    <li><code>s[i]</code> gives you a single <strong>byte</strong> (<code>uint8</code>). Byte 1 of <code>"héllo"</code> is 195 — the first half of <code>é</code>, not a whole letter.</li>
+    <li>A <strong>rune</strong> is one Unicode <em>code point</em> (roughly "one character"), stored as an <code>int32</code>. Converting to <code>[]rune</code> splits the string into code points. Single quotes make a rune literal: <code>'A'</code>, <code>'世'</code>.</li>
+    <li>Double quotes make an <em>interpreted</em> string that understands escapes (<code>\n \t \" é</code>). Backticks make a <em>raw</em> string: no escapes, and it can span lines — perfect for regexes, JSON, SQL and Windows paths.</li>
+  </ul>
+  <figure class="diagram">
+    <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="760" height="250" fill="#262624" rx="10"/>
+      <defs><marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <text x="20" y="32" fill="#a8a49a" font-size="12">string header (16 bytes)</text>
+      <rect x="20" y="42" width="110" height="40" rx="5" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="75" y="67" text-anchor="middle" fill="#7fa6d9" font-size="13" font-family="JetBrains Mono, monospace">ptr</text>
+      <rect x="130" y="42" width="110" height="40" rx="5" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="185" y="67" text-anchor="middle" fill="#7fa6d9" font-size="13" font-family="JetBrains Mono, monospace">len = 6</text>
+      <path d="M75 82 L75 120 L288 120 L288 138" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#s1)"/>
+      <text x="280" y="32" fill="#a8a49a" font-size="12">s := "héllo"</text>
+      <g font-family="JetBrains Mono, monospace" font-size="13">
+        <rect x="260" y="140" width="64" height="40" fill="#2e2d2a" stroke="#3a3936"/><text x="292" y="165" text-anchor="middle" fill="#ece9e1">68</text>
+        <rect x="324" y="140" width="64" height="40" fill="#2e2d2a" stroke="#e0b45c"/><text x="356" y="165" text-anchor="middle" fill="#e0b45c">c3</text>
+        <rect x="388" y="140" width="64" height="40" fill="#2e2d2a" stroke="#e0b45c"/><text x="420" y="165" text-anchor="middle" fill="#e0b45c">a9</text>
+        <rect x="452" y="140" width="64" height="40" fill="#2e2d2a" stroke="#3a3936"/><text x="484" y="165" text-anchor="middle" fill="#ece9e1">6c</text>
+        <rect x="516" y="140" width="64" height="40" fill="#2e2d2a" stroke="#3a3936"/><text x="548" y="165" text-anchor="middle" fill="#ece9e1">6c</text>
+        <rect x="580" y="140" width="64" height="40" fill="#2e2d2a" stroke="#3a3936"/><text x="612" y="165" text-anchor="middle" fill="#ece9e1">6f</text>
+        <text x="292" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[0]</text>
+        <text x="356" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[1]</text>
+        <text x="420" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[2]</text>
+        <text x="484" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[3]</text>
+        <text x="548" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[4]</text>
+        <text x="612" y="200" text-anchor="middle" fill="#a8a49a" font-size="11">s[5]</text>
+      </g>
+      <g font-size="12">
+        <text x="292" y="228" text-anchor="middle" fill="#8fbf7f">'h'</text>
+        <text x="388" y="228" text-anchor="middle" fill="#8fbf7f">'é' (2 bytes, 1 rune)</text>
+        <text x="484" y="228" text-anchor="middle" fill="#8fbf7f">'l'</text>
+        <text x="548" y="228" text-anchor="middle" fill="#8fbf7f">'l'</text>
+        <text x="612" y="228" text-anchor="middle" fill="#8fbf7f">'o'</text>
+      </g>
+      <text x="700" y="165" text-anchor="middle" fill="#a8a49a" font-size="11">read-only</text>
+      <text x="700" y="180" text-anchor="middle" fill="#a8a49a" font-size="11">bytes</text>
+    </svg>
+    <figcaption>A string is a small header (pointer + length) pointing at immutable UTF-8 bytes. <code>len</code> reads the header; <code>s[i]</code> reads one byte; <code>range</code> decodes runes.</figcaption>
+  </figure>
+  <p>Strings are immutable — you can't change a byte in place:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+func main() {
+	s := "hello"
+	s[0] = 'H'
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:5:2: cannot assign to s[0] (neither addressable nor a map index expression)</pre></div>
+  <p>To "modify" a string, build a new one (concatenate, use <code>strings.Replace</code>, or convert to <code>[]byte</code>, change it, and convert back). Immutability is what makes strings safe to share between goroutines and cheap to pass around: passing a string copies only a small header (a pointer and a length), never the text itself. Chapter 06 is devoted to strings, UTF-8 and text processing.</p>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">What does <code>len("café")</code> return?</div>
+    <div class="quiz-opts">
+      <button>4</button>
+      <button>3</button>
+      <button>5</button>
+      <button>8</button>
+    </div>
+    <div class="quiz-explain"><code>len</code> counts bytes. <code>c</code>, <code>a</code>, <code>f</code> are 1 byte each in UTF-8, and <code>é</code> is 2 bytes, so the total is 5. To count characters, use <code>utf8.RuneCountInString("café")</code>, which returns 4.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>No implicit conversions — ever</h2>
+  <p>Many languages quietly convert between number types: C will happily multiply an <code>int</code> by a <code>double</code>, or squeeze a 64-bit value into a 32-bit one. Go refuses. Mixing types is a compile error, even between <code>int</code> and <code>int64</code> on a machine where they're the same size:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	count := 3
+	price := 2.5
+	total := count * price
+	var big int64 = 10
+	var n int = big
+	fmt.Println(total, n)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:8:11: invalid operation: count * price (mismatched types int and float64)
+./main.go:10:14: cannot use big (variable of type int64) as int value in variable declaration</pre></div>
+  <p>Why so strict? Implicit conversions hide bugs: lost precision, truncated values, sign changes. Go makes every conversion visible in the code, so a reviewer can see exactly where it happens. The syntax is <code>T(value)</code>:</p>
+  <div class="live" data-title="Explicit conversions and their surprises">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+)
+
+func main() {
+	count := 3
+	price := 2.5
+	total := float64(count) * price
+	fmt.Println(total)
+
+	f := 3.99
+	fmt.Println(int(f), int(-f), int(math.Round(f))) // truncates toward zero
+
+	var big int64 = 300
+	fmt.Println(int8(big), uint8(big)) // keeps low bits: wraps silently!
+
+	i := 65
+	fmt.Println(string(rune(i))) // "A": int -&gt; rune -&gt; string
+	fmt.Println(fmt.Sprint(i))   // "65": what you usually want
+	fmt.Println([]byte("hi"), string([]byte{104, 105}))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-11" data-state="count=3; price=2.5; total=7.5">Go never mixes numeric types silently. <code>float64(count)</code> makes a new <code>float64</code> value 3.0, and only then can it be multiplied by <code>price</code>.</li>
+      <li data-lines="12" data-state="total=7.5" data-out="7.5">The product prints as 7.5.</li>
+      <li data-lines="14-15" data-state="f=3.99" data-out="3 -3 4">Float-to-int conversion <strong>truncates toward zero</strong>: 3.99 → 3 and −3.99 → −3. If you want rounding, call <code>math.Round</code> first.</li>
+      <li data-lines="17-18" data-state="big=300 (int64)" data-out="44 44">300 is <code>0b1_0010_1100</code>. Converting to an 8-bit type keeps only the low 8 bits (<code>0010_1100</code> = 44). <strong>Gotcha:</strong> no error, no panic — the value just changes.</li>
+      <li data-lines="20-21" data-state="i=65" data-out="A"><code>rune(i)</code> means "code point 65", and converting a rune to a string gives that character: <code>"A"</code>.</li>
+      <li data-lines="22" data-state="i=65" data-out="65">To get the <em>digits</em> of a number, format it: <code>fmt.Sprint</code> (or <code>strconv.Itoa</code>). This is almost always what you meant.</li>
+      <li data-lines="23" data-out="[104 105] hi">Strings and byte slices convert both ways. <code>[]byte("hi")</code> copies the two UTF-8 bytes out; <code>string(...)</code> copies them back in.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>7.5
+3 -3 4
+44 44
+A
+65
+[104 105] hi</pre></div>
+  <ul>
+    <li>Float → int <strong>truncates toward zero</strong> (3.99 → 3, −3.99 → −3). Use <code>math.Round</code> first if you want rounding.</li>
+    <li>Converting to a smaller integer type <strong>keeps the low bits</strong> silently: 300 is <code>0b1_0010_1100</code>, the low 8 bits are <code>0b0010_1100</code> = 44.</li>
+    <li><code>string(rune(65))</code> is <code>"A"</code> — a conversion from a code point. To get the text <code>"65"</code>, you need <code>strconv</code> or <code>fmt</code>.</li>
+  </ul>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Not what you think"><pre><code class="language-go">i := 65
+s := string(i)  // "A", not "65"!
+// go vet: conversion from int to string
+// yields a string of one rune, not a
+// string of digits</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Number to text"><pre><code class="language-go">i := 65
+s := strconv.Itoa(i)  // "65"
+// or: fmt.Sprint(i)  // "65"
+// and if you really want the rune:
+r := string(rune(i))  // "A"</code></pre></div></div>
+  </div>
+  <p>That <code>string(i)</code> mistake was so common that <code>go vet</code> now flags it (and <code>go test</code> runs this check automatically):</p>
+  <div class="output error" data-label="go vet main.go"><pre>main.go:7:7: conversion from int to string yields a string of one rune, not a string of digits</pre></div>
+
+  <h3>strconv: converting between strings and numbers</h3>
+  <p>The <code>strconv</code> ("string conversion") package does the real work of turning text into numbers and back. Parsing functions return an <code>error</code>, because text from the outside world might not be a valid number:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("123")
+	fmt.Println(n+1, err)
+
+	_, err = strconv.Atoi("12a")
+	fmt.Println(err)
+
+	s := strconv.Itoa(456) + "!"
+	fmt.Println(s)
+
+	f, _ := strconv.ParseFloat("3.14159", 64)
+	b, _ := strconv.ParseBool("true")
+	h, _ := strconv.ParseInt("ff", 16, 64)    // base 16
+	i8, err := strconv.ParseInt("300", 10, 8) // fits in 8 bits?
+	fmt.Println(f, b, h, i8, err)
+
+	fmt.Println(strconv.FormatInt(255, 2), strconv.FormatInt(255, 16))
+	fmt.Println(strconv.FormatFloat(1.5, 'f', 3, 64))
+	fmt.Println(strconv.Quote("tab\there"), strconv.Quote("日本"))
+}</code></pre></div>
+  <div class="output"><pre>124 &lt;nil&gt;
+strconv.Atoi: parsing "12a": invalid syntax
+456!
+3.14159 true 255 127 strconv.ParseInt: parsing "300": value out of range
+11111111 ff
+1.500
+"tab\there" "日本"</pre></div>
+  <table>
+    <thead><tr><th>Function</th><th>Does</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><code>Atoi(s)</code> / <code>Itoa(i)</code></td><td>string ↔ <code>int</code> (base 10). "A to i" = ASCII to integer.</td><td><code>Atoi("42")</code> → <code>42, nil</code></td></tr>
+      <tr><td><code>ParseInt(s, base, bits)</code></td><td>Any base, checks it fits in <code>bits</code></td><td><code>ParseInt("ff", 16, 64)</code> → 255</td></tr>
+      <tr><td><code>ParseUint</code>, <code>ParseFloat</code>, <code>ParseBool</code></td><td>Other types</td><td><code>ParseBool("true")</code> → <code>true</code></td></tr>
+      <tr><td><code>FormatInt(i, base)</code></td><td>int → string in any base</td><td><code>FormatInt(255, 2)</code> → <code>"11111111"</code></td></tr>
+      <tr><td><code>FormatFloat(f, fmt, prec, bits)</code></td><td>float → string with control</td><td><code>FormatFloat(1.5, 'f', 3, 64)</code> → <code>"1.500"</code></td></tr>
+      <tr><td><code>Quote(s)</code> / <code>Unquote(s)</code></td><td>Add / remove Go-syntax quotes and escapes</td><td><code>Quote("a\tb")</code> → <code>"a\tb"</code> (with the quotes)</td></tr>
+    </tbody>
+  </table>
+  <div class="callout tip"><p><code>fmt.Sprint</code> / <code>fmt.Sprintf</code> also convert anything to a string and are fine for messages. But <code>strconv</code> is several times faster and allocates less, so prefer it in hot paths like serializing large amounts of data.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Type inference</h2>
+  <p>When you write <code>x := value</code>, the variable gets the value's <strong>default type</strong>. Constants and literals in Go don't have a fixed type until they need one, so here are the defaults:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	a := 42
+	b := 3.0
+	c := 'x'
+	d := "x"
+	e := 2 + 3i
+	f := 1 &lt;&lt; 10
+	g := a &gt; 10
+	fmt.Printf("%T %T %T %T %T %T %T\n", a, b, c, d, e, f, g)
+}</code></pre></div>
+  <div class="output"><pre>int float64 int32 string complex128 int bool</pre></div>
+  <table>
+    <thead><tr><th>Literal</th><th>Default type</th></tr></thead>
+    <tbody>
+      <tr><td><code>42</code>, <code>1 &lt;&lt; 10</code>, <code>0xFF</code></td><td><code>int</code></td></tr>
+      <tr><td><code>3.0</code>, <code>1e6</code></td><td><code>float64</code></td></tr>
+      <tr><td><code>'x'</code></td><td><code>rune</code> (prints as <code>int32</code>)</td></tr>
+      <tr><td><code>"x"</code>, <code>`x`</code></td><td><code>string</code></td></tr>
+      <tr><td><code>2 + 3i</code></td><td><code>complex128</code></td></tr>
+      <tr><td><code>true</code>, <code>a &gt; 10</code></td><td><code>bool</code></td></tr>
+    </tbody>
+  </table>
+  <p>Note <code>1e6</code> is a <code>float64</code> even though it's a whole number. If you need an <code>int</code>, write <code>1_000_000</code> or <code>var n int = 1e6</code> (allowed, since the constant is exactly representable as an int).</p>
+
+  <!-- ============================================================ -->
+  <h2>Constants and untyped constants</h2>
+  <p>A <strong>constant</strong> is a value fixed at compile time that can never change. Declare one with <code>const</code>. Constants can be numbers, strings, runes or booleans — only things the compiler can compute. You can't make a constant slice, map or struct, or a constant from a function call like <code>time.Now()</code>.</p>
+  <div class="code" data-file="consts.go"><pre><code class="language-go">const MaxRetries = 3
+const Greeting = "hello"
+const (
+	StatusOK       = 200
+	StatusNotFound = 404
+)
+const Timeout = 2 * MaxRetries // constant expressions are fine</code></pre></div>
+
+  <h3>The superpower: untyped constants</h3>
+  <p>Most constants you write are <strong>untyped</strong>: <code>const Big = 1 &lt;&lt; 100</code> is just "the number 2<sup>100</sup>", not an <code>int</code> or a <code>float64</code>. The compiler stores it with <strong>arbitrary precision</strong> (at least 256 bits, in practice exact). It only gets a concrete type at the moment you use it somewhere that needs one.</p>
+  <div class="live" data-title="Untyped constants adapt to context">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+	"time"
+)
+
+const Big = 1 &lt;&lt; 100 // way bigger than any int type!
+const Small = Big &gt;&gt; 98
+
+const Pi = 3.14159265358979323846264338327950288419716939937510582097494459
+
+func main() {
+	fmt.Println(Small) // 4: the huge intermediate was exact
+
+	// Untyped constants adapt to the context they're used in:
+	var f32 float32 = Pi
+	var f64 float64 = Pi
+	fmt.Println(f32, f64)
+
+	const timeout = 5          // untyped integer constant
+	d := timeout * time.Second // works: 5 becomes a time.Duration
+	fmt.Println(d)
+
+	n := 5 // a typed variable (int)
+	// d2 := n * time.Second // compile error: mismatched types int and time.Duration
+	d2 := time.Duration(n) * time.Second
+	fmt.Println(d2)
+
+	fmt.Println(math.Pi / 2)
+	fmt.Println(Big / 1e29) // still exact, converted to float64 for printing
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-10" data-state="Big=2^100 (untyped); Small=4 (untyped)">Constants are evaluated by the compiler with arbitrary precision. <code>Big</code> doesn't fit any integer type, and that's fine — it never has to exist at run time. <code>Big &gt;&gt; 98</code> is exactly 4.</li>
+      <li data-lines="15" data-state="Small=4" data-out="4">Only the final value <code>4</code> reaches the program, as an <code>int</code>.</li>
+      <li data-lines="18-20" data-state="f32=3.1415927; f64=3.141592653589793" data-out="3.1415927 3.141592653589793">The same untyped <code>Pi</code> is rounded to whatever precision each variable has. The constant itself keeps all 60+ digits.</li>
+      <li data-lines="22-24" data-state="timeout=5 (untyped); d=5s" data-out="5s"><code>timeout</code> has no type yet, so in <code>timeout * time.Second</code> it simply becomes a <code>time.Duration</code>.</li>
+      <li data-lines="26" data-state="n=5 (int)"><code>n</code> is a <em>variable</em> of type <code>int</code>. The commented-out line 27 would fail: <code>int * time.Duration</code> is a type mismatch.</li>
+      <li data-lines="28-29" data-state="n=5 (int); d2=5s" data-out="5s">With a variable you must convert explicitly: <code>time.Duration(n)</code>.</li>
+      <li data-lines="31" data-out="1.5707963267948966"><code>math.Pi</code> is an untyped constant too, so <code>math.Pi / 2</code> is computed exactly and then rounded once to <code>float64</code>.</li>
+      <li data-lines="32" data-out="12.676506002282293"><code>Big / 1e29</code> is still constant arithmetic — no overflow — and only the small result is converted to <code>float64</code> for printing.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>4
+3.1415927 3.141592653589793
+5s
+5s
+1.5707963267948966
+12.676506002282293</pre></div>
+  <ul>
+    <li><code>1 &lt;&lt; 100</code> doesn't fit in any integer type, yet <code>Big &gt;&gt; 98</code> is computed exactly at compile time and gives 4.</li>
+    <li><code>Pi</code> with 60 digits adapts: rounded to float32's precision in one place, float64's in another.</li>
+    <li><code>timeout * time.Second</code> works because the untyped <code>5</code> silently becomes a <code>time.Duration</code>. But a typed <code>int</code> variable must be converted explicitly.</li>
+  </ul>
+  <p>The precision has to "land" somewhere, though. Using <code>Big</code> where it must become an <code>int</code> fails:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+const Big = 1 &lt;&lt; 100
+
+func main() {
+	fmt.Println(Big)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:8:14: cannot use Big (untyped int constant 1267650600228229401496703205376) as int value in argument to fmt.Println (overflows)</pre></div>
+  <p>A constant given an explicit type loses its flexibility and follows normal typing rules:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+const Typed int = 5
+const Untyped = 5
+
+func main() {
+	a := Untyped * time.Second
+	b := Typed * time.Second
+	fmt.Println(a, b)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:13:7: invalid operation: Typed * time.Second (mismatched types int and time.Duration)</pre></div>
+
+  <div class="callout mental"><div class="callout-title">Mental model: untyped constants are "ideal numbers"</div><p>Think of an untyped constant as a number written on a whiteboard in pure math — no size, no rounding. It only gets squeezed into a real box (<code>int</code>, <code>float32</code>, <code>time.Duration</code>…) when you put it in a variable or pass it to a function. If it doesn't fit the box, the compiler tells you.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>iota: generating constant sequences</h2>
+  <p>Go has no <code>enum</code> keyword. Instead, inside a <code>const ( … )</code> block you can use <strong><code>iota</code></strong>, a counter that starts at 0 on the first line of the block and increases by one on each line. Even better: if a line has no expression, it <em>repeats the previous line's expression</em> (with the new <code>iota</code>). Together, these give you enums:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Weekday int
+
+const (
+	Sunday  Weekday = iota // 0
+	Monday                 // 1  (repeats "Weekday = iota")
+	Tuesday                // 2
+	Wednesday
+	Thursday
+	Friday
+	Saturday
+)
+
+func (d Weekday) String() string {
+	return [...]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}[d]
+}
+
+func main() {
+	fmt.Println(Sunday, Monday, Saturday)
+	fmt.Printf("%d %v %T\n", Wednesday, Wednesday, Wednesday)
+}</code></pre></div>
+  <div class="output"><pre>Sun Mon Sat
+3 Wed main.Weekday</pre></div>
+  <p>The <code>String()</code> method (methods are covered in Chapter 07) lets <code>fmt</code> print a nice name instead of a number. The <code>stringer</code> tool (<code>go generate</code> + <code>golang.org/x/tools/cmd/stringer</code>) can write that method for you.</p>
+
+  <h3>Skipping values and expressions</h3>
+  <div class="live" data-title="Trace iota line by line">
+    <pre><code class="language-go">type Level int
+
+const (
+	_     Level = iota // 0: skip it, so the zero value means "unset"
+	Debug              // 1
+	Info               // 2
+	_                  // 3: reserved, skipped
+	Error              // 4
+)
+
+const (
+	KB = 1 &lt;&lt; (10 * (iota + 1)) // 1 &lt;&lt; 10
+	MB                          // 1 &lt;&lt; 20
+	GB                          // 1 &lt;&lt; 30
+)
+
+func main() {
+	fmt.Println(Debug, Info, Error)
+	fmt.Println(KB, MB, GB)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="">A named type <code>Level</code>, so levels can't be confused with plain ints.</li>
+      <li data-lines="4" data-state="iota=0; _=0">First line of the block: <code>iota</code> is 0. We assign it to the blank identifier <code>_</code>, throwing it away. Now the <em>zero value</em> of <code>Level</code> doesn't match any real level — great for detecting "forgot to set it".</li>
+      <li data-lines="5" data-state="iota=1; Debug=1">No expression, so Go repeats <code>Level = iota</code> with <code>iota</code> = 1.</li>
+      <li data-lines="6" data-state="iota=2; Debug=1; Info=2"><code>Info</code> = 2.</li>
+      <li data-lines="7" data-state="iota=3; Debug=1; Info=2">Another <code>_</code>: value 3 is reserved and skipped.</li>
+      <li data-lines="8" data-state="iota=4; Debug=1; Info=2; Error=4"><code>Error</code> = 4.</li>
+      <li data-lines="11-12" data-state="iota=0; KB=1024">A new <code>const</code> block resets <code>iota</code> to 0. <code>KB = 1 &lt;&lt; (10 * 1)</code> = 1 &lt;&lt; 10 = 1024. (<code>&lt;&lt;</code> shifts bits left; each shift doubles the number.)</li>
+      <li data-lines="13" data-state="iota=1; KB=1024; MB=1048576">The expression repeats with <code>iota</code> = 1: <code>1 &lt;&lt; 20</code>.</li>
+      <li data-lines="14" data-state="iota=2; KB=1024; MB=1048576; GB=1073741824"><code>1 &lt;&lt; 30</code>.</li>
+      <li data-lines="17-19" data-out="1 2 4\n1024 1048576 1073741824"><code>main</code> prints them.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1 2 4
+1024 1048576 1073741824</pre></div>
+
+  <h3>Bit flags</h3>
+  <p><code>1 &lt;&lt; iota</code> gives powers of two: 1, 2, 4, 8, … Each constant has exactly one bit set, so you can combine several in one integer. This is how Unix file permissions and <code>os.O_RDWR|os.O_CREATE</code> work.</p>
+  <div class="live" data-title="Bit flags: set, test, clear">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Perm uint8
+
+const (
+	Read  Perm = 1 &lt;&lt; iota // 1 &lt;&lt; 0 = 0b001
+	Write                  // 1 &lt;&lt; 1 = 0b010
+	Exec                   // 1 &lt;&lt; 2 = 0b100
+)
+
+func main() {
+	p := Read | Write // combine with OR
+	fmt.Printf("%03b\n", p)
+	fmt.Println("can write?", p&amp;Write != 0) // test with AND
+	fmt.Println("can exec? ", p&amp;Exec != 0)
+
+	p |= Exec  // add a flag
+	p &amp;^= Read // remove a flag (AND NOT)
+	fmt.Printf("%03b\n", p)
+
+	const (
+		a, b = iota, iota * 10 // iota is the same on one line
+		c, d                   // 1, 10
+	)
+	fmt.Println(a, b, c, d)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8-10" data-state="Read=001; Write=010; Exec=100"><code>1 &lt;&lt; iota</code> shifts a single 1 bit left by 0, 1, 2. Each flag owns exactly one bit.</li>
+      <li data-lines="14" data-state="p=011"><code>|</code> (OR) merges bits: <code>001 | 010 = 011</code>.</li>
+      <li data-lines="15" data-state="p=011" data-out="011"><code>%03b</code> prints binary, padded to three digits.</li>
+      <li data-lines="16" data-state="p=011; p&amp;Write=010" data-out="can write? true"><code>&amp;</code> (AND) keeps only bits set in both. <code>011 &amp; 010 = 010</code>, which is non-zero, so the flag is present.</li>
+      <li data-lines="17" data-state="p=011; p&amp;Exec=000" data-out="can exec?  false"><code>011 &amp; 100 = 000</code>: Exec is not set.</li>
+      <li data-lines="19" data-state="p=111"><code>p |= Exec</code> turns the Exec bit on.</li>
+      <li data-lines="20" data-state="p=110"><code>&amp;^=</code> (AND NOT, "bit clear") turns the Read bit off without touching the others.</li>
+      <li data-lines="21" data-state="p=110" data-out="110">Write and Exec remain.</li>
+      <li data-lines="23-25" data-state="a=0; b=0; c=1; d=10"><code>iota</code> counts <em>lines</em>, not names. On line 24 both uses see 0; line 25 repeats the expressions with iota = 1, giving 1 and 10.</li>
+      <li data-lines="27" data-state="a=0; b=0; c=1; d=10" data-out="0 0 1 10">The local constant block prints its four values.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>011
+can write? true
+can exec?  false
+110
+0 0 1 10</pre></div>
+  <table>
+    <thead><tr><th>Operator</th><th>Name</th><th>Flag use</th></tr></thead>
+    <tbody>
+      <tr><td><code>a | b</code></td><td>OR</td><td>combine flags / turn on</td></tr>
+      <tr><td><code>a &amp; b</code></td><td>AND</td><td>test a flag (<code>p&amp;Write != 0</code>)</td></tr>
+      <tr><td><code>a &amp;^ b</code></td><td>AND NOT ("bit clear")</td><td>turn a flag off</td></tr>
+      <tr><td><code>a ^ b</code></td><td>XOR</td><td>toggle a flag</td></tr>
+      <tr><td><code>^a</code></td><td>NOT (unary)</td><td>invert all bits</td></tr>
+      <tr><td><code>a &lt;&lt; n</code>, <code>a &gt;&gt; n</code></td><td>shifts</td><td>multiply / divide by 2<sup>n</sup></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: never reorder iota constants that are stored</div><p><code>iota</code> values depend on <em>position</em>. If <code>StatusActive</code> is 1 today and someone inserts a new constant above it, it silently becomes 2 — and every value already stored in your database or sent over the network now means something else. For values that leave the process, either assign explicit numbers (<code>StatusActive = 1</code>) or store a string name instead. Add new <code>iota</code> values only at the end.</p></div>
+
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">What is the value of <code>C</code>? <code>const ( A = iota * 10; B; _; C )</code></div>
+    <div class="quiz-opts"><button>2</button><button>3</button><button>20</button><button>30</button></div>
+    <div class="quiz-explain">Each line repeats <code>iota * 10</code>. <code>A</code> is on line 0 → 0, <code>B</code> on line 1 → 10, the skipped <code>_</code> on line 2 → 20, and <code>C</code> on line 3 → 30. Blank lines don't count, but <code>_</code> lines do.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Named types vs type aliases</h2>
+  <p>You can create a new type based on an existing one: <code>type Celsius float64</code>. This is a <strong>named type</strong> (also called a <em>defined type</em>). It has the same memory layout as <code>float64</code>, but it's a <strong>different type</strong>. You can attach methods to it, and the compiler won't let you mix it up with other types by accident.</p>
+  <p>A <strong>type alias</strong> uses an equals sign: <code>type MyInt = int</code>. It's not a new type at all — just a second name for the same type, like a nickname. <code>byte</code> (= <code>uint8</code>), <code>rune</code> (= <code>int32</code>) and <code>any</code> (= <code>interface{}</code>) are aliases.</p>
+  <div class="live" data-title="Named types vs. aliases">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Celsius float64
+type Fahrenheit float64
+
+type MyInt = int // alias: just another name for int
+
+func CToF(c Celsius) Fahrenheit {
+	return Fahrenheit(c*9/5 + 32)
+}
+
+func (c Celsius) String() string { return fmt.Sprintf("%.1f°C", float64(c)) }
+
+func main() {
+	boiling := Celsius(100)
+	fmt.Println(boiling, CToF(boiling))
+
+	var x MyInt = 5
+	var y int = x // fine: MyInt IS int
+	fmt.Printf("%T %T\n", x, y)
+
+	var raw float64 = 37
+	body := Celsius(raw) // explicit conversion needed
+	fmt.Println(body)
+
+	// Untyped constants convert implicitly:
+	var freezing Celsius = 0
+	fmt.Println(freezing)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17" data-state="boiling=100 (Celsius)"><code>Celsius(100)</code> converts the constant to our named type. Underneath it's a <code>float64</code>, but the compiler treats it as a distinct type.</li>
+      <li data-lines="18,10-11" data-state="boiling=100 (Celsius); c=100"><code>CToF</code> only accepts a <code>Celsius</code>. Inside, <code>c*9/5 + 32</code> is computed in <code>Celsius</code> arithmetic (212), then converted to <code>Fahrenheit</code> on the way out.</li>
+      <li data-lines="18,14" data-state="boiling=100 (Celsius); result=212 (Fahrenheit)" data-out="100.0°C 212"><code>Println</code> finds a <code>String()</code> method on <code>Celsius</code> and uses it. <code>Fahrenheit</code> has no such method, so it prints as a plain number. Methods belong to the named type, not to <code>float64</code>.</li>
+      <li data-lines="20-21" data-state="x=5 (MyInt); y=5 (int)"><code>MyInt = int</code> (note the <code>=</code>) is an <em>alias</em>: the same type under another name, so assigning to an <code>int</code> needs no conversion.</li>
+      <li data-lines="22" data-state="x=5 (MyInt); y=5 (int)" data-out="int int"><code>%T</code> proves it: both are just <code>int</code>.</li>
+      <li data-lines="24-25" data-state="raw=37 (float64); body=37 (Celsius)">A <code>float64</code> <em>variable</em> does not turn into a <code>Celsius</code> by itself. The explicit <code>Celsius(raw)</code> conversion is required.</li>
+      <li data-lines="26" data-state="raw=37 (float64); body=37 (Celsius)" data-out="37.0°C"><code>body</code> is a <code>Celsius</code>, so it prints through <code>String()</code>.</li>
+      <li data-lines="29-30" data-state="freezing=0 (Celsius)" data-out="0.0°C">An <em>untyped constant</em> like <code>0</code> converts implicitly to any compatible type, so no conversion is needed here.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>100.0°C 212
+int int
+37.0°C
+0.0°C</pre></div>
+  <p>And here's the safety net in action — comparing temperatures in different units is caught at compile time:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Celsius float64
+type Fahrenheit float64
+
+func main() {
+	var c Celsius = 20
+	var f Fahrenheit = 68
+	fmt.Println(c == f)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:11:19: invalid operation: c == f (mismatched types Celsius and Fahrenheit)</pre></div>
+
+  <table>
+    <thead><tr><th></th><th>Named type <code>type T U</code></th><th>Alias <code>type T = U</code></th></tr></thead>
+    <tbody>
+      <tr><td>New, distinct type?</td><td>Yes</td><td>No, identical to <code>U</code></td></tr>
+      <tr><td>Assign a <code>U</code> variable without conversion?</td><td>No — must write <code>T(u)</code></td><td>Yes</td></tr>
+      <tr><td>Untyped constants assignable?</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Can add methods?</td><td>Yes</td><td>Only if <code>U</code> is in your package</td></tr>
+      <tr><td>Inherits <code>U</code>'s methods?</td><td>No (fields of a struct, yes)</td><td>Yes — it <em>is</em> <code>U</code></td></tr>
+      <tr><td>Typical use</td><td>Domain types: <code>UserID</code>, <code>Celsius</code>, <code>Status</code></td><td>Gradual refactoring: moving a type between packages</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: let the compiler guard your units</div><p>A function <code>Transfer(from, to int64, amount int64)</code> is an accident waiting to happen — swap two arguments and it compiles fine. With <code>type AccountID int64</code> and <code>type Cents int64</code>, many swaps become compile errors. The Go standard library does this everywhere: <code>time.Duration</code> is a named <code>int64</code>, which is why <code>time.Sleep(5)</code> sleeps 5 <em>nanoseconds</em> and code reviewers immediately see the bug when it's not written as <code>5 * time.Second</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>The blank identifier and unused variables</h2>
+  <p>The underscore <code>_</code> is the <strong>blank identifier</strong>: a write-only black hole. Anything assigned to it is discarded. Use it when the language requires a name but you don't need the value:</p>
+  <div class="live" data-title="Throwing values away with _">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func divmod(a, b int) (int, int) { return a / b, a % b }
+
+func main() {
+	_, rem := divmod(17, 5) // don't need the quotient
+	fmt.Println(rem)
+
+	for _, v := range []string{"a", "b"} { // don't need the index
+		fmt.Print(v, " ")
+	}
+	fmt.Println()
+
+	n, _ := strconv.Atoi("12") // ignoring an error: be careful!
+	fmt.Println(n)
+
+	_ = n // explicitly "use" a value
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11,8" data-state="a=17; b=5"><code>divmod(17, 5)</code> runs and returns <em>two</em> values: 3 and 2.</li>
+      <li data-lines="11" data-state="rem=2">The quotient lands in <code>_</code> and is thrown away. <code>_</code> is not a variable: you can't read it, and it never triggers "declared and not used".</li>
+      <li data-lines="12" data-state="rem=2" data-out="2">Only the remainder is printed.</li>
+      <li data-lines="14-15" data-state="rem=2; v=&quot;a&quot;"><code>range</code> yields index and value; we discard the index with <code>_</code>. <code>Print</code> writes <code>"a "</code> without a newline, so nothing is complete on screen yet.</li>
+      <li data-lines="14-15" data-state="rem=2; v=&quot;b&quot;">Second element: <code>"b "</code> goes on the same line.</li>
+      <li data-lines="17" data-state="rem=2" data-out="a b "><code>Println()</code> with no arguments just ends the line. Note the trailing space after <code>b</code>.</li>
+      <li data-lines="19" data-state="rem=2; n=12">The error from <code>Atoi</code> is discarded. Fine for a literal <code>"12"</code>, but <strong>dangerous for user input</strong>: a bad string would silently give 0.</li>
+      <li data-lines="20" data-state="rem=2; n=12" data-out="12">Prints the parsed number.</li>
+      <li data-lines="22" data-state="rem=2; n=12"><code>_ = n</code> "uses" a value with no effect. Handy while sketching code, but don't leave it in production.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>2
+a b 
+12</pre></div>
+  <p>Remember that Go rejects unused local variables. Note that <em>assigning</em> to a variable doesn't count as using it — only reading it does:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+func main() {
+	x := 10
+	y := 20
+	x = 30
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:4:2: declared and not used: x
+./main.go:5:2: declared and not used: y</pre></div>
+  <p>(Unused <em>package-level</em> variables, constants, functions and function parameters are allowed — the rule only applies to local variables and imports.)</p>
+  <div class="callout warn"><div class="callout-title">Gotcha: <code>_</code> for errors</div><p><code>n, _ := strconv.Atoi(input)</code> silently turns bad input into 0. That's occasionally fine (a value you just validated), but in a code review, every <code>_</code> on an error should have an obvious reason or a comment. "We ignored the error" is behind a lot of production mysteries.</p></div>
+  <p>Other uses of <code>_</code> you'll meet later: <code>import _ "pkg"</code> (import for side effects only), and <code>var _ Interface = (*MyType)(nil)</code> — a compile-time check that a type implements an interface (Chapter 08).</p>
+
+  <!-- ============================================================ -->
+  <h2>Printing with fmt verbs</h2>
+  <p>You'll print things constantly — for output, logs and debugging. The <code>fmt</code> package's <code>Printf</code> family takes a format string with <strong>verbs</strong> (placeholders starting with <code>%</code>):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type User struct {
+	Name string
+	Age  int
+}
+
+func main() {
+	u := User{"Ada", 36}
+	n := 255
+	s := "go\tlang"
+
+	fmt.Printf("%v | %+v | %#v\n", u, u, u)
+	fmt.Printf("%T | %T | %T\n", u, n, s)
+	fmt.Printf("%d %b %o %x %X %#x\n", n, n, n, n, n, n)
+	fmt.Printf("%c %q %U\n", 'G', 'G', 'G')
+	fmt.Printf("%s | %q | %v\n", s, s, s)
+	fmt.Printf("%f %.2f %e %g\n", 3.14159, 3.14159, 123456.789, 0.000012)
+	fmt.Printf("[%5d] [%-5d] [%05d]\n", 42, 42, 42)
+	fmt.Printf("[%8.3f] [%-8s] [%8s]\n", 3.14159, "left", "right")
+	fmt.Printf("%t %v\n", true, nil)
+	fmt.Printf("%d%%\n", 50)
+	fmt.Printf("%d\n", "oops") // wrong verb: no crash, but a marker
+
+	fmt.Print("Print", "has", "no", "spaces", 1, 2, "\n")
+	fmt.Println("Println", "adds", "spaces", 1, 2)
+	msg := fmt.Sprintf("%s is %d", u.Name, u.Age) // returns a string
+	fmt.Println(msg)
+}</code></pre></div>
+  <div class="output"><pre>{Ada 36} | {Name:Ada Age:36} | main.User{Name:"Ada", Age:36}
+main.User | int | string
+255 11111111 377 ff FF 0xff
+G 'G' U+0047
+go	lang | "go\tlang" | go	lang
+3.141590 3.14 1.234568e+05 1.2e-05
+[   42] [42   ] [00042]
+[   3.142] [left    ] [   right]
+true &lt;nil&gt;
+50%
+%!d(string=oops)
+Printhasnospaces1 2
+Println adds spaces 1 2
+Ada is 36</pre></div>
+  <table>
+    <thead><tr><th>Verb</th><th>Meaning</th><th>Example output</th></tr></thead>
+    <tbody>
+      <tr><td><code>%v</code></td><td>Default format for any value</td><td><code>{Ada 36}</code></td></tr>
+      <tr><td><code>%+v</code></td><td>…plus struct field names</td><td><code>{Name:Ada Age:36}</code></td></tr>
+      <tr><td><code>%#v</code></td><td>Go-syntax representation</td><td><code>main.User{Name:"Ada", Age:36}</code></td></tr>
+      <tr><td><code>%T</code></td><td>The type</td><td><code>main.User</code></td></tr>
+      <tr><td><code>%d %b %o %x %X</code></td><td>Integer: decimal, binary, octal, hex</td><td><code>255 11111111 377 ff FF</code></td></tr>
+      <tr><td><code>%c %U</code></td><td>Character / Unicode code point</td><td><code>G U+0047</code></td></tr>
+      <tr><td><code>%s %q</code></td><td>String / quoted string with escapes</td><td><code>"go\tlang"</code></td></tr>
+      <tr><td><code>%f %.2f %e %g</code></td><td>Float: decimal, 2 places, scientific, compact</td><td><code>3.14</code></td></tr>
+      <tr><td><code>%5d %-5d %05d</code></td><td>Width 5: right-aligned, left-aligned, zero-padded</td><td><code>[   42] [42   ] [00042]</code></td></tr>
+      <tr><td><code>%t</code></td><td>Boolean</td><td><code>true</code></td></tr>
+      <tr><td><code>%p</code></td><td>Pointer address (hex)</td><td><code>0xc000012345</code></td></tr>
+      <tr><td><code>%%</code></td><td>A literal percent sign</td><td><code>50%</code></td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><code>Print</code> adds spaces between operands only when <em>neither side is a string</em> (hence <code>Printhasnospaces1 2</code>); <code>Println</code> always adds spaces and a final newline.</li>
+    <li><code>Sprintf</code>/<code>Sprint</code>/<code>Sprintln</code> return a string instead of printing. <code>Fprintf(w, …)</code> writes to any writer, like a file or <code>os.Stderr</code>. <code>Errorf</code> creates an error.</li>
+    <li>A wrong verb doesn't crash; it prints a marker like <code>%!d(string=oops)</code>. <code>go vet</code> catches these at build time.</li>
+  </ul>
+  <div class="callout tip"><p>When debugging, <code>fmt.Printf("%#v\n", x)</code> is your best friend: it shows the exact type and every field, and makes the difference between <code>""</code> and <code>nil</code> or <code>0</code> and <code>"0"</code> obvious.</p></div>
+
+  <h3>Bonus: min and max builtins</h3>
+  <p>Since Go 1.21, <code>min</code> and <code>max</code> are built in. They take one or more values of any ordered type (numbers or strings):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(min(3, 1, 2), max(3, 1, 2))
+	fmt.Println(min(2.5, 1), max("apple", "banana"))
+	x, limit := 120, 100
+	fmt.Println(min(x, limit)) // clamp
+}</code></pre></div>
+  <div class="output"><pre>1 3
+1 banana
+100</pre></div>
+
+  <!-- ============================================================ -->
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>1 · A ByteSize type that prints human-friendly sizes</summary>
+    <p>Define <code>type ByteSize float64</code> and constants <code>KB</code>, <code>MB</code>, <code>GB</code>, <code>TB</code> using <code>iota</code> (each 1024× the previous). Give it a <code>String()</code> method so <code>fmt.Println(ByteSize(1536))</code> prints <code>1.50KB</code>. Hint: skip the first <code>iota</code> value with <code>_</code>, then use <code>1 &lt;&lt; (10 * iota)</code>. You'll need a tagless <code>switch</code> (previewed here, covered in Chapter 03).</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="ByteSize picks its unit">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type ByteSize float64
+
+const (
+	_           = iota // ignore 0
+	KB ByteSize = 1 &lt;&lt; (10 * iota)
+	MB
+	GB
+	TB
+)
+
+func (b ByteSize) String() string {
+	switch {
+	case b &gt;= TB:
+		return fmt.Sprintf("%.2fTB", b/TB)
+	case b &gt;= GB:
+		return fmt.Sprintf("%.2fGB", b/GB)
+	case b &gt;= MB:
+		return fmt.Sprintf("%.2fMB", b/MB)
+	case b &gt;= KB:
+		return fmt.Sprintf("%.2fKB", b/KB)
+	}
+	return fmt.Sprintf("%.0fB", float64(b))
+}
+
+func main() {
+	fmt.Println(ByteSize(512))
+	fmt.Println(ByteSize(1536))
+	fmt.Println(ByteSize(5 * 1024 * 1024))
+	fmt.Println(3.5 * GB)
+	fmt.Println(ByteSize(2e12))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8-12" data-state="KB=1024; MB=1048576; GB=1073741824; TB=1099511627776"><code>_ = iota</code> burns the value 0. Then each line repeats <code>ByteSize = 1 &lt;&lt; (10 * iota)</code> with iota = 1, 2, 3, 4, giving powers of 1024.</li>
+      <li data-lines="30,15-16" data-state="b=512"><code>Println</code> calls our <code>String()</code> method. A tagless <code>switch</code> tests each <code>case</code> top to bottom and runs the first true one.</li>
+      <li data-lines="17-25,26" data-state="b=512" data-out="512B">512 is smaller than <code>KB</code>, so no case matches and we fall out of the switch to the bytes format.</li>
+      <li data-lines="31,23-24" data-state="b=1536" data-out="1.50KB">1536 fails the TB, GB and MB checks but passes <code>b &gt;= KB</code>. <code>b/KB</code> = 1.5. Case order matters: largest unit first.</li>
+      <li data-lines="32,21-22" data-state="b=5242880" data-out="5.00MB"><code>5*1024*1024</code> lands in the MB case.</li>
+      <li data-lines="33,19-20" data-state="b=3758096384" data-out="3.50GB"><code>3.5 * GB</code> is already a <code>ByteSize</code> (an untyped constant times a typed one), so no conversion is needed and <code>String()</code> still fires.</li>
+      <li data-lines="34,17-18" data-state="b=2e+12" data-out="1.82TB">2×10<sup>12</sup> bytes is a bit less than 2 TB because a TB here is 2<sup>40</sup>, not 10<sup>12</sup>.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>512B
+1.50KB
+5.00MB
+3.50GB
+1.82TB</pre></div>
+    <p>This is adapted from <em>Effective Go</em>. Notice <code>3.5 * GB</code> works because <code>3.5</code> is an untyped constant that becomes a <code>ByteSize</code>.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>2 · Permission flags with a String method</summary>
+    <p>Using <code>Perm uint8</code> bit flags <code>Read</code>, <code>Write</code>, <code>Exec</code>, write a <code>String()</code> method that renders <code>rw-</code>-style output. Then start with <code>Read|Exec</code> and remove <code>Exec</code> with <code>&amp;^=</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="String() renders the permission bits">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Perm uint8
+
+const (
+	Read Perm = 1 &lt;&lt; iota
+	Write
+	Exec
+)
+
+// String renders permissions like "rw-".
+func (p Perm) String() string {
+	out := []byte("---")
+	if p&amp;Read != 0 {
+		out[0] = 'r'
+	}
+	if p&amp;Write != 0 {
+		out[1] = 'w'
+	}
+	if p&amp;Exec != 0 {
+		out[2] = 'x'
+	}
+	return string(out)
+}
+
+func main() {
+	fmt.Println(Read, Read|Write, Read|Write|Exec, Perm(0))
+	p := Read | Exec
+	p &amp;^= Exec
+	fmt.Println(p)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8-10" data-state="Read=0b001; Write=0b010; Exec=0b100"><code>1 &lt;&lt; iota</code> gives each constant its own bit, so any combination is a unique number.</li>
+      <li data-lines="29,14-15" data-state="p=0b001; out=&quot;---&quot;"><code>Println</code> sees that <code>Perm</code> has a <code>String()</code> method and calls it for each argument. First: <code>Read</code>. We start from <code>"---"</code> as a mutable <code>[]byte</code>.</li>
+      <li data-lines="16-17,25" data-state="p=0b001; out=&quot;r--&quot;"><code>p&amp;Read</code> is non-zero, so slot 0 becomes <code>'r'</code>. The Write and Exec tests are 0, so they stay <code>-</code>. Returns <code>"r--"</code>.</li>
+      <li data-lines="29,16-21" data-state="p=0b011; out=&quot;rw-&quot;">Second argument <code>Read|Write</code> = <code>0b011</code>: two bits set, two letters.</li>
+      <li data-lines="29,16-25" data-state="p=0b111; out=&quot;rwx&quot;"><code>Read|Write|Exec</code> = <code>0b111</code>: every test passes.</li>
+      <li data-lines="29,15,25" data-state="p=0b000; out=&quot;---&quot;" data-out="r-- rw- rwx ---"><code>Perm(0)</code> has no bits, so every <code>if</code> is skipped and <code>"---"</code> comes back unchanged. Now <code>Println</code> joins the four strings with spaces.</li>
+      <li data-lines="30" data-state="p=0b101"><code>Read | Exec</code> sets bits 0 and 2.</li>
+      <li data-lines="31" data-state="p=0b001"><code>&amp;^=</code> is AND NOT: it clears every bit that is set in <code>Exec</code>, leaving the others alone.</li>
+      <li data-lines="32" data-state="p=0b001; out=&quot;r--&quot;" data-out="r--">Printing calls <code>String()</code> once more: only read permission is left.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>r-- rw- rwx ---
+r--</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>3 · Sum only the valid numbers</summary>
+    <p>Given the inputs <code>"42", "-7", "3.9", "abc", "99999999999999999999"</code>, use <code>strconv.Atoi</code> to sum the ones that are valid <code>int</code>s, printing a message for each one skipped. Notice the different error messages.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="Parse, skip bad input, sum the rest">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	inputs := []string{"42", "-7", "3.9", "abc", "99999999999999999999"}
+	sum := 0
+	for _, in := range inputs {
+		n, err := strconv.Atoi(in)
+		if err != nil {
+			fmt.Printf("skip %q: %v\n", in, err)
+			continue
+		}
+		sum += n
+	}
+	fmt.Println("sum:", sum)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-10" data-state="inputs=[42 -7 3.9 abc 9999…]; sum=0">Five strings to parse, and a running total that starts at its zero value.</li>
+      <li data-lines="11-12" data-state="in=&quot;42&quot;; n=42; err=nil; sum=0">First iteration. <code>Atoi</code> succeeds, so <code>err</code> is <code>nil</code>. Note <code>n, err</code> are declared fresh with <code>:=</code> on each pass.</li>
+      <li data-lines="13,17" data-state="in=&quot;42&quot;; n=42; err=nil; sum=42">No error, so we skip the <code>if</code> and add to the total.</li>
+      <li data-lines="11-12,17" data-state="in=&quot;-7&quot;; n=-7; err=nil; sum=35"><code>Atoi</code> understands a leading minus sign. The total drops to 35.</li>
+      <li data-lines="11-12" data-state="in=&quot;3.9&quot;; n=0; err=invalid syntax; sum=35"><code>"3.9"</code> is not an integer — <code>Atoi</code> doesn't round, it refuses. On error, <code>n</code> is 0.</li>
+      <li data-lines="13-15" data-state="in=&quot;3.9&quot;; n=0; err=invalid syntax; sum=35" data-out="skip &quot;3.9&quot;: strconv.Atoi: parsing &quot;3.9&quot;: invalid syntax">We report it and <code>continue</code>, which jumps straight to the next iteration, so line 17 never runs for bad input.</li>
+      <li data-lines="12-15" data-state="in=&quot;abc&quot;; n=0; err=invalid syntax; sum=35" data-out="skip &quot;abc&quot;: strconv.Atoi: parsing &quot;abc&quot;: invalid syntax">Same story for letters.</li>
+      <li data-lines="12-15" data-state="in=&quot;9999…&quot;; n=9223372036854775807; err=value out of range; sum=35" data-out="skip &quot;99999999999999999999&quot;: strconv.Atoi: parsing &quot;99999999999999999999&quot;: value out of range">Valid digits but too big for <code>int</code>: a <em>different</em> error. <strong>Gotcha:</strong> here <code>n</code> is clamped to the max int, not 0 — always check <code>err</code> before trusting <code>n</code>.</li>
+      <li data-lines="19" data-state="sum=35" data-out="sum: 35">The loop is over. Only 42 and −7 were added.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>skip "3.9": strconv.Atoi: parsing "3.9": invalid syntax
+skip "abc": strconv.Atoi: parsing "abc": invalid syntax
+skip "99999999999999999999": strconv.Atoi: parsing "99999999999999999999": value out of range
+sum: 35</pre></div>
+    <p><code>"3.9"</code> is a syntax error for an <em>integer</em> parser, and the 20-digit number is out of range for a 64-bit <code>int</code>. Real input validation looks exactly like this.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li><code>x := v</code> inside functions; <code>var x T</code> when you want the zero value or must state the type; <code>var</code> at package level. <code>:=</code> needs at least one new name.</li>
+      <li>A <code>:=</code> inside a block creates a <em>new</em> variable that shadows the outer one — watch out with <code>err</code>.</li>
+      <li>Every variable starts at its zero value (<code>0</code>, <code>false</code>, <code>""</code>, <code>nil</code>). Design types whose zero value is useful.</li>
+      <li>Use <code>int</code> and <code>float64</code> by default. Integers wrap silently on overflow; floats are approximate — never use them for money.</li>
+      <li>Strings are immutable UTF-8 bytes: <code>len</code> counts bytes, <code>s[i]</code> is a <code>byte</code>, a <code>rune</code> is a code point.</li>
+      <li>No implicit conversions: write <code>T(x)</code>. Use <code>strconv</code> for text ↔ numbers, and never <code>string(int)</code>.</li>
+      <li>Untyped constants are exact and adapt to their context; <code>iota</code> builds enums, skips with <code>_</code>, bit flags with <code>1 &lt;&lt; iota</code>, and sizes like <code>KB/MB</code>.</li>
+      <li><code>type T U</code> makes a new, distinct type (great for units and IDs); <code>type T = U</code> is just an alias.</li>
+      <li><code>%v %+v %#v %T</code> print anything; <code>go vet</code> checks your format strings.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

@@ -1,0 +1,1707 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 09 · Generics — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="09">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part III · Chapter 09</div>
+  <h1>Generics</h1>
+  <p class="lead">Generics let you write a function or a data structure <em>once</em> and use it with many types, while the compiler still checks every type. A <code>Stack[Order]</code> can only hold orders; <code>Max</code> works for ints, floats and strings alike. This chapter shows how they work, where they shine, and when an interface is still the better tool.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Intermediate → Advanced</span>
+    <span class="pill">▶ 15 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>The problem generics solve, and what "type parameter" and "constraint" mean</li>
+      <li>Constraints: <code>any</code>, <code>comparable</code>, <code>cmp.Ordered</code>, unions, the <code>~</code> tilde, and constraints with methods</li>
+      <li>How type inference works, and when you must spell types out</li>
+      <li>Generic data structures: <code>Stack[T]</code>, <code>Queue[T]</code>, <code>Set[T]</code>, <code>Pair[K, V]</code>, <code>LinkedList[T]</code></li>
+      <li>Methods on generic types, and Go 1.27's new <strong>generic methods</strong> (plus their limits)</li>
+      <li>Map / Filter / Reduce, the zero value of <code>T</code>, and generic iterators with <code>iter.Seq</code> (range-over-func)</li>
+      <li>When <em>not</em> to use generics, and how Go compiles them (GC shape stenciling) with real benchmark numbers</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The problem generics solve</h2>
+  <p>Before Go 1.18 (2022), if you wanted "sum a slice" for both <code>[]int</code> and <code>[]float64</code>, you had two bad choices: <strong>copy-paste</strong> the function once per type, or accept <code>[]any</code> / <code>interface{}</code> and check types at run time, losing compile-time safety and paying for boxing.</p>
+
+  <div class="live" data-title="Three ways to sum, one that scales">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// Without generics: one copy per type...
+func SumInts(nums []int) int {
+	var total int
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+func SumFloats(nums []float64) float64 {
+	var total float64
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+// ...or give up type safety with any.
+func SumAny(nums []any) float64 {
+	var total float64
+	for _, n := range nums {
+		switch v := n.(type) {
+		case int:
+			total += float64(v)
+		case float64:
+			total += v
+		default:
+			panic(fmt.Sprintf("can't add %T", v)) // runtime surprise
+		}
+	}
+	return total
+}
+
+// With generics: one function, checked at compile time.
+type Number interface {
+	~int | ~int64 | ~float64
+}
+
+func Sum[T Number](nums []T) T {
+	var total T
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+func main() {
+	fmt.Println(SumInts([]int{1, 2, 3}))
+	fmt.Println(SumFloats([]float64{1.5, 2.5}))
+	fmt.Println(SumAny([]any{1, 2.5}))
+
+	fmt.Println(Sum([]int{1, 2, 3}))         // T = int
+	fmt.Println(Sum([]float64{1.5, 2.5}))    // T = float64
+	fmt.Printf("%T\n", Sum([]int64{10, 20})) // result keeps its type
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="52,6-11" data-state="nums=[1 2 3]; total=6" data-out="6">The pre-generics way: <code>SumInts</code> works only for <code>[]int</code>. Simple and type-safe, but we need a copy per type.</li>
+      <li data-lines="53,14-19" data-state="nums=[1.5 2.5]; total=4" data-out="4"><code>SumFloats</code> is the identical loop with <code>float64</code> pasted in. Bugs fixed in one copy have to be fixed in all of them.</li>
+      <li data-lines="54,23-28" data-state="n=1 (int); total=1"><code>SumAny</code> takes <code>[]any</code>. Element 1 is an <code>int</code>, caught by the type switch and converted.</li>
+      <li data-lines="25-30,35" data-state="n=2.5 (float64); total=3.5" data-out="3.5">Element 2 is a <code>float64</code>. It works, but passing a <code>string</code> would compile fine and then <strong>panic at runtime</strong> on line 32.</li>
+      <li data-lines="56,43-44" data-state="T=int; nums=[1 2 3]; total=0">Generic <code>Sum</code>: the compiler sees <code>[]int</code> and <strong>infers</strong> <code>T = int</code>. <code>var total T</code> is the zero value of <code>int</code>.</li>
+      <li data-lines="45-48" data-state="T=int; total=6" data-out="6"><code>+=</code> is allowed on <code>T</code> because every type in <code>Number</code> supports <code>+</code>. Returns an <code>int</code>, not an <code>any</code>.</li>
+      <li data-lines="57,43-48" data-state="T=float64; total=4" data-out="4">Same source, now instantiated with <code>T = float64</code>.</li>
+      <li data-lines="58,43-48" data-state="T=int64; total=30" data-out="int64">With <code>[]int64</code> the result is an <code>int64</code>. Pass a <code>[]string</code> and you get a <strong>compile</strong> error, not a runtime panic.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>6
+4
+3.5
+6
+4
+int64</pre></div>
+
+  <p><code>Sum[T Number]</code> is a <strong>generic function</strong>. Reading the new syntax piece by piece:</p>
+  <ul>
+    <li><strong><code>[T Number]</code></strong> is a <strong>type parameter list</strong>. <code>T</code> is a placeholder for "some type, decided by the caller". It lives in square brackets, before the normal parameters.</li>
+    <li><strong><code>Number</code></strong> is the <strong>constraint</strong>: the rule for which types <code>T</code> may be. Here: <code>int</code>, <code>int64</code>, <code>float64</code> or anything built on them. Because every allowed type supports <code>+</code>, the compiler lets us write <code>total += n</code>.</li>
+    <li>When you call <code>Sum([]int{1, 2, 3})</code>, the compiler works out <code>T = int</code>. This is <strong>instantiation</strong>: plugging a real type into the placeholder. The result has type <code>int</code>, not <code>any</code>, so no assertions are needed.</li>
+  </ul>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A generic function is a <strong>recipe with a blank</strong>: "Sum of ___". The constraint is the note on the blank: "must be something you can add". Each call fills the blank with a concrete ingredient, and the compiler checks the recipe works with it <em>before</em> the program runs.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Type parameters on functions</h2>
+  <p>A function can have one or more type parameters, each with its own constraint. Common patterns:</p>
+
+  <div class="live" data-title="comparable, cmp.Ordered and two type parameters">
+    <pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+// Contains works for any element type that supports ==.
+func Contains[T comparable](items []T, target T) bool {
+	for _, it := range items {
+		if it == target {
+			return true
+		}
+	}
+	return false
+}
+
+// Max works for any type that supports &lt; and &gt;.
+func Max[T cmp.Ordered](a, b T) T {
+	if a &gt; b {
+		return a
+	}
+	return b
+}
+
+// Two type parameters: K for keys, V for values.
+func Keys[K comparable, V any](m map[K]V) []K {
+	out := make([]K, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func main() {
+	fmt.Println(Contains([]string{"pen", "book"}, "book"))
+	fmt.Println(Contains([]int{10, 20}, 30))
+
+	fmt.Println(Max(3, 7))
+	fmt.Println(Max("apple", "banana"))
+	fmt.Println(Max(2.5, -1.0))
+
+	stock := map[string]int{"pen": 5}
+	fmt.Println(Keys(stock))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="36,9-11" data-state="T=string; target=&quot;book&quot;; it=&quot;pen&quot;"><code>T</code> is inferred as <code>string</code>. <code>comparable</code> is what makes <code>it == target</code> legal. First element <code>"pen"</code> doesn't match.</li>
+      <li data-lines="10-12" data-state="T=string; target=&quot;book&quot;; it=&quot;book&quot;" data-out="true">Second element matches, so it returns <code>true</code> early.</li>
+      <li data-lines="37,9-15" data-state="T=int; target=30" data-out="false">Now <code>T = int</code>. Neither 10 nor 20 equals 30, the loop finishes and we return <code>false</code>.</li>
+      <li data-lines="39,19-23" data-state="T=int; a=3; b=7" data-out="7"><code>cmp.Ordered</code> permits <code>&gt;</code>. <code>3 &gt; 7</code> is false, so <code>b</code> wins.</li>
+      <li data-lines="40,19-23" data-state="T=string; a=&quot;apple&quot;; b=&quot;banana&quot;" data-out="banana">Strings compare byte-wise (lexically): <code>"apple" &lt; "banana"</code>.</li>
+      <li data-lines="41,19-21" data-state="T=float64; a=2.5; b=-1" data-out="2.5">Untyped constants <code>2.5</code> and <code>-1.0</code> default to <code>float64</code>.</li>
+      <li data-lines="43-44,27-28" data-state="K=string; V=int; out=[]; cap(out)=1">Two type parameters, both inferred from <code>map[string]int</code>. <code>V</code> is never used in the body, it just has to be named.</li>
+      <li data-lines="29-32,44" data-state="K=string; V=int; out=[pen]" data-out="[pen]">One key collected. With more keys, map iteration order is <strong>random</strong>, so sort the result if order matters.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>true
+false
+7
+banana
+2.5
+[pen]</pre></div>
+
+  <ul>
+    <li><code>Contains[T comparable]</code>: the body uses <code>==</code>, so <code>T</code> must be <em>comparable</em> (numbers, strings, pointers, comparable structs; not slices/maps/funcs).</li>
+    <li><code>Max[T cmp.Ordered]</code>: the body uses <code>&gt;</code>, so <code>T</code> must be <em>ordered</em>.</li>
+    <li><code>Keys[K comparable, V any]</code>: map keys must be comparable; values can be anything.</li>
+  </ul>
+
+  <div class="live" data-title="One generic function, two instantiations">
+    <pre><code class="language-go">func Max[T cmp.Ordered](a, b T) T {
+	if a &gt; b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	fmt.Println(Max(3, 7))
+	fmt.Println(Max("apple", "banana"))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="args=(3, 7)">The compiler sees <code>Max(3, 7)</code>. Both arguments are untyped integer constants, which default to <code>int</code>, so it <strong>infers</strong> <code>T = int</code>.</li>
+      <li data-lines="1" data-state="T=int; a=3; b=7">It checks the constraint: is <code>int</code> in <code>cmp.Ordered</code>? Yes. Conceptually, <code>Max[int](a, b int) int</code> is called.</li>
+      <li data-lines="2,5" data-state="T=int; a&gt;b → false"><code>3 &gt; 7</code> is false, so we return <code>b</code>.</li>
+      <li data-lines="9" data-state="T=int; result=7" data-out="7">Prints <code>7</code>. The result type is <code>int</code>, a real int.</li>
+      <li data-lines="10,1" data-state="T=string; a=apple; b=banana">Same function, new instantiation: <code>T = string</code>. <code>string</code> is also ordered (lexicographic byte order).</li>
+      <li data-lines="2,5" data-state="T=string; &quot;apple&quot; &gt; &quot;banana&quot; → false">"a" sorts before "b", so <code>apple &gt; banana</code> is false and we return <code>b</code>.</li>
+      <li data-lines="10" data-state="T=string; result=banana" data-out="banana">Prints <code>banana</code>. Calling <code>Max(3, "x")</code> would be a <em>compile</em> error: no single <code>T</code> fits both.</li>
+    </ol>
+  </div>
+
+  <div class="callout tip"><p>For simple cases you may not need your own function at all. Go 1.21 added built-in <code>min</code> and <code>max</code> (any number of ordered arguments), and the <code>slices</code> and <code>maps</code> packages are full of generic helpers: <code>slices.Contains</code>, <code>slices.Index</code>, <code>slices.Max</code>, <code>slices.Sort</code>, <code>maps.Keys</code>, <code>maps.Clone</code>… Reach for those first.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Constraints in depth</h2>
+  <p>A constraint is just an <strong>interface</strong>, used in a new way. Instead of only listing methods, a constraint interface can also list <strong>types</strong>. The set of types it allows is called its <strong>type set</strong>.</p>
+
+  <table>
+    <thead><tr><th>Constraint</th><th>Allows</th><th>Lets you use</th></tr></thead>
+    <tbody>
+      <tr><td><code>any</code></td><td>Every type</td><td>Assignment, passing around, <code>var zero T</code>. No operators.</td></tr>
+      <tr><td><code>comparable</code></td><td>Types that support <code>==</code></td><td><code>==</code>, <code>!=</code>, map keys</td></tr>
+      <tr><td><code>cmp.Ordered</code></td><td>All ints, uints, floats, strings (with <code>~</code>)</td><td><code>&lt; &lt;= &gt; &gt;=</code>, plus <code>==</code></td></tr>
+      <tr><td><code>~int | ~float64</code></td><td>Exactly that union (and named types built on them)</td><td>Operators common to <em>all</em> members (<code>+ - * /</code>)</td></tr>
+      <tr><td><code>fmt.Stringer</code></td><td>Types with <code>String() string</code></td><td>Calling <code>.String()</code></td></tr>
+      <tr><td><code>interface{ ~string; Valid() bool }</code></td><td>String-based types with a <code>Valid</code> method</td><td>String conversion <em>and</em> <code>.Valid()</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Union types and the <code>~</code> tilde</h3>
+  <p>A <strong>union</strong> <code>int | int64 | float64</code> means "any one of these". The <strong>tilde</strong> <code>~int64</code> means "<code>int64</code> <em>or any named type whose underlying type is int64</em>". That matters, because real code is full of named types like <code>type Rupees int64</code>, <code>type OrderID int</code> or <code>type Status string</code>.</p>
+
+  <div class="live" data-title="The tilde lets named types in">
+    <pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+// A custom type whose underlying type is int64.
+type Rupees int64
+
+// ~int64 means "int64 or ANY type whose underlying type is int64".
+type Integer interface {
+	~int | ~int32 | ~int64
+}
+
+type Float interface {
+	~float32 | ~float64
+}
+
+// Constraints can be combined: a union of two unions.
+type Number interface {
+	Integer | Float
+}
+
+func Sum[T Number](xs []T) T {
+	var s T
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
+// cmp.Ordered = all integers, floats and strings (with ~).
+func Clamp[T cmp.Ordered](v, lo, hi T) T {
+	return min(max(v, lo), hi) // built-in min/max are generic too
+}
+
+func main() {
+	cart := []Rupees{499, 1299, 50}
+	total := Sum(cart)
+	fmt.Printf("total = %v (%T)\n", total, total)
+
+	fmt.Println(Clamp(150, 0, 100))
+	fmt.Println(Clamp(Rupees(-5), 0, 100))
+	fmt.Println(Clamp("m", "a", "k"))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9,12-14"><code>Rupees</code> is a new named type whose <strong>underlying type</strong> is <code>int64</code>. The <code>~</code> in <code>~int64</code> is what lets such types in.</li>
+      <li data-lines="39-40,25-26" data-state="T=Rupees; xs=[499 1299 50]; s=0"><code>T</code> is inferred as <code>Rupees</code>, not <code>int64</code>. It satisfies <code>Number</code> through <code>Integer</code>'s <code>~int64</code>.</li>
+      <li data-lines="27-30" data-state="T=Rupees; s=1848">The loop adds 499 + 1299 + 50. All arithmetic stays in <code>Rupees</code>.</li>
+      <li data-lines="41" data-state="total=1848 (main.Rupees)" data-out="total = 1848 (main.Rupees)">The result keeps the caller's type, so any methods on <code>Rupees</code> are still available. No conversion back needed.</li>
+      <li data-lines="43,34-35" data-state="T=int; v=150; lo=0; hi=100" data-out="100"><code>max(150, 0)</code> is 150, then <code>min(150, 100)</code> is 100. The built-in <code>min</code>/<code>max</code> are generic too.</li>
+      <li data-lines="44,34-35" data-state="T=Rupees; v=-5; lo=0; hi=100" data-out="0">Once <code>v</code> is <code>Rupees(-5)</code>, the untyped constants 0 and 100 become <code>Rupees</code> too. <code>max(-5, 0)</code> is 0.</li>
+      <li data-lines="45,34-35" data-state="T=string; v=&quot;m&quot;; lo=&quot;a&quot;; hi=&quot;k&quot;" data-out="k"><code>cmp.Ordered</code> includes strings. <code>"m"</code> is past <code>"k"</code>, so it is clamped to <code>"k"</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>total = 1848 (main.Rupees)
+100
+0
+k</pre></div>
+
+  <p>Notice that <code>Sum(cart)</code> returned a <code>main.Rupees</code>, not a plain <code>int64</code>: generics preserve your named types. Now forget the tilde:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Rupees int64
+
+// No tilde: ONLY the exact types int and int64.
+type Number interface {
+	int | int64
+}
+
+func Sum[T Number](xs []T) T {
+	var s T
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
+func main() {
+	fmt.Println(Sum([]Rupees{499, 1299}))
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:21:17: Rupees does not satisfy Number (possibly missing ~ for int64 in Number)</pre></div>
+
+  <p>The compiler even suggests the fix. And one more rule: an interface that contains a type list (a union or a <code>~T</code>) can <strong>only</strong> be used as a constraint, never as an ordinary variable type:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+type Number interface {
+	~int | ~float64
+}
+
+func main() {
+	var n Number = 5 // constraint interfaces are not ordinary types
+	_ = n
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:8:8: cannot use type Number outside a type constraint: interface contains type constraints</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Almost always write <code>~T</code> in numeric and string constraints. Without it, your generic helper silently rejects every domain type (<code>Rupees</code>, <code>UserID</code>, <code>Status</code>) that teams create precisely to make code safer. Prefer the ready-made <code>cmp.Ordered</code> over hand-rolled lists, and if you need "all integers", <code>golang.org/x/exp/constraints</code> has <code>Integer</code>, <code>Signed</code>, <code>Float</code>, etc. (or write a small one like ours; it's three lines).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Type inference</h2>
+  <p>You rarely have to write the type arguments yourself. <strong>Type inference</strong> looks at the ordinary arguments you passed and works out each type parameter. When it can't, you supply them explicitly in square brackets, all of them or just the first few.</p>
+
+  <div class="live" data-title="Inference, explicit and partial instantiation">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func Map[T, U any](xs []T, f func(T) U) []U {
+	out := make([]U, 0, len(xs))
+	for _, x := range xs {
+		out = append(out, f(x))
+	}
+	return out
+}
+
+// T only appears in the RESULT, so it can't be inferred.
+func Zero[T any]() T {
+	var z T
+	return z
+}
+
+func main() {
+	prices := []int{499, 1299}
+
+	// Inferred: T = int (from prices), U = string (from strconv.Itoa).
+	labels := Map(prices, strconv.Itoa)
+	fmt.Printf("%q\n", labels)
+
+	// Explicit instantiation: same thing, spelled out.
+	labels2 := Map[int, string](prices, func(p int) string { return "₹" + strconv.Itoa(p) })
+	fmt.Println(labels2)
+
+	// Partial: give T, let U be inferred.
+	doubled := Map[int](prices, func(p int) float64 { return float64(p) * 2 })
+	fmt.Println(doubled)
+
+	fmt.Printf("%q %v %v\n", Zero[string](), Zero[int](), Zero[*int]())
+
+	// You can even take a generic function as a value once instantiated.
+	toStr := Map[int, string]
+	fmt.Println(toStr([]int{1, 2}, strconv.Itoa))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="23" data-state="prices=[499 1299]">Our input slice.</li>
+      <li data-lines="26,8-9" data-state="T=int; U=string; out=[]; cap(out)=2">Both type parameters are <strong>inferred</strong>: <code>T = int</code> from <code>prices</code>, <code>U = string</code> from the signature of <code>strconv.Itoa</code>.</li>
+      <li data-lines="10-13" data-state="T=int; U=string; out=[&quot;499&quot; &quot;1299&quot;]"><code>f(x)</code> is called once per element and the results appended.</li>
+      <li data-lines="27" data-state="labels=[&quot;499&quot; &quot;1299&quot;]" data-out="[&quot;499&quot; &quot;1299&quot;]"><code>%q</code> quotes each string, proving these are strings, not ints.</li>
+      <li data-lines="30-31" data-state="labels2=[₹499 ₹1299]" data-out="[₹499 ₹1299]">Explicit instantiation <code>Map[int, string]</code> spells out what inference would have worked out anyway.</li>
+      <li data-lines="34-35" data-state="T=int; U=float64; doubled=[998 2598]" data-out="[998 2598]"><strong>Partial</strong> instantiation: we give <code>T</code>, and <code>U</code> is inferred as <code>float64</code> from the closure.</li>
+      <li data-lines="37,17-19" data-out="&quot;&quot; 0 &lt;nil&gt;"><code>Zero</code> uses <code>T</code> only in its result, so there is nothing to infer from. You <em>must</em> write <code>Zero[string]()</code>. Each returns its type's zero value.</li>
+      <li data-lines="40-41" data-state="toStr=func([]int, func(int) string) []string" data-out="[1 2]">An instantiated generic function is an ordinary function value. An <em>un</em>instantiated <code>Map</code> could not be assigned like this.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>["499" "1299"]
+[₹499 ₹1299]
+[998 2598]
+"" 0 &lt;nil&gt;
+[1 2]</pre></div>
+
+  <p>Inference needs something to infer <em>from</em>. If a type parameter appears only in the result, you must name it:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+func Zero[T any]() T {
+	var z T
+	return z
+}
+
+func main() {
+	x := Zero() // nothing to infer T from
+	_ = x
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:9:11: in call to Zero, cannot infer T (declared at ./main.go:3:11)</pre></div>
+
+  <div class="callout tip"><p>Order type parameters so the ones callers usually need to spell out come <strong>first</strong>. Partial instantiation only fills from the left: <code>Map[int](...)</code> sets <code>T</code> and infers <code>U</code>, but you can't skip <code>T</code> to set only <code>U</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Generic types: Stack, Queue, Set, Pair</h2>
+  <p>Types can have type parameters too. <code>type Stack[T any] struct{...}</code> declares a <strong>generic type</strong>; <code>Stack[string]</code> and <code>Stack[Order]</code> are two different, fully type-checked instantiations. Methods on a generic type name the parameter in the receiver: <code>func (s *Stack[T]) Push(v T)</code>.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// Stack is a generic type: a type with a type parameter.
+type Stack[T any] struct {
+	items []T
+}
+
+// Methods use the receiver's type parameter: Stack[T].
+func (s *Stack[T]) Push(v T) {
+	s.items = append(s.items, v)
+}
+
+// Pop returns the zero value of T and false when empty.
+func (s *Stack[T]) Pop() (T, bool) {
+	var zero T
+	if len(s.items) == 0 {
+		return zero, false
+	}
+	last := s.items[len(s.items)-1]
+	s.items = s.items[:len(s.items)-1]
+	return last, true
+}
+
+func (s *Stack[T]) Len() int { return len(s.items) }
+
+// Queue: first in, first out.
+type Queue[T any] struct {
+	items []T
+}
+
+func (q *Queue[T]) Enqueue(v T) { q.items = append(q.items, v) }
+
+func (q *Queue[T]) Dequeue() (T, bool) {
+	var zero T
+	if len(q.items) == 0 {
+		return zero, false
+	}
+	first := q.items[0]
+	q.items[0] = zero // let the GC reclaim it if T holds pointers
+	q.items = q.items[1:]
+	return first, true
+}
+
+type Order struct {
+	ID    int
+	Total float64
+}
+
+func main() {
+	var undo Stack[string] // zero value is ready to use
+	undo.Push("add pen")
+	undo.Push("add book")
+	undo.Push("apply coupon")
+	for undo.Len() &gt; 0 {
+		action, _ := undo.Pop()
+		fmt.Println("undo:", action)
+	}
+	_, ok := undo.Pop()
+	fmt.Println("pop on empty ok?", ok)
+
+	var q Queue[Order]
+	q.Enqueue(Order{1, 499})
+	q.Enqueue(Order{2, 1299})
+	o, _ := q.Dequeue()
+	fmt.Printf("processing %+v\n", o)
+}</code></pre></div>
+  <div class="output"><pre>undo: apply coupon
+undo: add book
+undo: add pen
+pop on empty ok? false
+processing {ID:1 Total:499}</pre></div>
+
+  <div class="live" data-title="Push and pop on a Stack[string]">
+    <pre><code class="language-go">var s Stack[string]
+s.Push("add pen")
+s.Push("add book")
+v, ok := s.Pop()
+fmt.Println(v, ok)
+v, ok = s.Pop()
+fmt.Println(v, ok)
+v, ok = s.Pop()
+fmt.Printf("%q %v\n", v, ok)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="T=string; items=[] (nil)">Instantiating with <code>T = string</code>. The zero value has a nil slice, which is a perfectly good empty stack: no constructor needed.</li>
+      <li data-lines="2" data-state="items=[add pen]"><code>Push</code> appends. The compiler would reject <code>s.Push(42)</code>: this stack only takes strings.</li>
+      <li data-lines="3" data-state="items=[add pen, add book]">Second push goes on top.</li>
+      <li data-lines="4" data-state="items=[add pen]; v=add book; ok=true"><code>Pop</code> takes the <strong>last</strong> element (LIFO) and shrinks the slice.</li>
+      <li data-lines="5" data-state="items=[add pen]" data-out="add book true">Most recent action first, exactly what an undo history needs.</li>
+      <li data-lines="6-7" data-state="items=[]; v=add pen; ok=true" data-out="add pen true">Next pop empties the stack.</li>
+      <li data-lines="8" data-state="items=[]; v=&quot;&quot;; ok=false">Popping an empty stack can't return "nothing" of type <code>T</code>, so it returns <code>var zero T</code> (here <code>""</code>) and <code>ok = false</code>.</li>
+      <li data-lines="9" data-state="v=&quot;&quot;; ok=false" data-out="&quot;&quot; false">The comma-ok result tells the caller the difference between "an empty string was stored" and "there was nothing".</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: memory leaks in generic containers</div><p>In <code>Dequeue</code> we set <code>q.items[0] = zero</code> before reslicing. Reslicing (<code>q.items[1:]</code>) doesn't free the old element: the backing array still references it. If <code>T</code> is a pointer or holds pointers (like <code>*Order</code>), the garbage collector can't reclaim it. Clearing the slot is cheap insurance.</p></div>
+
+  <h3>Set and Pair</h3>
+  <p>A <code>Set[T comparable]</code> wraps a <code>map[T]struct{}</code>, the classic Go set (empty struct values take zero bytes; see Chapter 07). <code>Pair[K, V]</code> shows a type with two parameters:</p>
+
+  <div class="live" data-title="A generic Set and Pair">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+)
+
+// Set uses a map with empty-struct values (zero bytes each).
+type Set[T comparable] struct {
+	m map[T]struct{}
+}
+
+func NewSet[T comparable](items ...T) *Set[T] {
+	s := &amp;Set[T]{m: make(map[T]struct{}, len(items))}
+	for _, it := range items {
+		s.Add(it)
+	}
+	return s
+}
+
+func (s *Set[T]) Add(v T)      { s.m[v] = struct{}{} }
+func (s *Set[T]) Has(v T) bool { _, ok := s.m[v]; return ok }
+func (s *Set[T]) Len() int     { return len(s.m) }
+func (s *Set[T]) Items() []T   { return slices.Collect(maps.Keys(s.m)) }
+func (s *Set[T]) Union(o *Set[T]) *Set[T] {
+	out := NewSet(s.Items()...)
+	for v := range o.m {
+		out.Add(v)
+	}
+	return out
+}
+
+// Pair holds two values of possibly different types.
+type Pair[K comparable, V any] struct {
+	Key   K
+	Value V
+}
+
+func (p Pair[K, V]) String() string { return fmt.Sprintf("%v=%v", p.Key, p.Value) }
+
+// SortedPairs turns a map into a slice of Pairs, sorted by key.
+func SortedPairs[V any](m map[string]V) []Pair[string, V] {
+	out := make([]Pair[string, V], 0, len(m))
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		out = append(out, Pair[string, V]{k, m[k]})
+	}
+	return out
+}
+
+func main() {
+	tagsA := NewSet("electronics", "sale")
+	tagsB := NewSet("sale", "new")
+	all := tagsA.Union(tagsB)
+	items := all.Items()
+	slices.Sort(items) // map order is random; sort for stable output
+	fmt.Println(all.Len(), strings.Join(items, ","), all.Has("new"), all.Has("old"))
+
+	ids := NewSet(101, 102, 101)
+	fmt.Println("unique order IDs:", ids.Len())
+
+	stock := map[string]int{"pen": 40, "book": 12, "bag": 3}
+	fmt.Println(SortedPairs(stock))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="53,15-16" data-state="T=string; items=[electronics sale]"><code>NewSet</code> infers <code>T = string</code> from its variadic args and allocates the map. The values are <code>struct{}</code>, which take zero bytes.</li>
+      <li data-lines="17-20,23" data-state="tagsA={electronics, sale}">Each item goes through <code>Add</code>, which just sets <code>s.m[v] = struct{}{}</code>.</li>
+      <li data-lines="54" data-state="tagsA={electronics, sale}; tagsB={sale, new}">A second <code>*Set[string]</code>.</li>
+      <li data-lines="55,27-28" data-state="out={electronics, sale}"><code>Union</code> starts by copying <code>tagsA</code>'s items into a fresh set. <code>Union</code> takes <code>*Set[T]</code>, so you can't union a set of strings with a set of ints.</li>
+      <li data-lines="29-32" data-state="all={electronics, sale, new}">Adding <code>tagsB</code>'s items: <code>"sale"</code> is already a key, so the map doesn't grow. Only <code>"new"</code> is added.</li>
+      <li data-lines="56-57,26" data-state="items=[electronics new sale]"><code>Items()</code> collects the keys in <strong>random map order</strong>, so we sort before printing to keep the output stable.</li>
+      <li data-lines="58,24-25" data-state="all.Len()=3" data-out="3 electronics,new,sale true false"><code>Has</code> uses the comma-ok map lookup. <code>"old"</code> was never added.</li>
+      <li data-lines="60-61" data-state="T=int; ids={101, 102}" data-out="unique order IDs: 2">Same generic type, now <code>Set[int]</code>. The duplicate 101 collapses into one key.</li>
+      <li data-lines="63-64,44-47" data-state="V=int; keys sorted=[bag book pen]"><code>SortedPairs</code> infers <code>V = int</code>. <code>slices.Sorted(maps.Keys(m))</code> gives the keys in order, and each becomes a <code>Pair[string, int]</code>.</li>
+      <li data-lines="64,41" data-state="pairs=[bag=3 book=12 pen=40]" data-out="[bag=3 book=12 pen=40]"><code>Pair</code> has a <code>String()</code> method, so fmt prints each element as <code>key=value</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>3 electronics,new,sale true false
+unique order IDs: 2
+[bag=3 book=12 pen=40]</pre></div>
+
+  <ul>
+    <li>Inside the package, a generic type is always written <strong>with its parameters</strong>: <code>*Set[T]</code>, <code>Pair[string, V]</code>. A bare <code>Set</code> is not a type.</li>
+    <li><code>NewSet("electronics", "sale")</code> infers <code>T = string</code> from the variadic arguments.</li>
+    <li><code>Pair[K, V]</code> has a <code>String()</code> method, so it's a <code>fmt.Stringer</code> and prints nicely as <code>bag=3</code>. Generic types can satisfy ordinary interfaces.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>Methods on generic types, and generic methods (Go 1.27)</h2>
+  <p>For years Go had a famous limitation: methods could use their <em>type's</em> parameters, but couldn't declare <strong>new type parameters of their own</strong>. You couldn't write <code>list.Map(f)</code> where <code>f</code> returns a different type; you had to write a top-level function <code>Map(list, f)</code> instead.</p>
+  <p><strong>Go 1.27 lifted that restriction.</strong> A method can now declare its own type parameter list after its name, making it a <strong>generic method</strong>. It's instantiated and inferred just like a generic function:</p>
+
+  <div class="live" data-title="Chaining a generic method">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// List is a generic type with element type E.
+type List[E any] []E
+
+// A GENERIC METHOD (Go 1.27+): Map declares its own type parameter F,
+// in addition to the receiver's E.
+func (l List[E]) Map[F any](f func(E) F) List[F] {
+	out := make(List[F], len(l))
+	for i, x := range l {
+		out[i] = f(x)
+	}
+	return out
+}
+
+// An ordinary method that only uses the receiver's type parameter.
+func (l List[E]) Filter(keep func(E) bool) List[E] {
+	var out List[E]
+	for _, x := range l {
+		if keep(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func main() {
+	totals := List[int]{120, 4999, 80, 1500}
+
+	// Methods chain nicely: F is inferred as string from strconv.Itoa.
+	labels := totals.
+		Filter(func(t int) bool { return t &gt;= 1000 }).
+		Map(strconv.Itoa)
+	fmt.Printf("%q %T\n", labels, labels)
+
+	// Explicit instantiation works like with generic functions.
+	halves := totals.Map[float64](func(t int) float64 { return float64(t) / 2 })
+	fmt.Println(halves)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="33" data-state="totals=[120 4999 80 1500] (List[int])"><code>List[int]</code> instantiates the generic type, so <code>E = int</code> for all its methods.</li>
+      <li data-lines="37,22-26" data-state="E=int; x=120; out=[]"><code>Filter</code> runs first. It only uses the receiver's <code>E</code>. 120 fails the <code>&gt;= 1000</code> test.</li>
+      <li data-lines="24-29" data-state="E=int; out=[4999 1500]">4999 kept, 80 dropped, 1500 kept. A new <code>List[int]</code> is returned.</li>
+      <li data-lines="38,13-14" data-state="E=int; F=string; out=[&quot;&quot; &quot;&quot;]">The chain continues with <code>Map</code>, a <strong>generic method</strong> (Go 1.27+) that declares its own type parameter <code>F</code>. It is inferred as <code>string</code> from <code>strconv.Itoa</code>.</li>
+      <li data-lines="15-18" data-state="E=int; F=string; out=[&quot;4999&quot; &quot;1500&quot;]">Each element is converted into the pre-sized output.</li>
+      <li data-lines="39" data-state="labels=[&quot;4999&quot; &quot;1500&quot;] (List[string])" data-out="[&quot;4999&quot; &quot;1500&quot;] main.List[string]">The result type is <code>List[string]</code>: the method changed the element type, which a plain method on <code>List[E]</code> could never do.</li>
+      <li data-lines="42,13-18" data-state="E=int; F=float64; halves=[60 2499.5 40 750]">Explicit <code>Map[float64]</code> on the original (unfiltered) list. Filtering earlier didn't change <code>totals</code>.</li>
+      <li data-lines="43" data-state="halves=[60 2499.5 40 750]" data-out="[60 2499.5 40 750]">All four halved.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>["4999" "1500"] main.List[string]
+[60 2499.5 40 750]</pre></div>
+
+  <p>If your <code>go.mod</code> says an older language version, the compiler tells you exactly what's needed:</p>
+  <div class="output error" data-label="Compile error (go.mod has go 1.26)"><pre># old
+./main.go:13:22: generic method requires go1.27 or later (-lang was set to go1.26; check go.mod)</pre></div>
+
+  <h3>What generic methods still can't do</h3>
+  <p>The reason Go waited so long is interfaces. An interface method call is resolved at run time, but a generic method needs to be compiled for its type arguments, which a running program can't do on the fly. So the rule is: <strong>interfaces cannot declare generic methods</strong>, and therefore a generic method <strong>never satisfies an interface method</strong>.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+// Interfaces still cannot declare generic methods.
+type Mapper interface {
+	Map[F any](f func(int) F) []F
+}
+
+func main() {}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:5:5: interface method must have no type parameters
+./main.go:5:25: undefined: F</pre></div>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Box struct{ v int }
+
+// Generic method...
+func (b Box) Show[U any](u U) string { return fmt.Sprint(b.v, " ", u) }
+
+// ...does NOT satisfy a non-generic interface method, even "any".
+type Shower interface{ Show(u any) string }
+
+func main() {
+	var b Box
+	fmt.Println(b.Show("ok")) // calling it directly is fine
+	var s Shower = b
+	_ = s
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:16:17: cannot use b (variable of struct type Box) as Shower value in variable declaration: Box does not implement Shower (wrong type for method Show)
+		have Show[U any](U) string
+		want Show(any) string</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Generic methods are great for fluent APIs on your own collection types (<code>list.Map(...).Filter(...)</code>). But remember that callers can't abstract over them with an interface, and code that must build with older Go versions can't use them. For library code, top-level functions like <code>slices.Map</code>-style helpers remain the most portable, most composable choice. Use generic methods where chaining clearly reads better, and check your module's <code>go</code> directive.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Map, Filter, Reduce (and friends)</h2>
+  <p>The classic functional trio becomes type-safe one-liners with generics. Here they are over a slice of orders, plus a <code>GroupBy</code> with two type parameters:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func Map[T, U any](xs []T, f func(T) U) []U {
+	out := make([]U, 0, len(xs))
+	for _, x := range xs {
+		out = append(out, f(x))
+	}
+	return out
+}
+
+func Filter[T any](xs []T, keep func(T) bool) []T {
+	var out []T
+	for _, x := range xs {
+		if keep(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func Reduce[T, A any](xs []T, init A, f func(A, T) A) A {
+	acc := init
+	for _, x := range xs {
+		acc = f(acc, x)
+	}
+	return acc
+}
+
+// GroupBy buckets items by a key you compute.
+func GroupBy[T any, K comparable](xs []T, key func(T) K) map[K][]T {
+	out := make(map[K][]T)
+	for _, x := range xs {
+		k := key(x)
+		out[k] = append(out[k], x)
+	}
+	return out
+}
+
+type Order struct {
+	ID       int
+	Customer string
+	Total    float64
+	Status   string
+}
+
+func main() {
+	orders := []Order{
+		{1, "asha", 499, "paid"},
+		{2, "ravi", 1299, "pending"},
+		{3, "asha", 2500, "paid"},
+		{4, "meera", 80, "paid"},
+	}
+
+	paid := Filter(orders, func(o Order) bool { return o.Status == "paid" })
+	revenue := Reduce(paid, 0.0, func(sum float64, o Order) float64 { return sum + o.Total })
+	ids := Map(paid, func(o Order) int { return o.ID })
+	names := Map(orders, func(o Order) string { return strings.ToUpper(o.Customer) })
+
+	fmt.Println("paid IDs:", ids)
+	fmt.Println("revenue: ", revenue)
+	fmt.Println("names:   ", names)
+
+	byCustomer := GroupBy(orders, func(o Order) string { return o.Customer })
+	fmt.Println("asha has", len(byCustomer["asha"]), "orders")
+}</code></pre></div>
+  <div class="output"><pre>paid IDs: [1 3 4]
+revenue:  3079
+names:    [ASHA RAVI ASHA MEERA]
+asha has 2 orders</pre></div>
+
+  <div class="live" data-title="How Reduce folds a slice into one value">
+    <pre><code class="language-go">func Reduce[T, A any](xs []T, init A, f func(A, T) A) A {
+	acc := init
+	for _, x := range xs {
+		acc = f(acc, x)
+	}
+	return acc
+}
+
+totals := []float64{499, 2500, 80}
+sum := Reduce(totals, 0.0, func(s float64, t float64) float64 { return s + t })
+fmt.Println(sum)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="T=float64; A=float64">Inference: <code>xs</code> is <code>[]float64</code> so <code>T = float64</code>; <code>init</code> is <code>0.0</code> so <code>A = float64</code>. <code>T</code> and <code>A</code> could differ (e.g. reduce orders into a map).</li>
+      <li data-lines="2" data-state="acc=0">The accumulator starts at <code>init</code>.</li>
+      <li data-lines="3-4" data-state="x=499; acc=499">First element: <code>acc = f(0, 499)</code> = 499.</li>
+      <li data-lines="3-4" data-state="x=2500; acc=2999">Second: <code>f(499, 2500)</code> = 2999.</li>
+      <li data-lines="3-4" data-state="x=80; acc=3079">Third: <code>f(2999, 80)</code> = 3079.</li>
+      <li data-lines="6,11" data-state="sum=3079" data-out="3079">Return the accumulator and print it.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: don't turn Go into a different language</div><p>A plain <code>for</code> loop is idiomatic Go, readable by everyone, and often faster than a chain of <code>Filter → Map → Reduce</code> that allocates an intermediate slice at each step. Use these helpers when they genuinely clarify intent (often in tests and data-wrangling code), not as a replacement for every loop. That's part of why the stdlib has (so far) held off on adding <code>slices.Map</code>/<code>Filter</code>, offering lazy iterators instead.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Constraints with methods</h2>
+  <p>Constraints can require <strong>methods</strong>, just like regular interfaces, and can mix methods with type sets. Three increasingly advanced patterns:</p>
+
+  <div class="live" data-title="Method constraints and the pointer-method trick">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// 1) A plain method constraint: any type with String().
+func JoinAll[T fmt.Stringer](xs []T, sep string) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = x.String()
+	}
+	return strings.Join(parts, sep)
+}
+
+// 2) Type set + method: "a string-based type that can validate itself".
+type Enum interface {
+	~string
+	Valid() bool
+}
+
+func Parse[E Enum](raw string) (E, error) {
+	e := E(strings.ToLower(raw)) // allowed: every type in the set is ~string
+	if !e.Valid() {
+		var zero E
+		return zero, fmt.Errorf("invalid %T %q", zero, raw)
+	}
+	return e, nil
+}
+
+type Status string
+
+func (s Status) Valid() bool    { return s == "pending" || s == "paid" || s == "shipped" }
+func (s Status) String() string { return "status:" + string(s) }
+
+// 3) The "pointer method" pattern: T is a struct, *T has the method.
+type Defaulter[T any] interface {
+	*T
+	SetDefaults()
+}
+
+func NewWithDefaults[T any, PT Defaulter[T]]() T {
+	var v T
+	PT(&amp;v).SetDefaults() // convert *T to PT to call the method
+	return v
+}
+
+type Config struct {
+	Port    int
+	Retries int
+}
+
+func (c *Config) SetDefaults() { c.Port, c.Retries = 8080, 3 }
+
+func main() {
+	fmt.Println(JoinAll([]Status{"paid", "shipped"}, ", "))
+
+	s, err := Parse[Status]("PAID")
+	fmt.Println(s, err)
+	_, err = Parse[Status]("lost")
+	fmt.Println(err)
+
+	cfg := NewWithDefaults[Config]() // PT is inferred as *Config
+	fmt.Printf("%+v\n", cfg)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="57,9-14" data-state="T=Status; parts=[status:paid status:shipped]"><code>T = Status</code>, which satisfies the <code>fmt.Stringer</code> constraint. Inside, <code>x.String()</code> calls <code>Status.String</code>, and the slice elements are never boxed into interface values.</li>
+      <li data-lines="14,57" data-out="status:paid, status:shipped">The parts are joined with <code>", "</code>.</li>
+      <li data-lines="59,23-24" data-state="E=Status; raw=&quot;PAID&quot;; e=&quot;paid&quot;"><code>Parse[Status]</code> must be explicit: <code>E</code> appears only in the result. Converting a <code>string</code> to <code>E</code> is allowed because <code>Enum</code> requires <code>~string</code>.</li>
+      <li data-lines="25,29,34" data-state="E=Status; e=&quot;paid&quot;; Valid()=true">The <code>Valid()</code> part of the constraint lets us call the method. <code>"paid"</code> is valid, so we return it.</li>
+      <li data-lines="60,35" data-state="s=&quot;paid&quot;; err=nil" data-out="status:paid &lt;nil&gt;">Printing <code>s</code> goes through <code>Status.String()</code>.</li>
+      <li data-lines="61,24-27" data-state="E=Status; e=&quot;lost&quot;; Valid()=false"><code>"lost"</code> fails validation. <code>var zero E</code> gives the empty <code>Status</code>, and <code>%T</code> of it names the concrete type.</li>
+      <li data-lines="62" data-state="err=invalid main.Status &quot;lost&quot;" data-out="invalid main.Status &quot;lost&quot;">A helpful error, generic over every enum type.</li>
+      <li data-lines="64,43-44" data-state="T=Config; PT=*Config; v={Port:0 Retries:0}">The pointer-method pattern: we pass <code>T = Config</code>, and <code>PT</code> is inferred as <code>*Config</code> from the <code>*T</code> core of <code>Defaulter</code>.</li>
+      <li data-lines="45,54" data-state="T=Config; v={Port:8080 Retries:3}"><code>PT(&amp;v)</code> converts <code>*Config</code> to the type parameter so we can call <code>SetDefaults</code>, which has a pointer receiver and mutates <code>v</code> in place.</li>
+      <li data-lines="46,65" data-state="cfg={Port:8080 Retries:3}" data-out="{Port:8080 Retries:3}">We return a <code>Config</code> <em>value</em> with defaults filled in.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>status:paid, status:shipped
+status:paid &lt;nil&gt;
+invalid main.Status "lost"
+{Port:8080 Retries:3}</pre></div>
+
+  <ol>
+    <li><strong><code>[T fmt.Stringer]</code></strong>: any type with <code>String()</code>. Unlike taking <code>[]fmt.Stringer</code>, a <code>[]Status</code> can be passed directly, without converting each element into an interface value.</li>
+    <li><strong><code>Enum</code></strong> combines a type set (<code>~string</code>) with a method (<code>Valid()</code>). That lets <code>Parse</code> both convert a raw string into <code>E</code> <em>and</em> call <code>e.Valid()</code>. One generic parser now works for every string enum in your codebase.</li>
+    <li><strong>The pointer-method pattern</strong>: <code>SetDefaults</code> has a pointer receiver, so <code>Config</code> itself doesn't satisfy the constraint, only <code>*Config</code> does. The constraint <code>interface{ *T; SetDefaults() }</code> says "<code>PT</code> is a pointer to <code>T</code> <em>and</em> has <code>SetDefaults</code>". The caller writes <code>NewWithDefaults[Config]()</code> and <code>PT</code> is inferred. You'll see this in libraries that decode into or pool generic values.</li>
+  </ol>
+
+  <!-- ============================================================ -->
+  <h2>The zero value of <code>T</code></h2>
+  <p>Inside generic code you don't know what <code>T</code> is, so you can't write <code>return 0</code> or <code>return nil</code> or <code>return ""</code>. The idiom for "the zero value of whatever T is" is <strong><code>var zero T</code></strong>. You've already seen it in <code>Pop</code> and <code>Parse</code>.</p>
+
+  <div class="live" data-title="Zero values of a type parameter">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// var zero T is the standard way to get T's zero value.
+func FirstOr[T any](xs []T, fallback T) T {
+	if len(xs) == 0 {
+		return fallback
+	}
+	return xs[0]
+}
+
+func Last[T any](xs []T) (T, bool) {
+	if len(xs) == 0 {
+		var zero T
+		return zero, false
+	}
+	return xs[len(xs)-1], true
+}
+
+// With comparable you can compare against the zero value.
+func IsZero[T comparable](v T) bool {
+	var zero T
+	return v == zero
+}
+
+// Compact drops zero values ("", 0, nil...) from a slice.
+func Compact[T comparable](xs []T) []T {
+	var out []T
+	for _, x := range xs {
+		if !IsZero(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+type Address struct{ City, Zip string }
+
+func main() {
+	fmt.Println(FirstOr([]string{}, "guest"))
+	v, ok := Last([]float64{})
+	fmt.Println(v, ok)
+	a, ok := Last([]Address{})
+	fmt.Printf("%+v %v\n", a, ok)
+
+	fmt.Println(IsZero(Address{}), IsZero(Address{City: "Pune"}))
+	fmt.Printf("%q\n", Compact([]string{"pen", "", "book", ""}))
+	fmt.Println(*new(int), *new(string) == "") // *new(T) also gives a zero value
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="41,6-8" data-state="T=string; len(xs)=0; fallback=&quot;guest&quot;" data-out="guest">The slice is empty, so the caller-supplied fallback is returned.</li>
+      <li data-lines="42,13-16" data-state="T=float64; zero=0; ok=false"><code>Last</code> has no fallback. <code>var zero T</code> is the standard way to produce "nothing" for an unknown type: here <code>0.0</code>.</li>
+      <li data-lines="43" data-state="v=0; ok=false" data-out="0 false">Always pair a zero value with an <code>ok</code> flag, so callers can tell "empty" from a real 0.</li>
+      <li data-lines="44-45,15" data-state="T=Address; a={City: Zip:}; ok=false" data-out="{City: Zip:} false">For a struct, the zero value is all fields zeroed.</li>
+      <li data-lines="47,22-24" data-state="T=Address; IsZero(Address{})=true; IsZero({Pune })=false" data-out="true false"><code>comparable</code> lets us write <code>v == zero</code>. <code>Address</code> has only string fields, so it's comparable.</li>
+      <li data-lines="48,28-32" data-state="T=string; out=[pen]">Inside <code>Compact</code>: <code>"pen"</code> is not zero, kept. <code>""</code> is, dropped.</li>
+      <li data-lines="30-35,48" data-state="T=string; out=[pen book]" data-out="[&quot;pen&quot; &quot;book&quot;]"><code>"book"</code> kept, the final <code>""</code> dropped.</li>
+      <li data-lines="49" data-out="0 true"><code>*new(T)</code> is another one-liner for a zero value, handy inside expressions.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>guest
+0 false
+{City: Zip:} false
+true false
+["pen" "book"]
+0 true</pre></div>
+
+  <ul>
+    <li><code>var zero T</code> is the clearest spelling. <code>*new(T)</code> works too and fits in an expression, but reads worse.</li>
+    <li>You can only compare against the zero value (<code>v == zero</code>) if <code>T</code> is <code>comparable</code>.</li>
+    <li>Pair "zero" results with a <strong><code>bool</code> or <code>error</code></strong> whenever the zero value could also be legitimate data (an order total of 0, an empty name).</li>
+  </ul>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Which of these compiles inside <code>func F[T any]() T { ... }</code>?</div>
+    <div class="quiz-opts">
+      <button><code>return nil</code></button>
+      <button><code>var z T; return z</code></button>
+      <button><code>return T{}</code></button>
+      <button><code>return 0</code></button>
+    </div>
+    <div class="quiz-explain"><code>nil</code> and <code>0</code> are only valid for some types, and <code>T{}</code> is a composite literal that only works for struct, slice, map or array types. Since <code>T</code> could be anything, the only always-valid option is <code>var z T</code> (or <code>*new(T)</code>).</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Generic iterators: range over func (Go 1.23)</h2>
+  <p>How do users loop over your <code>LinkedList[T]</code>? Before Go 1.23 you'd expose a callback (<code>l.Each(func(v T) {...})</code>) or a cursor type. Now you can return an <strong>iterator</strong> and users write a normal <code>for ... range</code>.</p>
+  <p>An iterator is just a function with a specific shape. The <code>iter</code> package names two of them:</p>
+  <div class="code" data-file="package iter"><pre><code class="language-go">type Seq[V any]     func(yield func(V) bool)
+type Seq2[K, V any] func(yield func(K, V) bool)</code></pre></div>
+  <p>The iterator calls <code>yield</code> once per element. <code>yield</code> returns <code>false</code> when the loop body hits <code>break</code> (or <code>return</code>), and the iterator must then stop. That's the whole protocol, and it's generic by design.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"iter"
+	"slices"
+)
+
+type node[T any] struct {
+	val  T
+	next *node[T]
+}
+
+// LinkedList is a singly linked list of T.
+type LinkedList[T any] struct {
+	head, tail *node[T]
+	size       int
+}
+
+func (l *LinkedList[T]) PushBack(v T) {
+	n := &amp;node[T]{val: v}
+	if l.tail == nil {
+		l.head, l.tail = n, n
+	} else {
+		l.tail.next = n
+		l.tail = n
+	}
+	l.size++
+}
+
+func (l *LinkedList[T]) Len() int { return l.size }
+
+// All returns an iterator over the values: usable with for-range (Go 1.23+).
+func (l *LinkedList[T]) All() iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for n := l.head; n != nil; n = n.next {
+			if !yield(n.val) { // caller did "break": stop walking
+				return
+			}
+		}
+	}
+}
+
+// Indexed yields (position, value) pairs.
+func (l *LinkedList[T]) Indexed() iter.Seq2[int, T] {
+	return func(yield func(int, T) bool) {
+		i := 0
+		for n := l.head; n != nil; n = n.next {
+			if !yield(i, n.val) {
+				return
+			}
+			i++
+		}
+	}
+}
+
+func main() {
+	var l LinkedList[string]
+	for _, s := range []string{"placed", "paid", "packed", "shipped", "delivered"} {
+		l.PushBack(s)
+	}
+
+	for status := range l.All() {
+		fmt.Print(status, " → ")
+	}
+	fmt.Println("done")
+
+	for i, status := range l.Indexed() {
+		if status == "shipped" {
+			fmt.Println("stopping at index", i)
+			break // yield returns false inside All/Indexed
+		}
+	}
+
+	// Iterators plug into the slices/maps packages.
+	fmt.Println(slices.Collect(l.All()), l.Len())
+}</code></pre></div>
+  <div class="output"><pre>placed → paid → packed → shipped → delivered → done
+stopping at index 3
+[placed paid packed shipped delivered] 5</pre></div>
+
+  <div class="live" data-title="What really happens when you break out of range-over-func">
+    <pre><code class="language-go">func (l *LinkedList[T]) All() iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for n := l.head; n != nil; n = n.next {
+			if !yield(n.val) {
+				return
+			}
+		}
+	}
+}
+
+// list holds: placed → paid → shipped
+for s := range list.All() {
+	if s == "shipped" {
+		break
+	}
+	fmt.Println(s)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12,1-2" data-state="T=string">The <code>range</code> calls <code>list.All()</code>, which returns an iterator function. The compiler turns your loop body into the <code>yield</code> callback and calls the iterator with it.</li>
+      <li data-lines="3-4" data-state="n.val=placed">The iterator walks to the first node and calls <code>yield("placed")</code>. Control jumps into <em>your</em> loop body with <code>s = "placed"</code>.</li>
+      <li data-lines="13,16" data-state="s=placed" data-out="placed">Not "shipped", so we print it. The body finishes, and <code>yield</code> returns <strong>true</strong> ("keep going").</li>
+      <li data-lines="3-4" data-state="n.val=paid">Back in the iterator: next node, <code>yield("paid")</code>.</li>
+      <li data-lines="13,16" data-state="s=paid" data-out="paid">Printed; <code>yield</code> returns true again.</li>
+      <li data-lines="3-4,13-14" data-state="n.val=shipped; s=shipped">Third node: <code>yield("shipped")</code>. This time the body hits <code>break</code>, so <code>yield</code> returns <strong>false</strong>.</li>
+      <li data-lines="4-5" data-state="yield → false">The iterator sees <code>false</code> and returns immediately. It must not call <code>yield</code> again (the runtime panics if it does). The <code>for</code> loop is done.</li>
+    </ol>
+  </div>
+
+  <h3>Lazy pipelines</h3>
+  <p>Because iterators produce values on demand, you can chain generic adapters and do <strong>only the work needed</strong>. Here we look for the first two big orders and stop; later elements are never even examined:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"iter"
+	"maps"
+	"slices"
+)
+
+// Lazy, generic iterator adapters: nothing runs until someone ranges.
+func Filter[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for v := range seq {
+			if keep(v) &amp;&amp; !yield(v) {
+				return
+			}
+		}
+	}
+}
+
+func Map[T, U any](seq iter.Seq[T], f func(T) U) iter.Seq[U] {
+	return func(yield func(U) bool) {
+		for v := range seq {
+			if !yield(f(v)) {
+				return
+			}
+		}
+	}
+}
+
+// Take stops the whole pipeline after n items.
+func Take[T any](seq iter.Seq[T], n int) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		if n &lt;= 0 {
+			return
+		}
+		count := 0
+		for v := range seq {
+			if !yield(v) {
+				return
+			}
+			count++
+			if count == n {
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	totals := []float64{120, 4999, 80, 1500, 2300, 999, 7000}
+
+	checked := 0
+	bigOrders := Filter(slices.Values(totals), func(t float64) bool {
+		checked++
+		return t &gt;= 1000
+	})
+	labels := Map(bigOrders, func(t float64) string { return fmt.Sprintf("₹%.0f", t) })
+
+	for l := range Take(labels, 2) {
+		fmt.Println("big:", l)
+	}
+	fmt.Println("elements examined:", checked, "of", len(totals)) // lazy!
+
+	// The stdlib speaks iterators too.
+	stock := map[string]int{"pen": 40, "book": 12, "bag": 3}
+	for _, k := range slices.Sorted(maps.Keys(stock)) {
+		fmt.Print(k, "=", stock[k], " ")
+	}
+	fmt.Println()
+}</code></pre></div>
+  <div class="output"><pre>big: ₹4999
+big: ₹1500
+elements examined: 4 of 7
+bag=3 book=12 pen=40 </pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Expose <code>All() iter.Seq[T]</code> (and <code>iter.Seq2</code> for key/value) on your collection types instead of returning a freshly copied slice. Callers who need a slice can do <code>slices.Collect(c.All())</code>; callers who stop early save work. Follow the stdlib naming: <code>All</code>, <code>Keys</code>, <code>Values</code>, <code>Backward</code>. And make iterators <strong>honour <code>yield</code>'s return value</strong>; ignoring it is the #1 iterator bug and causes a runtime panic.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>When NOT to use generics</h2>
+  <p>Generics and interfaces both give you "write once, use with many types", but they answer different questions:</p>
+  <ul>
+    <li><strong>Generics</strong>: "The <em>code is the same</em> for every type; only the type changes." Containers, algorithms over slices/maps, <code>Max</code>, <code>Sum</code>, caches.</li>
+    <li><strong>Interfaces</strong>: "The <em>behaviour differs</em> per type." Razorpay pays differently from Stripe. Each type brings its own method.</li>
+  </ul>
+
+  <div class="live" data-title="When an interface beats a type parameter">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Payer interface{ Pay(amount float64) error }
+
+type Razorpay struct{}
+
+func (Razorpay) Pay(a float64) error { fmt.Printf("razorpay ₹%.0f\n", a); return nil }
+
+type Stripe struct{}
+
+func (Stripe) Pay(a float64) error { fmt.Printf("stripe ₹%.0f\n", a); return nil }
+
+// Generic version: compiles, works... and adds nothing.
+func CheckoutGeneric[P Payer](p P, amount float64) error { return p.Pay(amount) }
+
+// Interface version: simpler, and it can hold MIXED gateways in one slice.
+func Checkout(p Payer, amount float64) error { return p.Pay(amount) }
+
+func main() {
+	CheckoutGeneric(Razorpay{}, 100)
+	Checkout(Stripe{}, 200)
+
+	// Only the interface version handles a runtime mix:
+	for _, p := range []Payer{Razorpay{}, Stripe{}} {
+		Checkout(p, 300)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="22,16" data-state="P=Razorpay; amount=100">The generic version is instantiated with <code>P = Razorpay</code>. The constraint is just the <code>Payer</code> interface.</li>
+      <li data-lines="16,9" data-state="P=Razorpay; amount=100" data-out="razorpay ₹100"><code>p.Pay</code> runs <code>Razorpay.Pay</code>. It works, but the generic signature bought nothing over a plain interface parameter.</li>
+      <li data-lines="23,19,13" data-state="p=(Stripe, {}); amount=200" data-out="stripe ₹200">The interface version: <code>Stripe{}</code> is boxed into a <code>Payer</code> and the call is dynamically dispatched. Same result, simpler signature.</li>
+      <li data-lines="26-27,9" data-state="p=(Razorpay, {}); amount=300" data-out="razorpay ₹300">A <code>[]Payer</code> holds <em>different</em> concrete types. First iteration dispatches to Razorpay.</li>
+      <li data-lines="26-27,13" data-state="p=(Stripe, {}); amount=300" data-out="stripe ₹300">Second iteration, Stripe. A generic <code>P</code> is fixed to one type per instantiation, so it could never iterate a mix like this.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>razorpay ₹100
+stripe ₹200
+razorpay ₹300
+stripe ₹300</pre></div>
+
+  <p><code>CheckoutGeneric</code> works, but it's strictly worse: longer signature, and it can't handle a <code>[]Payer</code> holding different gateways, because each <code>P</code> is fixed at compile time. If a type parameter is only used to call methods on it, you almost always want the interface directly.</p>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">// Type parameter only used to call a method
+func Notify[N Notifier](n N, msg string) error {
+	return n.Notify(msg)
+}
+
+// Generic for its own sake: only ever used with Order
+func SaveOrder[T Order](db *sql.DB, o T) error { ... }
+
+// any-typed "generic" that type-switches inside
+func Format[T any](v T) string {
+	switch x := any(v).(type) { ... }
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">// Behaviour varies: plain interface
+func Notify(n Notifier, msg string) error {
+	return n.Notify(msg)
+}
+
+// One concrete type: just write it
+func SaveOrder(db *sql.DB, o Order) error { ... }
+
+// Same algorithm, many element types: generics
+func Dedupe[T comparable](xs []T) []T { ... }</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>The Go team's guideline is: <strong>write the concrete code first</strong>. Introduce a type parameter when you find yourself writing the <em>exact same</em> code a second or third time for different types. If you're type-switching on <code>T</code> inside a generic function, that's a smell: generics are for code that doesn't care what <code>T</code> is. Also resist generic "frameworks" (<code>Repository[T Entity]</code> with ten methods); they tend to fight the real differences between entities.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>How Go compiles generics (and what it costs)</h2>
+  <p>There are two classic ways to implement generics. C++ and Rust <strong>stencil</strong>: generate a separate copy of the code for every type argument (fast, but binaries and compile times grow). Java <strong>boxes</strong>: one copy for everything, with values behind pointers (small, but slower). Go takes a middle road called <strong>GC shape stenciling with dictionaries</strong>.</p>
+  <ul>
+    <li>A type's <strong>GC shape</strong> is roughly "how it looks in memory to the garbage collector": its size, alignment and where its pointers are. <code>int64</code> and <code>Rupees</code> (underlying <code>int64</code>) share a shape. <strong>All pointer types share one shape.</strong></li>
+    <li>The compiler generates <strong>one copy of the function per shape</strong>, not per type.</li>
+    <li>Each call also passes a hidden <strong>dictionary</strong> describing the actual type: how to call its methods, its type descriptor for conversions, and so on.</li>
+  </ul>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 660 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="660" height="260" rx="10" fill="#262624"/>
+      <defs><marker id="arr9" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <text x="20" y="28" fill="#a8a49a" font-size="12">YOUR CALLS</text>
+      <text x="400" y="28" fill="#a8a49a" font-size="12">COMPILED CODE (one per GC shape)</text>
+      <g font-family="JetBrains Mono, monospace" font-size="12">
+        <rect x="20" y="40" width="200" height="30" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="32" y="60" fill="#ece9e1">Sum[int64]</text>
+        <rect x="20" y="78" width="200" height="30" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="32" y="98" fill="#ece9e1">Sum[Rupees]</text>
+        <rect x="20" y="126" width="200" height="30" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="32" y="146" fill="#ece9e1">Sum[float64]</text>
+        <rect x="20" y="174" width="200" height="30" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="32" y="194" fill="#ece9e1">Process[*Order]</text>
+        <rect x="20" y="212" width="200" height="30" rx="5" fill="#2e2d2a" stroke="#3a3936"/><text x="32" y="232" fill="#ece9e1">Process[*Customer]</text>
+
+        <rect x="400" y="58" width="240" height="34" rx="6" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="1.5"/><text x="412" y="80" fill="#8fbf7f">Sum[go.shape.int64]</text>
+        <rect x="400" y="124" width="240" height="34" rx="6" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="1.5"/><text x="412" y="146" fill="#7fa6d9">Sum[go.shape.float64]</text>
+        <rect x="400" y="192" width="240" height="34" rx="6" fill="#2e2d2a" stroke="#e0b45c" stroke-width="1.5"/><text x="412" y="214" fill="#e0b45c">Process[go.shape.*uint8]</text>
+      </g>
+      <path d="M220 55 L396 72" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr9)"/>
+      <path d="M220 93 L396 78" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr9)"/>
+      <path d="M220 141 L396 141" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr9)"/>
+      <path d="M220 189 L396 206" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr9)"/>
+      <path d="M220 227 L396 212" stroke="#d97757" stroke-width="1.5" fill="none" marker-end="url(#arr9)"/>
+      <text x="236" y="178" fill="#a8a49a" font-size="11">+ a dictionary per type</text>
+      <text x="236" y="250" fill="#a8a49a" font-size="11">all pointers share one shape</text>
+    </svg>
+    <figcaption>Types with the same memory shape share compiled code; a hidden dictionary carries the per-type details (like which method to call).</figcaption>
+  </figure>
+
+  <p>What does that mean in practice? Let's measure. We sum 1,000 numbers five ways, using Go 1.24's <code>b.Loop()</code> benchmark style:</p>
+
+  <div class="code" data-file="sum/sum.go"><pre><code class="language-go">package sum
+
+// Concrete: written for int only.
+func SumInts(xs []int) int {
+	var s int
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
+// Generic over a type set: operators only, no method calls.
+func Sum[T ~int | ~float64](xs []T) T {
+	var s T
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
+// Interface: each element is boxed, each call is dynamic.
+type Valuer interface{ Value() int }
+
+type Item struct{ N int }
+
+func (i Item) Value() int { return i.N }
+
+func SumIface(xs []Valuer) int {
+	var s int
+	for _, x := range xs {
+		s += x.Value()
+	}
+	return s
+}
+
+// Generic with a METHOD constraint.
+func SumValues[T Valuer](xs []T) int {
+	var s int
+	for _, x := range xs {
+		s += x.Value()
+	}
+	return s
+}</code></pre></div>
+  <div class="code" data-file="sum/sum_test.go"><pre><code class="language-go">package sum
+
+import "testing"
+
+const n = 1000
+
+func ints() []int {
+	xs := make([]int, n)
+	for i := range xs {
+		xs[i] = i
+	}
+	return xs
+}
+
+func BenchmarkSumInts(b *testing.B) {
+	xs := ints()
+	for b.Loop() {
+		SumInts(xs)
+	}
+}
+
+func BenchmarkSumGeneric(b *testing.B) {
+	xs := ints()
+	for b.Loop() {
+		Sum(xs)
+	}
+}
+
+func BenchmarkSumIface(b *testing.B) {
+	xs := make([]Valuer, n)
+	for i := range xs {
+		xs[i] = Item{i}
+	}
+	for b.Loop() {
+		SumIface(xs)
+	}
+}
+
+func BenchmarkSumValuesStruct(b *testing.B) {
+	xs := make([]Item, n)
+	for i := range xs {
+		xs[i] = Item{i}
+	}
+	for b.Loop() {
+		SumValues(xs)
+	}
+}
+
+func BenchmarkSumValuesPointer(b *testing.B) {
+	xs := make([]*Item, n)
+	for i := range xs {
+		xs[i] = &amp;Item{i}
+	}
+	for b.Loop() {
+		SumValues(xs)
+	}
+}</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go test -bench=. -benchmem ./sum/</code></pre></div>
+  <div class="output" data-label="Representative run (Apple M1; your numbers will differ)"><pre>goos: darwin
+goarch: arm64
+pkg: bench/sum
+cpu: Apple M1
+BenchmarkSumInts-8            	 2677704	       430.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSumGeneric-8         	 2942959	       397.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSumIface-8           	  545090	      2209 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSumValuesStruct-8    	  947617	      1301 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSumValuesPointer-8   	  564013	      2475 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	bench/sum	6.612s</pre></div>
+
+  <table>
+    <thead><tr><th>Version</th><th>Approx. time</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Concrete <code>SumInts</code></td><td>~430 ns</td><td>Baseline</td></tr>
+      <tr><td>Generic <code>Sum[int]</code> (operators only)</td><td>~400 ns</td><td>Same speed: <code>+</code> on an int shape compiles to the same machine code</td></tr>
+      <tr><td>Generic <code>SumValues[Item]</code> (method constraint, struct)</td><td>~1300 ns</td><td>Method called via the dictionary: an indirect call that can't be inlined</td></tr>
+      <tr><td>Interface <code>SumIface</code></td><td>~2200 ns</td><td>Dynamic dispatch per element, data behind a pointer</td></tr>
+      <tr><td>Generic <code>SumValues[*Item]</code> (method constraint, pointer)</td><td>~2500 ns</td><td>Pointer shape + dictionary call: no faster than an interface</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Generics are <strong>zero-cost for operators</strong> on concrete value types (<code>+</code>, <code>&lt;</code>, <code>==</code>, indexing, appending). Generics that <strong>call methods</strong> on <code>T</code> cost roughly like interfaces, sometimes slightly more. So: use generics for <em>type safety and less duplication</em>, not as a performance trick to "avoid interface overhead". For the 1% of hot paths where it matters, benchmark (the compiler keeps improving, and PGO can devirtualize hot calls).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Practice</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1: MaxBy</summary>
+    <p>Write <code>MaxBy[T any, K cmp.Ordered](xs []T, key func(T) K) (T, bool)</code> that returns the element whose key is largest. Use it to find the most expensive order and the alphabetically-last customer. Handle the empty slice.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="MaxBy with two type parameters">
+    <pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+// MaxBy returns the element with the largest key, or false if xs is empty.
+func MaxBy[T any, K cmp.Ordered](xs []T, key func(T) K) (T, bool) {
+	var best T
+	if len(xs) == 0 {
+		return best, false
+	}
+	best = xs[0]
+	bestKey := key(best)
+	for _, x := range xs[1:] {
+		if k := key(x); k &gt; bestKey {
+			best, bestKey = x, k
+		}
+	}
+	return best, true
+}
+
+type Order struct {
+	ID       int
+	Customer string
+	Total    float64
+}
+
+func main() {
+	orders := []Order{{1, "asha", 499}, {2, "ravi", 2500}, {3, "meera", 80}}
+
+	top, _ := MaxBy(orders, func(o Order) float64 { return o.Total })
+	fmt.Printf("biggest order: %+v\n", top)
+
+	last, _ := MaxBy(orders, func(o Order) string { return o.Customer })
+	fmt.Println("last name alphabetically:", last.Customer)
+
+	_, ok := MaxBy([]Order{}, func(o Order) int { return o.ID })
+	fmt.Println("empty ok?", ok)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="31" data-state="orders=[{1 asha 499} {2 ravi 2500} {3 meera 80}]">Three orders.</li>
+      <li data-lines="33,9-15" data-state="T=Order; K=float64; best={1 asha 499}; bestKey=499"><code>T = Order</code> from the slice and <code>K = float64</code> from the key func's return type. We seed <code>best</code> with the first element.</li>
+      <li data-lines="16-18" data-state="T=Order; K=float64; x={2 ravi 2500}; best={2 ravi 2500}; bestKey=2500">2500 &gt; 499, so order 2 becomes the best. <code>K</code> must be <code>cmp.Ordered</code> for that <code>&gt;</code> to compile.</li>
+      <li data-lines="16-17,21" data-state="T=Order; K=float64; x={3 meera 80}; best={2 ravi 2500}; bestKey=2500">80 is smaller, nothing changes. Return order 2 and <code>true</code>.</li>
+      <li data-lines="34" data-state="top={ID:2 Customer:ravi Total:2500}" data-out="biggest order: {ID:2 Customer:ravi Total:2500}">The caller gets a real <code>Order</code> back, no type assertion.</li>
+      <li data-lines="36,15-18" data-state="T=Order; K=string; bestKey=&quot;asha&quot; → &quot;ravi&quot;">Same function, now <code>K = string</code>. <code>"ravi" &gt; "asha"</code> so ravi wins; <code>"meera" &lt; "ravi"</code> so it stays.</li>
+      <li data-lines="37" data-state="last.Customer=&quot;ravi&quot;" data-out="last name alphabetically: ravi">The last name alphabetically.</li>
+      <li data-lines="39,10-12" data-state="T=Order; K=int; best={0  0}; ok=false">Empty input: we return the zero <code>Order</code> and <code>false</code> before touching <code>xs[0]</code>, which would have panicked.</li>
+      <li data-lines="40" data-state="ok=false" data-out="empty ok? false">The caller checks <code>ok</code>.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>biggest order: {ID:2 Customer:ravi Total:2500}
+last name alphabetically: ravi
+empty ok? false</pre></div>
+    <p>Two type parameters: <code>T</code> for the element (anything) and <code>K</code> for the key (must be ordered). The stdlib equivalent is <code>slices.MaxFunc</code> with a comparison function.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: A concurrency-safe generic Cache with an iterator</summary>
+    <p>Build <code>Cache[K, V]</code> with <code>Set</code>, <code>Get</code> (comma-ok) and an <code>All() iter.Seq2[K, V]</code> that yields entries in sorted key order. It must be safe to use from multiple goroutines, and callers must not hold the lock while their loop body runs.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"cmp"
+	"fmt"
+	"iter"
+	"maps"
+	"slices"
+	"sync"
+)
+
+// Cache is a concurrency-safe map with typed keys and values.
+type Cache[K cmp.Ordered, V any] struct {
+	mu sync.RWMutex
+	m  map[K]V
+}
+
+func NewCache[K cmp.Ordered, V any]() *Cache[K, V] {
+	return &amp;Cache[K, V]{m: make(map[K]V)}
+}
+
+func (c *Cache[K, V]) Set(k K, v V) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k] = v
+}
+
+func (c *Cache[K, V]) Get(k K) (V, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	v, ok := c.m[k]
+	return v, ok
+}
+
+// All iterates over a sorted snapshot, so callers never hold the lock.
+func (c *Cache[K, V]) All() iter.Seq2[K, V] {
+	c.mu.RLock()
+	keys := slices.Sorted(maps.Keys(c.m))
+	snap := maps.Clone(c.m)
+	c.mu.RUnlock()
+	return func(yield func(K, V) bool) {
+		for _, k := range keys {
+			if !yield(k, snap[k]) {
+				return
+			}
+		}
+	}
+}
+
+type Customer struct{ Name, City string }
+
+func main() {
+	customers := NewCache[int, Customer]()
+	customers.Set(2, Customer{"Ravi", "Delhi"})
+	customers.Set(1, Customer{"Asha", "Pune"})
+
+	if c, ok := customers.Get(1); ok {
+		fmt.Println("hit:", c.Name)
+	}
+	_, ok := customers.Get(99)
+	fmt.Println("99 cached?", ok)
+
+	for id, c := range customers.All() {
+		fmt.Printf("%d → %s (%s)\n", id, c.Name, c.City)
+	}
+}</code></pre></div>
+    <div class="output"><pre>hit: Asha
+99 cached? false
+1 → Asha (Pune)
+2 → Ravi (Delhi)</pre></div>
+    <p>Taking a <strong>snapshot</strong> under the read lock and then iterating it means a slow loop body (or one that calls <code>Set</code>!) can't block or deadlock the cache. <code>K</code> is <code>cmp.Ordered</code> rather than just <code>comparable</code> because we sort keys.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: Batch orders with an iterator</summary>
+    <p>Write <code>Batch[T any](xs []T, size int) iter.Seq[[]T]</code> that yields consecutive chunks of at most <code>size</code> elements, e.g. to send order IDs to an API 3 at a time. Then compare with the stdlib.</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="A generic batching iterator">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"iter"
+	"slices"
+)
+
+// Batch yields consecutive sub-slices of at most size elements.
+func Batch[T any](xs []T, size int) iter.Seq[[]T] {
+	return func(yield func([]T) bool) {
+		if size &lt;= 0 {
+			return
+		}
+		for start := 0; start &lt; len(xs); start += size {
+			end := min(start+size, len(xs))
+			if !yield(xs[start:end:end]) { // full slice expr: caps the batch
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	orderIDs := []int{101, 102, 103, 104, 105, 106, 107}
+	for batch := range Batch(orderIDs, 3) {
+		fmt.Println("sending batch:", batch)
+	}
+
+	// The stdlib has this built in since Go 1.23:
+	for batch := range slices.Chunk(orderIDs, 3) {
+		fmt.Print(len(batch), " ")
+	}
+	fmt.Println()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="25-26,10-11" data-state="orderIDs=[101 102 103 104 105 106 107]; size=3"><code>Batch</code> doesn't loop yet. It returns an <code>iter.Seq[[]int]</code>: a function that takes a <code>yield</code> callback. The <code>range</code> then calls it, passing the loop body as <code>yield</code>.</li>
+      <li data-lines="15-17" data-state="start=0; end=3; batch=[101 102 103]">First batch: <code>xs[0:3:3]</code>. The third index caps the capacity at 3, so a caller's <code>append</code> can't overwrite element 104.</li>
+      <li data-lines="27" data-state="batch=[101 102 103]" data-out="sending batch: [101 102 103]"><code>yield</code> runs the loop body. It returns <code>true</code>, meaning "keep going".</li>
+      <li data-lines="15-17,27" data-state="start=3; end=6; batch=[104 105 106]" data-out="sending batch: [104 105 106]">Back inside the iterator, <code>start</code> advances by 3.</li>
+      <li data-lines="15-17,27" data-state="start=6; end=7; batch=[107]" data-out="sending batch: [107]"><code>min(9, 7)</code> is 7, so the last batch is short.</li>
+      <li data-lines="15,26" data-state="start=9">9 is not &lt; 7, so the iterator function returns and the <code>range</code> loop ends.</li>
+      <li data-lines="31-32" data-state="len(batch)=3, 3, 1"><code>slices.Chunk</code> does the same thing from the standard library. We print each chunk's length with <code>Print</code>, which adds no newline.</li>
+      <li data-lines="34" data-out="3 3 1 "><code>Println()</code> ends the line. Note the trailing space after the last length.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>sending batch: [101 102 103]
+sending batch: [104 105 106]
+sending batch: [107]
+3 3 1 </pre></div>
+    <p>The three-index slice <code>xs[start:end:end]</code> caps each batch's capacity, so if a caller <code>append</code>s to a batch it can't overwrite the next batch's elements. <code>slices.Chunk</code> does the same thing.</p>
+  </details>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">You need a function that charges an order through whichever payment gateway the customer chose at checkout. Best signature?</div>
+    <div class="quiz-opts">
+      <button><code>func Charge[P Payer](p P, o Order) error</code></button>
+      <button><code>func Charge[T any](p T, o Order) error</code></button>
+      <button><code>func Charge(p Payer, o Order) error</code></button>
+    </div>
+    <div class="quiz-explain">The behaviour varies by gateway and the choice is made at <em>run time</em>, which is exactly what interfaces are for. The generic version adds noise and can't work with a value whose concrete type is only known at run time without an interface anyway. <code>T any</code> can't even call <code>Pay</code>.</div>
+  </div>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Type parameters (<code>[T Constraint]</code>) let one function or type work across many types with full compile-time checking.</li>
+      <li>Constraints are interfaces: <code>any</code>, <code>comparable</code>, <code>cmp.Ordered</code>, unions like <code>~int | ~float64</code>, and method requirements. Use <code>~</code> so named types like <code>Rupees</code> fit.</li>
+      <li>Type inference usually fills in type arguments; specify them when a parameter appears only in the result.</li>
+      <li>Generic types (<code>Stack[T]</code>, <code>Set[T]</code>, <code>Pair[K, V]</code>) are written with their parameters everywhere, including receivers.</li>
+      <li>Go 1.27 adds <strong>generic methods</strong>, but interface methods can't be generic, so generic methods never satisfy interfaces.</li>
+      <li><code>var zero T</code> is the zero value of any <code>T</code>; return it with a <code>bool</code> or <code>error</code>.</li>
+      <li>Iterators (<code>iter.Seq[T]</code>, range-over-func) are the idiomatic way to let callers loop over generic collections. Always respect <code>yield</code>'s return value.</li>
+      <li>Same code, different types → generics. Different behaviour per type → interfaces. Write concrete code first.</li>
+      <li>Go compiles one copy per GC shape plus a dictionary: operators are free, method calls on <code>T</code> cost about as much as interface calls.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

@@ -1,0 +1,1608 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 13 · Sync &amp; Concurrency Patterns — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="13">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part IV · Chapter 13</div>
+  <h1>Sync &amp; Concurrency Patterns</h1>
+  <p class="lead">Goroutines and channels give you the engine. This chapter gives you the steering wheel and the brakes: the <code>sync</code> package, atomics, and the handful of battle-tested patterns (worker pools, pipelines, fan-out/fan-in, semaphores, errgroup) that real Go services are built from.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Intermediate → Advanced</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What a data race is, why it silently corrupts data, and how <code>go run -race</code> catches it</li>
+      <li>Waiting for goroutines with <code>sync.WaitGroup</code>, including the new <code>wg.Go</code> (Go 1.25)</li>
+      <li>Protecting shared state with <code>Mutex</code> and <code>RWMutex</code> — and the "copied mutex" trap that <code>go vet</code> catches</li>
+      <li>Doing things exactly once with <code>sync.Once</code>, <code>OnceFunc</code>, <code>OnceValue</code> and <code>OnceValues</code></li>
+      <li>Lock-free counters and flags with typed atomics (<code>atomic.Int64</code>, <code>atomic.Pointer[T]</code>)</li>
+      <li>When <code>sync.Map</code> and <code>sync.Cond</code> are the right tool (rarely!)</li>
+      <li>The core patterns: worker pool, fan-out/fan-in, pipelines, bounded parallelism, rate limiting, errgroup, graceful stop</li>
+      <li>How to choose between channels and mutexes</li>
+    </ul>
+  </div>
+
+  <h2>Data races: the bug you can't see</h2>
+  <p>In the last chapter you learned to start goroutines. The moment two goroutines touch the <em>same variable</em>, a new kind of bug appears. A <strong>data race</strong> happens when two goroutines access the same memory at the same time, and at least one of them is <em>writing</em>, with nothing coordinating them.</p>
+  <p>Why is that a problem? Because even something tiny like <code>counter++</code> is not one step. The CPU does three: <strong>read</strong> the value, <strong>add</strong> one, <strong>write</strong> it back. If two goroutines interleave those steps, one update gets lost.</p>
+
+  <div class="code" data-file="race/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	counter := 0
+	var wg sync.WaitGroup
+
+	for range 1000 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			counter++ // read, add, write: three steps, not one!
+		}()
+	}
+
+	wg.Wait()
+	fmt.Println("counter =", counter)
+}</code></pre></div>
+  <p>Run it a few times. You'll get a different wrong answer each time (and sometimes, by luck, the right one — which is what makes races so nasty):</p>
+  <div class="output" data-label="Output (varies every run)"><pre>$ go run ./race
+counter = 981
+$ go run ./race
+counter = 983
+$ go run ./race
+counter = 977</pre></div>
+
+  <div class="live" data-title="How counter++ loses an update">
+    <pre><code class="language-go">// counter starts at 41. Goroutines A and B both run counter++.
+// The CPU really does three separate steps for each:
+
+// goroutine A                 // goroutine B
+a := counter     // read
+                               b := counter     // read
+a = a + 1        // add
+                               b = b + 1        // add
+counter = a      // write
+                               counter = b      // write
+
+// Two increments happened... but counter is 42, not 43.</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="counter=41">Both goroutines want to add one. We expect the result to be <strong>43</strong>.</li>
+      <li data-lines="5" data-state="counter=41; A.a=41">Goroutine A reads <code>counter</code> into its private register: 41.</li>
+      <li data-lines="6" data-state="counter=41; A.a=41; B.b=41">Before A writes, the scheduler runs B. B <em>also</em> reads 41. This is the fatal moment.</li>
+      <li data-lines="7" data-state="counter=41; A.a=42; B.b=41">A adds one in its own copy: 42.</li>
+      <li data-lines="8" data-state="counter=41; A.a=42; B.b=42">B adds one in its own copy: also 42.</li>
+      <li data-lines="9" data-state="counter=42; A.a=42; B.b=42">A writes 42 back.</li>
+      <li data-lines="10" data-state="counter=42; A.a=42; B.b=42">B writes 42 back, overwriting A's work with the same number.</li>
+      <li data-lines="12" data-state="counter=42" data-out="counter = 42   (expected 43!)">Two increments ran, one was lost. Multiply this by 1000 goroutines and you get 971 instead of 1000.</li>
+    </ol>
+  </div>
+
+  <h3>The race detector</h3>
+  <p>Go ships with a fantastic tool for finding these: the <strong>race detector</strong>. Add <code>-race</code> to <code>go run</code>, <code>go test</code> or <code>go build</code>. It instruments every memory access and reports when two goroutines touch the same address without synchronization. Here is the real report (file paths shortened):</p>
+  <div class="output" data-label="go run -race (real output)"><pre>$ go run -race ./race
+==================
+WARNING: DATA RACE
+Read at 0x00c000126038 by goroutine 10:
+  main.main.func1()
+      /home/gopher/ch13/race/main.go:16 +0x68
+
+Previous write at 0x00c000126038 by goroutine 7:
+  main.main.func1()
+      /home/gopher/ch13/race/main.go:16 +0x78
+
+Goroutine 10 (running) created at:
+  main.main()
+      /home/gopher/ch13/race/main.go:14 +0x6c
+
+Goroutine 7 (finished) created at:
+  main.main()
+      /home/gopher/ch13/race/main.go:14 +0x6c
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c000126038 by goroutine 11:
+  main.main.func1()
+      /home/gopher/ch13/race/main.go:16 +0x78
+
+Previous write at 0x00c000126038 by goroutine 10:
+  main.main.func1()
+      /home/gopher/ch13/race/main.go:16 +0x78
+
+Goroutine 11 (running) created at:
+  main.main()
+      /home/gopher/ch13/race/main.go:14 +0x6c
+
+Goroutine 10 (running) created at:
+  main.main()
+      /home/gopher/ch13/race/main.go:14 +0x6c
+==================
+counter = 847
+Found 2 data race(s)
+exit status 66</pre></div>
+  <p>Read it from the top: <em>"Read at … by goroutine 10"</em> on <code>main.go:16</code> (our <code>counter++</code>), <em>"Previous write … by goroutine 7"</em> on the same line, and where each goroutine was <em>created</em> (line 14, the <code>go func()</code>). The program exits with status 66 to signal "races found". Once we fix it with a mutex (next sections), the detector is silent:</p>
+  <div class="output" data-label="After the fix"><pre>$ go run -race ./racefix
+counter = 1000</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Run your test suite with <code>go test -race ./...</code> in CI on every pull request. The detector only finds races that actually <em>happen</em> during the run, so it needs code paths exercised — tests are perfect for that. It slows code down roughly 2–10x and uses more memory, so don't ship <code>-race</code> binaries to production, but do run a canary or load test with it now and then.</p></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: "it works on my machine"</div><p>A race may not show up for months, then corrupt data under production load. There is no such thing as a "benign" data race in Go: the memory model says a racy program can behave in <em>any</em> way, including torn reads of multi-word values like strings, slices and interfaces (which can crash). Fix every race the detector reports.</p></div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Shared memory is a whiteboard in a shared office. A race is two people erasing and writing on the same spot at once. You have two fixes: give the marker to one person at a time (a <strong>mutex</strong>), or stop sharing the whiteboard and pass notes instead (a <strong>channel</strong>). Go's proverb: <em>"Don't communicate by sharing memory; share memory by communicating."</em> But both are legitimate tools.</p></div>
+
+  <h2>sync.WaitGroup: waiting for a group of goroutines</h2>
+  <p><code>main</code> doesn't wait for goroutines. When <code>main</code> returns, the program exits, even if goroutines are mid-work. A <code>sync.WaitGroup</code> is a thread-safe counter that lets one goroutine wait for others to finish. It has three methods:</p>
+  <ul>
+    <li><code>Add(n)</code> — "n more goroutines are about to start."</li>
+    <li><code>Done()</code> — "one goroutine finished" (same as <code>Add(-1)</code>).</li>
+    <li><code>Wait()</code> — block until the counter reaches zero.</li>
+  </ul>
+  <div class="code" data-file="wg/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+func download(name string, d time.Duration) {
+	time.Sleep(d)
+	fmt.Println("downloaded", name)
+}
+
+func main() {
+	files := map[string]time.Duration{
+		"a.txt": 30 * time.Millisecond,
+		"b.txt": 10 * time.Millisecond,
+		"c.txt": 20 * time.Millisecond,
+	}
+
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for name, d := range files {
+		wg.Add(1) // 1. count BEFORE starting the goroutine
+		go func() {
+			defer wg.Done() // 2. always signal, even on panic/early return
+			download(name, d)
+		}()
+	}
+
+	wg.Wait() // 3. block until the counter is back to zero
+	fmt.Printf("all done in ~%dms\n", time.Since(start).Round(10*time.Millisecond).Milliseconds())
+}</code></pre></div>
+  <div class="output" data-label="Output (order depends on sleep times)"><pre>downloaded b.txt
+downloaded c.txt
+downloaded a.txt
+all done in ~30ms</pre></div>
+  <p>The three downloads ran at the same time, so the total time is about the slowest one (30ms), not the sum (60ms).</p>
+
+  <div class="live" data-title="WaitGroup counter, step by step">
+    <pre><code class="language-go">var wg sync.WaitGroup
+
+for i := range 3 {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fmt.Println("job", i)
+	}()
+}
+
+wg.Wait()
+fmt.Println("all jobs finished")</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="counter=0">A zero <code>WaitGroup</code> is ready to use. Its counter is 0.</li>
+      <li data-lines="3-4" data-state="i=0; counter=1">First iteration: <code>Add(1)</code> happens in <code>main</code>, <em>before</em> the goroutine exists.</li>
+      <li data-lines="5-8" data-state="i=0; counter=1; goroutines=1">The goroutine is started. It may not have run yet — that's fine, the counter already accounts for it.</li>
+      <li data-lines="3-8" data-state="counter=3; goroutines=3">After the loop, three goroutines are in flight and the counter is 3. (Since Go 1.22, each iteration has its own <code>i</code>, so every goroutine sees its own value.)</li>
+      <li data-lines="11" data-state="counter=3; main=blocked">Main reaches <code>Wait()</code> and blocks.</li>
+      <li data-lines="6-7" data-state="counter=2; main=blocked" data-out="job 2">A goroutine runs (scheduling order is not guaranteed!), prints, and its deferred <code>Done()</code> drops the counter to 2.</li>
+      <li data-lines="6-7" data-state="counter=1; main=blocked" data-out="job 0">Another finishes. Counter is 1.</li>
+      <li data-lines="6-7" data-state="counter=0; main=runnable" data-out="job 1">The last one finishes. The counter hits 0, and <code>Wait()</code> wakes main.</li>
+      <li data-lines="12" data-state="counter=0" data-out="all jobs finished">Main continues. Every job is guaranteed to have finished before this line.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: Add inside the goroutine</div><p>If you call <code>wg.Add(1)</code> <em>inside</em> the goroutine, <code>main</code> may reach <code>Wait()</code> before any goroutine has run, see a counter of 0, and return immediately. Always <code>Add</code> before the <code>go</code> statement. Also: never copy a WaitGroup (pass <code>*sync.WaitGroup</code>), and never let the counter go negative — that panics.</p></div>
+
+  <h3>wg.Go (Go 1.25+): the easy way</h3>
+  <p>Because forgetting <code>Add</code> or <code>Done</code> is so common, Go 1.25 added <code>WaitGroup.Go(f)</code>. It does <code>Add(1)</code>, starts <code>f</code> in a goroutine, and calls <code>Done</code> when <code>f</code> returns. Use it in new code; you'll still see the classic form everywhere.</p>
+  <div class="live" data-title="wg.Go fills a slice in parallel">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	results := make([]int, 5)
+
+	for i := range 5 {
+		// Go 1.25+: wg.Go does Add(1), starts the goroutine, and calls Done for you.
+		wg.Go(func() {
+			results[i] = i * i // each goroutine writes its OWN index: no race
+		})
+	}
+
+	wg.Wait()
+	fmt.Println(results)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-10" data-state="results=[0 0 0 0 0]; wg.counter=0">A zero-value <code>WaitGroup</code> is ready to use. <code>results</code> is pre-sized to 5, so every goroutine has its own slot waiting.</li>
+      <li data-lines="12,14" data-state="i=0; wg.counter=1; results=[0 0 0 0 0]"><code>wg.Go</code> does <code>Add(1)</code> for us and starts a goroutine. Since Go 1.22 each iteration has its <strong>own</strong> <code>i</code>, so the closure captures 0.</li>
+      <li data-lines="12,14" data-state="i=4; wg.counter=5; results=[0 0 0 0 0]">The loop runs to <code>i=4</code> almost instantly. Five goroutines exist, but none may have run yet: the counter is 5.</li>
+      <li data-lines="15" data-state="wg.counter=3; results=[0 0 4 0 16]">The goroutines run in any order. In one representative run, goroutines 2 and 4 finish first and write their squares. When each closure returns, <code>wg.Go</code> calls <code>Done</code>.</li>
+      <li data-lines="15" data-state="wg.counter=0; results=[0 1 4 9 16]">The rest finish. No mutex is needed: each goroutine writes a <strong>different</strong> index, so nobody touches the same memory.</li>
+      <li data-lines="19" data-state="wg.counter=0; results=[0 1 4 9 16]"><code>wg.Wait()</code> blocks main until the counter hits zero. This is also what makes the writes <em>visible</em> to main.</li>
+      <li data-lines="20" data-state="results=[0 1 4 9 16]" data-out="[0 1 4 9 16]">The slice is printed. The order of execution varied, but the result is always the same because each slot is fixed by its index.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[0 1 4 9 16]</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">for _, f := range files {
+	go func() {
+		wg.Add(1) // too late: Wait may already have returned
+		defer wg.Done()
+		process(f)
+	}()
+}
+wg.Wait()</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer (Go 1.25+)"><pre><code class="language-go">for _, f := range files {
+	wg.Go(func() {
+		process(f)
+	})
+}
+wg.Wait()</code></pre></div></div>
+  </div>
+
+  <div class="callout tip"><p>Notice the pattern in <code>wggo</code>: each goroutine writes to <code>results[i]</code>, its <em>own</em> slot. Different elements of a slice are different memory locations, so this is race-free without a lock. Appending to a shared slice, however, is a race — <code>append</code> reads and writes the slice header.</p></div>
+
+  <h2>sync.Mutex and RWMutex: one at a time, please</h2>
+  <p>A <strong>mutex</strong> ("mutual exclusion") is a lock. Only one goroutine can hold it. Everyone else calling <code>Lock()</code> waits until the holder calls <code>Unlock()</code>. The code between Lock and Unlock is called the <strong>critical section</strong>. Its zero value is an unlocked mutex, ready to use.</p>
+  <p>The idiomatic way is to put the mutex <em>inside</em> the struct it protects, right above the fields it guards, and keep it unexported so callers can't misuse it:</p>
+  <div class="live" data-title="A mutex-guarded bank account">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// Account is safe for concurrent use.
+// The mutex sits right above the fields it protects (a common convention).
+type Account struct {
+	mu      sync.Mutex
+	balance int
+	history []string
+}
+
+func (a *Account) Deposit(amount int) {
+	a.mu.Lock()
+	defer a.mu.Unlock() // runs even if something below panics
+
+	a.balance += amount
+	a.history = append(a.history, fmt.Sprintf("+%d", amount))
+}
+
+func (a *Account) Withdraw(amount int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if amount &gt; a.balance {
+		return fmt.Errorf("insufficient funds: have %d, want %d", a.balance, amount)
+	}
+	a.balance -= amount
+	a.history = append(a.history, fmt.Sprintf("-%d", amount))
+	return nil
+}
+
+func (a *Account) Balance() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.balance
+}
+
+func main() {
+	acc := &amp;Account{}
+	var wg sync.WaitGroup
+
+	for range 100 {
+		wg.Go(func() { acc.Deposit(10) })
+	}
+	wg.Wait()
+
+	fmt.Println("balance:", acc.Balance())
+	fmt.Println(acc.Withdraw(5000))
+	fmt.Println(acc.Withdraw(400), "-&gt;", acc.Balance())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="43-44" data-state="balance=0; history=[]"><code>acc</code> is a <strong>pointer</strong>, so every goroutine shares the same <code>Account</code> and the same mutex.</li>
+      <li data-lines="46-47" data-state="goroutines=100; balance=0">The loop starts 100 goroutines, each calling <code>Deposit(10)</code>. They all race to the lock.</li>
+      <li data-lines="47,17-18" data-state="balance=0; lock=held by one">One goroutine wins <code>Lock()</code>; the other 99 block right here. <code>defer Unlock()</code> is registered so the lock is released even on panic.</li>
+      <li data-lines="20-21" data-state="balance=10; history=[+10]">Inside the lock, the read-modify-write of <code>balance</code> and the <code>append</code> happen as one unit. Nobody else can see a half-done update.</li>
+      <li data-lines="22" data-state="balance=10; lock=free">The function returns, the deferred <code>Unlock</code> fires, and the next waiting goroutine gets the lock.</li>
+      <li data-lines="47,20-21" data-state="balance=1000; len(history)=100">This repeats 99 more times, one at a time. Unlike the racy counter, no update is lost.</li>
+      <li data-lines="49,51,36-39" data-state="balance=1000" data-out="balance: 1000"><code>wg.Wait()</code> returns, then <code>Balance()</code> takes the lock just to read. Reads need the lock too, or they could see a torn value.</li>
+      <li data-lines="52,28-29" data-state="balance=1000; amount=5000" data-out="insufficient funds: have 1000, want 5000"><code>Withdraw(5000)</code>: 5000 &gt; 1000, so it returns an error. The deferred <code>Unlock</code> still runs on this early return.</li>
+      <li data-lines="53,31-33" data-state="balance=600; len(history)=101"><code>Withdraw(400)</code> succeeds: balance drops to 600 and it returns <code>nil</code>.</li>
+      <li data-lines="53" data-state="balance=600" data-out="&lt;nil&gt; -&gt; 600">Arguments are evaluated left to right, so <code>Balance()</code> runs after the withdraw and sees 600. It locks again, which is fine: the withdraw already unlocked.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>balance: 1000
+insufficient funds: have 1000, want 5000
+&lt;nil&gt; -&gt; 600</pre></div>
+  <p>Three details to notice:</p>
+  <ul>
+    <li><strong><code>defer a.mu.Unlock()</code></strong> right after <code>Lock()</code>. You can't forget to unlock on an early <code>return</code> (see <code>Withdraw</code>), and a panic won't leave the lock held forever. The cost of <code>defer</code> is now tiny (a couple of nanoseconds).</li>
+    <li><strong>Pointer receivers</strong> everywhere. The mutex must not be copied (more on this below).</li>
+    <li><strong>Even reads lock.</strong> <code>Balance()</code> takes the lock too. Reading while someone else writes is still a race.</li>
+  </ul>
+
+  <h3>RWMutex: many readers, one writer</h3>
+  <p><code>sync.RWMutex</code> has two modes. <code>RLock</code>/<code>RUnlock</code> is a <em>shared</em> lock: any number of readers can hold it together. <code>Lock</code>/<code>Unlock</code> is <em>exclusive</em>: a writer waits until all readers leave, and while it holds the lock, nobody else gets in. Perfect for read-heavy caches.</p>
+  <div class="live" data-title="RWMutex: 50 readers, 1 writer">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// Cache: many readers, few writers. RWMutex lets readers share the lock.
+type Cache struct {
+	mu   sync.RWMutex
+	data map[string]string
+}
+
+func NewCache() *Cache {
+	return &amp;Cache{data: make(map[string]string)}
+}
+
+func (c *Cache) Get(key string) (string, bool) {
+	c.mu.RLock() // shared: many goroutines can hold RLock at once
+	defer c.mu.RUnlock()
+	v, ok := c.data[key]
+	return v, ok
+}
+
+func (c *Cache) Set(key, value string) {
+	c.mu.Lock() // exclusive: waits for all readers to leave
+	defer c.mu.Unlock()
+	c.data[key] = value
+}
+
+func main() {
+	c := NewCache()
+	c.Set("lang", "Go")
+
+	var wg sync.WaitGroup
+	var hitsMu sync.Mutex
+	hits := 0
+
+	for range 50 {
+		wg.Go(func() {
+			if _, ok := c.Get("lang"); ok {
+				hitsMu.Lock()
+				hits++
+				hitsMu.Unlock()
+			}
+		})
+	}
+	wg.Go(func() { c.Set("version", "1.27") })
+	wg.Wait()
+
+	v, _ := c.Get("version")
+	fmt.Println("hits:", hits, "version:", v)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="32-33,14-15" data-state="data={}"><code>NewCache</code> builds the map (a nil map would panic on write).</li>
+      <li data-lines="33,25-28" data-state="data={lang:Go}"><code>Set</code> takes the <strong>exclusive</strong> lock and stores <code>lang</code>. Nobody else is around yet.</li>
+      <li data-lines="39-40" data-state="readers=50; hits=0">50 reader goroutines start. Exact interleaving varies run to run.</li>
+      <li data-lines="41,18-22" data-state="readers holding RLock=many">Each reader calls <code>Get</code>, which takes <code>RLock</code>. Many readers can hold it at the same time, so reads do not queue behind each other.</li>
+      <li data-lines="42-44" data-state="hits=1"><code>hits</code> is a plain int touched by many goroutines, so it gets its <strong>own</strong> mutex. The RLock on the cache does not protect it.</li>
+      <li data-lines="48,26-28" data-state="data={lang:Go version:1.27}">The writer goroutine calls <code>Set</code>. <code>Lock</code> waits until current readers leave, writes, and unlocks. New readers wait while a writer is pending.</li>
+      <li data-lines="49" data-state="hits=50">After <code>Wait</code>, all 50 readers found <code>lang</code> (it was set before any started).</li>
+      <li data-lines="51-52" data-state="hits=50; v=1.27" data-out="hits: 50 version: 1.27">Main reads <code>version</code>. Because <code>Wait</code> ran first, the writer has definitely finished.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>hits: 50 version: 1.27</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Don't reach for <code>RWMutex</code> by default. It has more bookkeeping than <code>Mutex</code>, so for short critical sections (a map lookup) a plain <code>Mutex</code> is often <em>as fast or faster</em>. Use RWMutex when reads vastly outnumber writes <em>and</em> the read section does real work. Measure with a benchmark (Chapter 15) before switching. Also: keep critical sections short — never do network I/O, disk I/O, or channel sends while holding a lock.</p></div>
+
+  <h3>The copied-mutex gotcha (and go vet)</h3>
+  <p>A <code>Mutex</code> is a plain struct holding some state. If you copy a struct that contains one, you copy the lock state too, and the two copies are completely unrelated locks. The most common way to do this by accident is a <strong>value receiver</strong>:</p>
+  <div class="live" data-title="A value receiver copies the mutex">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Counter struct {
+	mu sync.Mutex
+	n  int
+}
+
+// BUG: value receiver copies the whole struct, including the mutex.
+// Each call locks its own private copy, so nothing is protected.
+func (c Counter) Inc() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func main() {
+	var c Counter
+	c.Inc()
+	c.Inc()
+	fmt.Println(c.n) // prints 0: increments happened on copies
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="22" data-state="c.n=0; c.mu=unlocked"><code>var c Counter</code> creates one struct holding a mutex and <code>n=0</code>. So far so good.</li>
+      <li data-lines="23,15" data-state="c.n=0; copy.n=0">Calling <code>c.Inc()</code> on a <strong>value receiver</strong> copies the whole struct into the parameter <code>c</code> inside <code>Inc</code>, mutex included.</li>
+      <li data-lines="16-18" data-state="c.n=0; copy.n=1">The copy's mutex is locked, the copy's <code>n</code> goes to 1, and the copy is unlocked. The original was never touched.</li>
+      <li data-lines="23" data-state="c.n=0">When <code>Inc</code> returns, the copy is thrown away, and its <code>n=1</code> with it.</li>
+      <li data-lines="24,15-18" data-state="c.n=0; copy.n=1">The second call makes a fresh copy (still <code>n=0</code>), bumps it to 1, and discards it again.</li>
+      <li data-lines="25" data-state="c.n=0" data-out="0">We print the original: <strong>0</strong>. The fix is a pointer receiver, <code>func (c *Counter) Inc()</code>. <code>go vet</code> flags this as "passes lock by value".</li>
+    </ol>
+  </div>
+  <div class="output"><pre>0</pre></div>
+  <p><code>go vet</code> catches this with its <code>copylocks</code> check:</p>
+  <div class="output error" data-label="go vet"><pre>$ go vet ./copylock
+copylock/main.go:15:9: Inc passes lock by value: ch13/copylock.Counter contains sync.Mutex</pre></div>
+
+  <table>
+    <thead><tr><th>Rule</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Put the mutex next to the fields it guards; comment what it guards</td><td>Readers instantly know which fields need the lock</td></tr>
+      <tr><td>Use pointer receivers on types that contain a mutex</td><td>Value receivers copy the lock</td></tr>
+      <tr><td><code>Lock()</code> then immediately <code>defer Unlock()</code></td><td>Survives early returns and panics</td></tr>
+      <tr><td>Don't embed <code>sync.Mutex</code> in exported types</td><td>Embedding exports <code>Lock</code>/<code>Unlock</code> to every caller</td></tr>
+      <tr><td>Never call a method that locks from inside another method holding the same lock</td><td>Go mutexes are <strong>not re-entrant</strong>: you'd deadlock yourself</td></tr>
+      <tr><td>Always acquire multiple locks in the same order</td><td>Lock A then B in one place and B then A in another = deadlock</td></tr>
+    </tbody>
+  </table>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A type <code>Store</code> has a <code>mu sync.Mutex</code> field. Method <code>Save()</code> locks <code>mu</code>, then calls <code>s.Count()</code>, which also locks <code>mu</code>. What happens?</div>
+    <div class="quiz-opts"><button>Works fine — the same goroutine already owns the lock</button><button>go vet reports a copylocks error</button><button>The goroutine deadlocks waiting for itself</button><button>It panics with "mutex already locked"</button></div>
+    <div class="quiz-explain">Go's <code>sync.Mutex</code> is not re-entrant: it has no idea which goroutine holds it. The second <code>Lock()</code> waits forever for an <code>Unlock()</code> that can never come. The usual fix is an unexported helper (<code>countLocked()</code>) that assumes the caller already holds the lock.</div>
+  </div>
+
+  <h2>sync.Once and friends: exactly once, safely</h2>
+  <p>Some work should happen exactly one time: loading config, opening a database pool, compiling a big regex. If many goroutines might ask for it at the same moment, a plain <code>if cfg == nil { load() }</code> is a race. <code>sync.Once</code> guarantees the function runs once, and every other caller <em>waits</em> until that one run has finished.</p>
+  <p>Since Go 1.21 there are three helpers that wrap the pattern even more neatly:</p>
+  <ul>
+    <li><code>sync.OnceFunc(f)</code> → returns a function that runs <code>f</code> only the first time.</li>
+    <li><code>sync.OnceValue(f)</code> → returns a function that computes a value once and caches it.</li>
+    <li><code>sync.OnceValues(f)</code> → same, for <code>(value, error)</code>.</li>
+  </ul>
+  <div class="code" data-file="once/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+	"sync"
+)
+
+type Config struct{ Env string }
+
+// 1. Classic sync.Once: run setup exactly once, no matter how many callers.
+var (
+	cfgOnce sync.Once
+	cfg     *Config
+)
+
+func GetConfig() *Config {
+	cfgOnce.Do(func() {
+		fmt.Println("  (loading config...)")
+		cfg = &amp;Config{Env: "prod"}
+	})
+	return cfg
+}
+
+// 2. sync.OnceValue (Go 1.21+): a function that computes a value once and caches it.
+var hostname = sync.OnceValue(func() string {
+	fmt.Println("  (looking up hostname...)")
+	return "build-box-01"
+})
+
+// 3. sync.OnceValues: same, but for (value, error) pairs.
+var readMotd = sync.OnceValues(func() ([]byte, error) {
+	fmt.Println("  (reading file...)")
+	return os.ReadFile("/does/not/exist")
+})
+
+// 4. sync.OnceFunc: wrap a side-effecting func so it only ever runs once.
+var closeLogs = sync.OnceFunc(func() { fmt.Println("  (logs flushed and closed)") })
+
+func main() {
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() { GetConfig() })
+	}
+	wg.Wait()
+	fmt.Println("env:", GetConfig().Env)
+
+	fmt.Println("host:", hostname())
+	fmt.Println("host:", hostname())
+
+	_, err := readMotd()
+	_, err2 := readMotd()
+	fmt.Println("err:", err)
+	fmt.Println("same error cached:", err == err2)
+
+	closeLogs()
+	closeLogs() // safe: does nothing the second time
+}</code></pre></div>
+  <div class="output"><pre>  (loading config...)
+env: prod
+  (looking up hostname...)
+host: build-box-01
+host: build-box-01
+  (reading file...)
+err: open /does/not/exist: no such file or directory
+same error cached: true
+  (logs flushed and closed)</pre></div>
+  <p>Ten goroutines called <code>GetConfig()</code> but "loading config" printed once. <code>hostname()</code> computed once and returned the cached value after. <code>readMotd</code> cached the <em>error</em> too — the file is never re-read.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p><code>Once</code> doesn't retry. If the first call fails (like the file read above), every later caller gets that same failure. If you need "retry until success", use a mutex and a flag instead. And if the function passed to <code>Do</code> panics, <code>Once</code> considers it done (<code>OnceFunc</code>/<code>OnceValue</code> re-panic with the same value on every call).</p></div>
+
+  <h2>sync/atomic: lock-free counters and flags</h2>
+  <p><strong>Atomic</strong> operations are single, indivisible CPU instructions: "add one to this number" happens as one step that nobody can interrupt. They're the fastest way to share a simple counter or flag. Since Go 1.19, use the <strong>typed</strong> atomics — <code>atomic.Int32</code>, <code>atomic.Int64</code>, <code>atomic.Uint64</code>, <code>atomic.Bool</code>, <code>atomic.Pointer[T]</code>, <code>atomic.Value</code> — instead of the old functions like <code>atomic.AddInt64(&amp;x, 1)</code>. Typed atomics can't accidentally be read non-atomically, and they're automatically aligned correctly (an old trap on 32-bit platforms).</p>
+  <div class="live" data-title="Typed atomics: Add, CompareAndSwap, Swap">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
+
+type Stats struct {
+	requests atomic.Int64 // typed atomics: the zero value is ready to use
+	errors   atomic.Int64
+	healthy  atomic.Bool
+}
+
+type Settings struct {
+	MaxConns int
+}
+
+func main() {
+	var s Stats
+	s.healthy.Store(true)
+
+	var wg sync.WaitGroup
+	for i := range 1000 {
+		wg.Go(func() {
+			s.requests.Add(1)
+			if i%10 == 0 {
+				s.errors.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	fmt.Println("requests:", s.requests.Load(), "errors:", s.errors.Load(), "healthy:", s.healthy.Load())
+
+	// CompareAndSwap: "set it to new ONLY IF it is still old".
+	var state atomic.Int32 // 0 = idle, 1 = running
+	fmt.Println("start #1:", state.CompareAndSwap(0, 1))
+	fmt.Println("start #2:", state.CompareAndSwap(0, 1)) // already running
+
+	// atomic.Pointer[T]: swap a whole immutable config in one step.
+	var current atomic.Pointer[Settings]
+	current.Store(&amp;Settings{MaxConns: 10})
+	old := current.Swap(&amp;Settings{MaxConns: 50})
+	fmt.Println("old:", old.MaxConns, "new:", current.Load().MaxConns)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20-21" data-state="requests=0; errors=0; healthy=true">The zero value of every typed atomic is ready. <code>Store(true)</code> sets <code>healthy</code> in one indivisible step.</li>
+      <li data-lines="24-26" data-state="i=0; requests=1; errors=0">1000 goroutines start. Each does <code>requests.Add(1)</code>, a single CPU instruction, so no increment is lost (unlike plain <code>counter++</code>).</li>
+      <li data-lines="27-28" data-state="i=0; requests=1; errors=1">Goroutine <code>i=0</code> is a multiple of 10, so it also bumps <code>errors</code>. Order across goroutines varies run to run; the totals do not.</li>
+      <li data-lines="32-33" data-state="requests=1000; errors=100; healthy=true" data-out="requests: 1000 errors: 100 healthy: true">After <code>Wait</code>, all 1000 adds have landed: 100 of the indexes (0, 10, ... 990) counted an error.</li>
+      <li data-lines="36-37" data-state="state=1" data-out="start #1: true"><code>CompareAndSwap(0, 1)</code>: state is 0, so it becomes 1 and returns <code>true</code>. Exactly one caller can ever win this.</li>
+      <li data-lines="38" data-state="state=1" data-out="start #2: false">The second CAS expects 0 but finds 1, so nothing changes and it returns <code>false</code>: "already running".</li>
+      <li data-lines="41-42" data-state="current=&amp;{MaxConns:10}"><code>atomic.Pointer[Settings]</code> holds a pointer to an immutable config.</li>
+      <li data-lines="43" data-state="current=&amp;{MaxConns:50}; old=&amp;{MaxConns:10}"><code>Swap</code> installs the new config and hands back the old one, atomically. Readers see either the old or the new, never a mix.</li>
+      <li data-lines="44" data-state="old.MaxConns=10; current.MaxConns=50" data-out="old: 10 new: 50">Both values are printed.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>requests: 1000 errors: 100 healthy: true
+start #1: true
+start #2: false
+old: 10 new: 50</pre></div>
+
+  <p><strong>CompareAndSwap</strong> (CAS) is the building block of all lock-free code: "if the value is still <code>old</code>, set it to <code>new</code> and return true; otherwise do nothing and return false." It's a safe way to say "only one goroutine gets to start this."</p>
+  <p><strong><code>atomic.Pointer[T]</code></strong> lets you swap a whole <em>immutable</em> struct in one step. Readers always see either the old config or the new one, never half of each. This is a great pattern for hot-reloadable config.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Atomics are for <strong>one</strong> independent value. As soon as two values must change together ("increment count AND append to history"), use a mutex. Two atomics updated one after the other are each safe, but the pair isn't consistent — a reader can see the new count with the old history. Most bugs in "clever" lock-free code come from this.</p></div>
+
+  <h2>sync.Map and sync.Cond: specialised tools</h2>
+  <h3>sync.Map</h3>
+  <p>A regular Go <code>map</code> is <strong>not</strong> safe for concurrent writes (the runtime will often crash with <code>fatal error: concurrent map writes</code>). Usually you fix that with a <code>map</code> plus a <code>Mutex</code>, like the cache above. <code>sync.Map</code> is a built-in concurrent map, but it's untyped (<code>any</code> keys and values) and it's tuned for two specific cases:</p>
+  <ol>
+    <li>Keys are written once and read many times (e.g., a cache that only grows).</li>
+    <li>Many goroutines read, write and overwrite <em>disjoint</em> sets of keys.</li>
+  </ol>
+  <div class="live" data-title="sync.Map in action">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var m sync.Map // zero value is ready; keys and values are 'any'
+
+	var wg sync.WaitGroup
+	for i := range 5 {
+		wg.Go(func() {
+			m.Store(i, i*100)
+		})
+	}
+	wg.Wait()
+
+	v, ok := m.Load(3)
+	fmt.Println("load 3:", v, ok)
+
+	// LoadOrStore: "give me the existing value, or store mine".
+	actual, loaded := m.LoadOrStore(3, 999)
+	fmt.Println("LoadOrStore 3:", actual, "already there:", loaded)
+	actual, loaded = m.LoadOrStore(7, 700)
+	fmt.Println("LoadOrStore 7:", actual, "already there:", loaded)
+
+	m.Delete(0)
+
+	count := 0
+	m.Range(func(k, v any) bool {
+		count++
+		return true // return false to stop early
+	})
+	fmt.Println("entries:", count)
+
+	// You must type-assert values back out.
+	if v, ok := m.Load(7); ok {
+		n := v.(int)
+		fmt.Println("7 as int + 1 =", n+1)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="m={}">A zero-value <code>sync.Map</code> is ready. Keys and values are typed <code>any</code>.</li>
+      <li data-lines="12-17" data-state="m={0:0 1:100 2:200 3:300 4:400}">Five goroutines each <code>Store</code> one key at the same time. Plain maps would crash with "concurrent map writes"; <code>sync.Map</code> is safe.</li>
+      <li data-lines="19-20" data-state="v=300; ok=true" data-out="load 3: 300 true"><code>Load(3)</code> finds the value 300 stored by goroutine 3.</li>
+      <li data-lines="23-24" data-state="actual=300; loaded=true" data-out="LoadOrStore 3: 300 already there: true">Key 3 already exists, so <code>LoadOrStore</code> ignores our 999 and returns the existing 300 with <code>loaded=true</code>.</li>
+      <li data-lines="25-26" data-state="actual=700; loaded=false; m={0:0 1:100 2:200 3:300 4:400 7:700}" data-out="LoadOrStore 7: 700 already there: false">Key 7 is new, so 700 is stored and returned with <code>loaded=false</code>. This check-and-insert is atomic.</li>
+      <li data-lines="28" data-state="m={1:100 2:200 3:300 4:400 7:700}"><code>Delete(0)</code> removes key 0.</li>
+      <li data-lines="30-35" data-state="count=5" data-out="entries: 5"><code>Range</code> calls our func once per entry. There is no <code>Len()</code>, so counting means ranging. 5 entries remain.</li>
+      <li data-lines="38-40" data-state="v=700; n=700" data-out="7 as int + 1 = 701">Values come back as <code>any</code>, so we type-assert with <code>v.(int)</code> before doing arithmetic.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>load 3: 300 true
+LoadOrStore 3: 300 already there: true
+LoadOrStore 7: 700 already there: false
+entries: 5
+7 as int + 1 = 701</pre></div>
+  <div class="callout tip"><p>Default to <code>map + sync.Mutex</code> (or <code>RWMutex</code>). It's typed, easier to reason about, and lets you do multi-step operations under one lock. Reach for <code>sync.Map</code> only when profiling shows lock contention and your access pattern matches one of the two cases above.</p></div>
+
+  <h3>sync.Cond (briefly)</h3>
+  <p>A <strong>condition variable</strong> lets goroutines sleep until some condition on shared state becomes true, and be woken by <code>Signal()</code> (one waiter) or <code>Broadcast()</code> (all waiters). <code>Wait()</code> atomically unlocks the mutex and sleeps, then re-locks it before returning. You almost always wait inside a <code>for</code> loop because the condition might have changed again by the time you wake up.</p>
+  <div class="code" data-file="cond/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+// A tiny bounded queue: consumers wait on a Cond until items appear.
+type Queue struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	items []string
+}
+
+func NewQueue() *Queue {
+	q := &amp;Queue{}
+	q.cond = sync.NewCond(&amp;q.mu)
+	return q
+}
+
+func (q *Queue) Put(item string) {
+	q.mu.Lock()
+	q.items = append(q.items, item)
+	q.mu.Unlock()
+	q.cond.Signal() // wake ONE waiter
+}
+
+func (q *Queue) Get() string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for len(q.items) == 0 { // ALWAYS loop: re-check after waking
+		q.cond.Wait() // unlocks mu, sleeps, re-locks mu on wake
+	}
+	item := q.items[0]
+	q.items = q.items[1:]
+	return item
+}
+
+func main() {
+	q := NewQueue()
+	done := make(chan struct{})
+
+	go func() {
+		for range 3 {
+			fmt.Println("got", q.Get())
+		}
+		close(done)
+	}()
+
+	for _, s := range []string{"a", "b", "c"} {
+		time.Sleep(10 * time.Millisecond)
+		q.Put(s)
+	}
+	&lt;-done
+}</code></pre></div>
+  <div class="output"><pre>got a
+got b
+got c</pre></div>
+  <div class="callout info"><p>In Go, channels cover nearly every case where other languages use condition variables, and they compose with <code>select</code> and timeouts (a <code>Cond.Wait</code> can't be cancelled). You will rarely write <code>sync.Cond</code> in application code. It's good to recognise it when you read library code.</p></div>
+
+  <h2>Pattern: the worker pool</h2>
+  <p>Imagine 10,000 images to resize. Starting 10,000 goroutines works but might open 10,000 files at once and exhaust memory. A <strong>worker pool</strong> starts a <em>fixed</em> number of workers that all pull jobs from one shared channel. It's like a bank with three tellers and one queue: customers (jobs) wait in line, and whichever teller is free takes the next one.</p>
+  <div class="code" data-file="pool/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type Job struct {
+	ID int
+	N  int
+}
+
+type Result struct {
+	JobID  int
+	Square int
+	Worker int
+}
+
+func worker(id int, jobs &lt;-chan Job, results chan&lt;- Result) {
+	for j := range jobs { // loop ends when 'jobs' is closed and drained
+		time.Sleep(10 * time.Millisecond) // pretend this is real work
+		results &lt;- Result{JobID: j.ID, Square: j.N * j.N, Worker: id}
+	}
+}
+
+func main() {
+	const numWorkers = 3
+	const numJobs = 9
+
+	jobs := make(chan Job)
+	results := make(chan Result)
+
+	// 1. Start a FIXED number of workers.
+	var wg sync.WaitGroup
+	for w := 1; w &lt;= numWorkers; w++ {
+		wg.Go(func() { worker(w, jobs, results) })
+	}
+
+	// 2. Feed jobs from a separate goroutine, then close to say "no more".
+	go func() {
+		for i := 1; i &lt;= numJobs; i++ {
+			jobs &lt;- Job{ID: i, N: i}
+		}
+		close(jobs)
+	}()
+
+	// 3. Close results once every worker has returned.
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// 4. Collect.
+	start := time.Now()
+	sum := 0
+	perWorker := map[int]int{}
+	for r := range results {
+		sum += r.Square
+		perWorker[r.Worker]++
+	}
+	fmt.Println("sum of squares:", sum)
+	fmt.Println("jobs per worker:", perWorker)
+	fmt.Printf("took ~%dms (9 jobs x 10ms / 3 workers)\n", time.Since(start).Round(10*time.Millisecond).Milliseconds())
+}</code></pre></div>
+  <div class="output" data-label="Output (distribution between workers can vary)"><pre>sum of squares: 285
+jobs per worker: map[1:3 2:3 3:3]
+took ~30ms (9 jobs x 10ms / 3 workers)</pre></div>
+  <p>The four-step shape is worth memorising: <strong>start workers → feed and close jobs → close results after <code>wg.Wait()</code> → range over results</strong>. The goroutine that closes <code>results</code> is the key trick: only it knows when every worker is done, so only it may close.</p>
+
+  <div class="live" data-title="Two workers, three jobs">
+    <pre><code class="language-go">jobs := make(chan int)
+results := make(chan int)
+
+for range 2 { // two workers
+	go func() {
+		for j := range jobs {
+			results &lt;- j * 10
+		}
+	}()
+}
+
+go func() {
+	for i := 1; i &lt;= 3; i++ {
+		jobs &lt;- i
+	}
+	close(jobs)
+}()
+
+for range 3 {
+	fmt.Println(&lt;-results)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="jobs=unbuffered; results=unbuffered">Two unbuffered channels. A send blocks until someone receives.</li>
+      <li data-lines="4-10" data-state="W1=waiting on jobs; W2=waiting on jobs">Two workers start. Each blocks in <code>range jobs</code> because nothing has been sent yet.</li>
+      <li data-lines="12-14" data-state="i=1; W1=got 1; W2=waiting">The feeder sends job 1. Exactly one worker receives it — say W1.</li>
+      <li data-lines="7" data-state="i=2; W1=sending 10; W2=got 2">W1 tries to send 10 on <code>results</code> (blocks until main reads). Meanwhile the feeder sends job 2 to the free W2.</li>
+      <li data-lines="19-20" data-state="W1=free; W2=sending 20" data-out="10">Main receives 10 and prints it. W1 is free again and goes back to <code>range jobs</code>.</li>
+      <li data-lines="13-14" data-state="i=3; W1=got 3; W2=sending 20">The feeder sends job 3; W1 grabs it.</li>
+      <li data-lines="16" data-state="jobs=closed">The feeder closes <code>jobs</code>: "no more work". Workers' <code>range</code> loops will end once they come back for more.</li>
+      <li data-lines="19-20" data-state="W2=free" data-out="20">Main receives W2's 20.</li>
+      <li data-lines="19-20" data-state="W1=done; W2=done" data-out="30">Main receives W1's 30. Both workers find <code>jobs</code> closed and empty, so they exit. (Order of results can differ between runs.)</li>
+    </ol>
+  </div>
+
+  <h2>Pattern: fan-out, fan-in and pipelines</h2>
+  <h3>Fan-out and fan-in</h3>
+  <p><strong>Fan-out</strong> means several goroutines read from the <em>same</em> channel, splitting the work between them. <strong>Fan-in</strong> (also called <em>merge</em>) means combining several channels into one. Together they let you parallelise one slow step of a process.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="260" fill="#262624"/>
+      <defs>
+        <marker id="ar13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#a8a49a"/></marker>
+      </defs>
+      <text x="360" y="26" fill="#a8a49a" font-size="13" text-anchor="middle">fan-out: many readers of one channel → fan-in: many channels merged into one</text>
+      <rect x="20" y="105" width="120" height="50" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="80" y="128" fill="#ece9e1" font-size="14" text-anchor="middle" font-weight="600">gen()</text>
+      <text x="80" y="145" fill="#a8a49a" font-size="11" text-anchor="middle" font-family="JetBrains Mono, monospace">1 2 3 4 5 6</text>
+      <rect x="250" y="50" width="130" height="44" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="315" y="77" fill="#7fa6d9" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">square w1</text>
+      <rect x="250" y="108" width="130" height="44" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="315" y="135" fill="#7fa6d9" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">square w2</text>
+      <rect x="250" y="166" width="130" height="44" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="315" y="193" fill="#7fa6d9" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">square w3</text>
+      <line x1="140" y1="125" x2="248" y2="72" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <line x1="140" y1="130" x2="248" y2="130" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <line x1="140" y1="135" x2="248" y2="188" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <text x="190" y="240" fill="#e0b45c" font-size="12" text-anchor="middle">FAN-OUT</text>
+      <rect x="480" y="105" width="110" height="50" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="1.5"/>
+      <text x="535" y="128" fill="#ece9e1" font-size="14" text-anchor="middle" font-weight="600">merge()</text>
+      <text x="535" y="145" fill="#a8a49a" font-size="11" text-anchor="middle">closes after wg.Wait</text>
+      <line x1="380" y1="72" x2="478" y2="122" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <line x1="380" y1="130" x2="478" y2="130" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <line x1="380" y1="188" x2="478" y2="138" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+      <text x="430" y="240" fill="#e0b45c" font-size="12" text-anchor="middle">FAN-IN</text>
+      <rect x="630" y="108" width="70" height="44" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="665" y="135" fill="#ece9e1" font-size="13" text-anchor="middle">main</text>
+      <line x1="590" y1="130" x2="628" y2="130" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar13)"/>
+    </svg>
+    <figcaption>One input channel, three workers competing for values, one merged output channel.</figcaption>
+  </figure>
+
+  <div class="code" data-file="fan/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// producer: emits numbers on a channel it owns and closes.
+func gen(nums ...int) &lt;-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			out &lt;- n
+		}
+	}()
+	return out
+}
+
+// stage worker: squares whatever it reads.
+func square(id int, in &lt;-chan int) &lt;-chan string {
+	out := make(chan string)
+	go func() {
+		defer close(out)
+		for n := range in {
+			out &lt;- fmt.Sprintf("w%d: %d^2=%d", id, n, n*n)
+		}
+	}()
+	return out
+}
+
+// merge = fan-in: many channels in, one channel out.
+func merge(chans ...&lt;-chan string) &lt;-chan string {
+	out := make(chan string)
+	var wg sync.WaitGroup
+	for _, c := range chans {
+		wg.Go(func() {
+			for v := range c {
+				out &lt;- v
+			}
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+func main() {
+	in := gen(1, 2, 3, 4, 5, 6)
+
+	// fan-out: three workers read from the SAME input channel.
+	w1 := square(1, in)
+	w2 := square(2, in)
+	w3 := square(3, in)
+
+	count := 0
+	for line := range merge(w1, w2, w3) {
+		fmt.Println(line)
+		count++
+	}
+	fmt.Println("total:", count)
+}</code></pre></div>
+  <div class="output" data-label="Output (one representative run — which worker gets which number varies)"><pre>w1: 1^2=1
+w1: 3^2=9
+w3: 2^2=4
+w3: 5^2=25
+w1: 4^2=16
+w3: 6^2=36
+total: 6</pre></div>
+  <p>Notice that worker 2 got nothing in this run: whichever worker is free first gets the next value. That's the point — work goes to whoever is ready.</p>
+
+  <h3>Pipelines</h3>
+  <p>A <strong>pipeline</strong> is a chain of stages connected by channels, like an assembly line. Each stage is a function that takes an input channel and returns an output channel. It owns its output: it creates it, writes to it, and <strong>closes it when its input is exhausted</strong>. Closing ripples down the line, so the whole pipeline shuts down cleanly once the source runs out.</p>
+  <div class="live" data-title="Words flowing through a 3-stage pipeline">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Each stage: reads from 'in', writes to its own 'out', closes 'out' when done.
+
+func source(words []string) &lt;-chan string {
+	out := make(chan string)
+	go func() {
+		defer close(out)
+		for _, w := range words {
+			out &lt;- w
+		}
+	}()
+	return out
+}
+
+func filterShort(in &lt;-chan string, min int) &lt;-chan string {
+	out := make(chan string)
+	go func() {
+		defer close(out)
+		for w := range in {
+			if len(w) &gt;= min {
+				out &lt;- w
+			}
+		}
+	}()
+	return out
+}
+
+func upper(in &lt;-chan string) &lt;-chan string {
+	out := make(chan string)
+	go func() {
+		defer close(out)
+		for w := range in {
+			out &lt;- strings.ToUpper(w)
+		}
+	}()
+	return out
+}
+
+func main() {
+	words := []string{"go", "is", "simple", "and", "concurrent", "by", "design"}
+
+	// source -&gt; filterShort -&gt; upper -&gt; main
+	for w := range upper(filterShort(source(words), 3)) {
+		fmt.Println(w)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="49,10-18" data-state="stage=source">The innermost call runs first: <code>source(words)</code> makes an unbuffered channel, starts a goroutine, and returns the channel <strong>immediately</strong>. Nothing has been sent yet.</li>
+      <li data-lines="49,21-31" data-state="stage=filterShort; min=3"><code>filterShort</code> wires a second goroutine that ranges over source's channel. It returns its own <code>out</code>.</li>
+      <li data-lines="49,34-42" data-state="stage=upper">Then <code>upper</code> wires a third goroutine. Main now ranges over upper's output. Four goroutines, three channels, all connected.</li>
+      <li data-lines="15,25-26" data-state="w=go; len(w)=2">Source sends <code>"go"</code>. Unbuffered sends wait for a receiver, so this hands off directly to the filter. Length 2 &lt; 3: dropped.</li>
+      <li data-lines="15,25-26" data-state="w=is; len(w)=2"><code>"is"</code> is also too short and dropped.</li>
+      <li data-lines="27,39,50" data-state="w=SIMPLE" data-out="SIMPLE"><code>"simple"</code> passes the filter, <code>upper</code> turns it into <code>"SIMPLE"</code>, and main prints it. Each value is handed down one stage at a time.</li>
+      <li data-lines="27,39,50" data-state="w=AND" data-out="AND"><code>"and"</code> has length 3, which passes <code>&gt;= 3</code>.</li>
+      <li data-lines="27,39,50" data-state="w=CONCURRENT" data-out="CONCURRENT"><code>"concurrent"</code> flows through. Stages run concurrently: source may already be sending the next word.</li>
+      <li data-lines="26,27,39,50" data-state="w=DESIGN" data-out="DESIGN"><code>"by"</code> is dropped, and <code>"design"</code> makes it to main.</li>
+      <li data-lines="13,24,37,49" data-state="closed=source,filter,upper">Source runs out of words; its deferred <code>close(out)</code> ends filter's range, whose close ends upper's range, whose close ends main's loop. The shutdown ripples down the chain.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>SIMPLE
+AND
+CONCURRENT
+DESIGN</pre></div>
+  <p>Each stage runs concurrently: while <code>upper</code> is converting "simple", <code>filterShort</code> can already be checking "and". Stages compose like functions, and you can fan-out any slow stage.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: leaking pipeline goroutines</div><p>If <code>main</code> stops reading early (say, it only wanted the first result), every upstream stage blocks forever on its send. Those goroutines leak. Real pipelines pass a <code>context.Context</code> (next chapter) and each send becomes <code>select { case out &lt;- v: case &lt;-ctx.Done(): return }</code> so the consumer can tell everyone to stop.</p></div>
+
+  <h2>Pattern: limiting concurrency and rate</h2>
+  <h3>Bounded parallelism with a semaphore channel</h3>
+  <p>Sometimes you <em>do</em> want a goroutine per task (simple code), but you need to limit how many run at once — maybe the API you call allows only 3 concurrent requests. A buffered channel makes a perfect <strong>counting semaphore</strong>: its capacity is the number of slots. Sending takes a slot (and blocks when they're all taken); receiving gives one back.</p>
+  <div class="live" data-title="Capping concurrency at 3">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+func main() {
+	const maxInFlight = 3
+	sem := make(chan struct{}, maxInFlight) // a buffered channel = counting semaphore
+
+	var inFlight, peak atomic.Int32
+	var wg sync.WaitGroup
+
+	for range 10 {
+		wg.Go(func() {
+			sem &lt;- struct{}{}        // acquire: blocks when 3 are already running
+			defer func() { &lt;-sem }() // release
+
+			now := inFlight.Add(1)
+			for {
+				p := peak.Load()
+				if now &lt;= p || peak.CompareAndSwap(p, now) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond) // "call the API"
+			inFlight.Add(-1)
+		})
+	}
+	wg.Wait()
+	fmt.Println("tasks: 10, peak concurrency:", peak.Load())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11-12" data-state="len(sem)=0; cap(sem)=3">A buffered channel with capacity 3 acts as a counting semaphore: each value in the buffer is one "slot in use".</li>
+      <li data-lines="17-18" data-state="goroutines=10; len(sem)=0">The loop launches all 10 goroutines immediately. Starting them is cheap; the semaphore decides how many do real work.</li>
+      <li data-lines="19-20" data-state="len(sem)=3; blocked=7">Interleaving varies; this traces one representative run. Three goroutines manage to send into <code>sem</code>; the buffer is now full, so the other 7 <strong>block</strong> on line 19.</li>
+      <li data-lines="22-28" data-state="len(sem)=3; inFlight=3; peak=3">Each running goroutine bumps <code>inFlight</code> and uses a CAS loop to raise <code>peak</code> only if its value is higher. Peak reaches 3.</li>
+      <li data-lines="29-30" data-state="len(sem)=3; inFlight=0; peak=3">They "call the API" for 20ms, then decrement <code>inFlight</code>.</li>
+      <li data-lines="20" data-state="len(sem)=0; blocked=7">Each function returns and its deferred <code>&lt;-sem</code> frees a slot.</li>
+      <li data-lines="19,22" data-state="len(sem)=3; inFlight=3; peak=3; blocked=4">Three of the waiting goroutines grab the freed slots. <code>inFlight</code> never goes above 3, so <code>peak</code> stays 3.</li>
+      <li data-lines="19-30" data-state="len(sem)=0; inFlight=0; peak=3; blocked=0">The pattern repeats (3, then the last 1) until all 10 tasks are done.</li>
+      <li data-lines="33-34" data-state="peak=3" data-out="tasks: 10, peak concurrency: 3"><code>wg.Wait()</code> returns and we print the peak: never more than 3 at once.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>tasks: 10, peak concurrency: 3</pre></div>
+
+  <div class="live" data-title="A semaphore with 2 slots and 3 tasks">
+    <pre><code class="language-go">sem := make(chan struct{}, 2) // capacity 2 = 2 slots
+
+for i := range 3 {
+	wg.Go(func() {
+		sem &lt;- struct{}{}        // take a slot (blocks if none free)
+		defer func() { &lt;-sem }() // give it back
+		callAPI(i)
+	})
+}
+wg.Wait()</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="slots used=0/2">Buffered channel with capacity 2: two "slots".</li>
+      <li data-lines="3-4" data-state="slots used=0/2; goroutines=3">Three goroutines start (thanks to <code>wg.Go</code>).</li>
+      <li data-lines="5" data-state="slots used=1/2; running=[0]">Task 0 sends into <code>sem</code>: there's room, so it continues immediately.</li>
+      <li data-lines="5" data-state="slots used=2/2; running=[0 1]">Task 1 takes the second slot.</li>
+      <li data-lines="5" data-state="slots used=2/2; running=[0 1]; blocked=[2]">Task 2 tries to send — the buffer is full, so it <strong>blocks</strong>. Only 2 API calls happen at once.</li>
+      <li data-lines="7,6" data-state="slots used=1/2; running=[1]; blocked=[2]">Task 0 finishes <code>callAPI</code>; its deferred receive frees a slot.</li>
+      <li data-lines="5,7" data-state="slots used=2/2; running=[1 2]">Task 2's send now succeeds, and it runs.</li>
+      <li data-lines="10" data-state="slots used=0/2">All three finish and release their slots; <code>wg.Wait()</code> returns.</li>
+    </ol>
+  </div>
+
+  <div class="callout info"><p>Worker pool or semaphore? A worker pool keeps N long-lived goroutines and is great when there is per-worker setup (a DB connection, a buffer). A semaphore is simpler when tasks are independent. There's also <code>golang.org/x/sync/semaphore</code> for <em>weighted</em> semaphores (e.g., "this job uses 3 units of memory") with context support.</p></div>
+
+  <h3>Rate limiting with time.Ticker</h3>
+  <p>Bounded parallelism limits <em>how many at once</em>. Rate limiting limits <em>how many per second</em>. A <code>time.Ticker</code> delivers a value on its channel <code>C</code> at a regular interval; waiting on it before each request spaces requests out evenly. Pre-filling a buffered channel with tokens allows a short <strong>burst</strong> first — a tiny "token bucket".</p>
+  <div class="code" data-file="ratelimit/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	requests := []string{"r1", "r2", "r3", "r4", "r5"}
+
+	// Allow one request every 50ms (= 20 per second).
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop() // always stop tickers you create
+
+	start := time.Now()
+	for _, r := range requests {
+		&lt;-tick.C // wait for the next "token"
+		fmt.Printf("%-3s at +%3dms\n", r, time.Since(start).Round(10*time.Millisecond).Milliseconds())
+	}
+
+	// Bursty limiter: a buffered channel pre-filled with 3 tokens.
+	fmt.Println("-- bursty --")
+	tokens := make(chan struct{}, 3)
+	for range 3 {
+		tokens &lt;- struct{}{}
+	}
+	go func() {
+		t := time.NewTicker(50 * time.Millisecond)
+		defer t.Stop()
+		for range t.C {
+			select {
+			case tokens &lt;- struct{}{}:
+			default: // bucket full, drop the token
+			}
+		}
+	}()
+
+	start = time.Now()
+	for _, r := range requests {
+		&lt;-tokens
+		fmt.Printf("%-3s at +%3dms\n", r, time.Since(start).Round(10*time.Millisecond).Milliseconds())
+	}
+}</code></pre></div>
+  <div class="output" data-label="Output (timings rounded)"><pre>r1  at + 50ms
+r2  at +100ms
+r3  at +150ms
+r4  at +200ms
+r5  at +250ms
+-- bursty --
+r1  at +  0ms
+r2  at +  0ms
+r3  at +  0ms
+r4  at + 50ms
+r5  at +100ms</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>For production rate limiting use <code>golang.org/x/time/rate</code>. Its <code>rate.NewLimiter(r, burst)</code> is a proper token bucket with <code>Wait(ctx)</code> (respects cancellation), <code>Allow()</code> (non-blocking, good for HTTP 429 responses), and no background goroutine. Hand-rolled tickers are great for learning and for simple scripts. Remember to call <code>Stop()</code> on every ticker you create so its resources are released.</p></div>
+
+  <h2>Pattern: errgroup and graceful stop</h2>
+  <h3>errgroup — goroutines that can fail</h3>
+  <p>A <code>WaitGroup</code> waits, but it doesn't collect errors or stop siblings when one fails. The <code>errgroup</code> package (from the official extended library <code>golang.org/x/sync</code>) does both. Install it with <code>go get golang.org/x/sync</code> (this chapter used v0.24.0).</p>
+  <ul>
+    <li><code>g.Go(func() error)</code> starts a goroutine.</li>
+    <li><code>g.Wait()</code> waits for all of them and returns the <strong>first non-nil error</strong>.</li>
+    <li><code>errgroup.WithContext(ctx)</code> gives you a context that's <strong>cancelled as soon as any goroutine fails</strong>, so the others can stop early.</li>
+    <li><code>g.SetLimit(n)</code> caps how many goroutines run at once — <code>g.Go</code> blocks when the limit is reached. Bounded parallelism for free.</li>
+  </ul>
+  <div class="live" data-title="errgroup: limit 2, first error cancels the rest">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func fetch(ctx context.Context, url string) (int, error) {
+	select {
+	case &lt;-time.After(20 * time.Millisecond): // simulated network call
+	case &lt;-ctx.Done():
+		return 0, ctx.Err() // stop early if a sibling already failed
+	}
+	if url == "https://bad.example" {
+		return 0, fmt.Errorf("fetch %s: 503 service unavailable", url)
+	}
+	return len(url), nil
+}
+
+func main() {
+	urls := []string{
+		"https://a.example",
+		"https://b.example",
+		"https://bad.example",
+		"https://c.example",
+		"https://d.example",
+	}
+
+	g, ctx := errgroup.WithContext(context.Background())
+	g.SetLimit(2) // at most 2 goroutines running at once
+
+	sizes := make([]int, len(urls))
+	for i, url := range urls {
+		g.Go(func() error {
+			n, err := fetch(ctx, url)
+			if err != nil {
+				return err
+			}
+			sizes[i] = n // each goroutine owns its own index
+			return nil
+		})
+	}
+
+	// Wait blocks until all goroutines return, then gives the FIRST error.
+	if err := g.Wait(); err != nil {
+		fmt.Println("error:", err)
+	}
+	fmt.Println("sizes:", sizes)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="32-33" data-state="limit=2; ctx=live"><code>WithContext</code> returns a group and a <code>ctx</code> that is cancelled as soon as any goroutine returns an error. <code>SetLimit(2)</code> caps concurrency.</li>
+      <li data-lines="36-37" data-state="running=[a b]; sizes=[0 0 0 0 0]">Timing varies; this traces the run shown below. <code>g.Go</code> for a and b start right away. For the third URL, <code>g.Go</code> itself <strong>blocks</strong> main until a slot frees.</li>
+      <li data-lines="38,12-13,20" data-state="running=[a b]; sizes=[17 17 0 0 0]">After 20ms both fetches return <code>len(url)</code> = 17 and store it in their own index.</li>
+      <li data-lines="36-37" data-state="running=[bad c]">Two slots freed, so main launches <code>bad</code> and <code>c</code>.</li>
+      <li data-lines="17-18,40" data-state="running=[c]; ctx=cancelled"><code>bad</code> waits 20ms then returns an error. errgroup records it as the first error and <strong>cancels ctx</strong>.</li>
+      <li data-lines="13,20,42" data-state="sizes=[17 17 0 17 0]"><code>c</code>'s timer fired at about the same moment, so its select took the <code>time.After</code> case and it stored 17.</li>
+      <li data-lines="37,14-15" data-state="running=[d]; ctx=cancelled; sizes=[17 17 0 17 0]">Main launches <code>d</code>. Its select sees <code>ctx.Done()</code> already closed and returns <code>context.Canceled</code> immediately, so its slot stays 0.</li>
+      <li data-lines="48-49" data-state="err=fetch https://bad.example: 503 ..." data-out="error: fetch https://bad.example: 503 service unavailable"><code>Wait</code> returns only the <strong>first</strong> error. d's "context canceled" is discarded.</li>
+      <li data-lines="51" data-state="sizes=[17 17 0 17 0]" data-out="sizes: [17 17 0 17 0]">The slice shows which fetches finished. Use <code>ctx</code> inside each task so siblings stop early after a failure.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>error: fetch https://bad.example: 503 service unavailable
+sizes: [17 17 0 17 0]</pre></div>
+  <p>Let's read the result: with a limit of 2, <code>a</code> and <code>b</code> ran first and succeeded (17 bytes each). Then <code>bad</code> and <code>c</code> ran together; <code>bad</code> failed, which cancelled <code>ctx</code>. <code>c</code> had already finished its 20ms wait at the same moment and stored its size; <code>d</code> started after the cancel and returned <code>context.Canceled</code> right away, so its slot stayed 0. <code>Wait</code> returned only the <em>first</em> error. (The exact pattern depends on timing; this one was stable across our runs.)</p>
+  <p>Without a context, the zero-value <code>errgroup.Group</code> is a WaitGroup that also collects errors:</p>
+  <div class="live" data-title="errgroup.Group without a context">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func main() {
+	var g errgroup.Group // zero value: no context, no limit
+	results := make([]string, 3)
+
+	for i, name := range []string{"users", "orders", "invoices"} {
+		g.Go(func() error {
+			results[i] = "loaded " + name
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	for _, r := range results {
+		fmt.Println(r)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-11" data-state="results=[&quot;&quot; &quot;&quot; &quot;&quot;]">A zero-value <code>errgroup.Group</code> works like a WaitGroup that also collects errors.</li>
+      <li data-lines="13-14" data-state="i=0; name=users; running=1"><code>g.Go</code> starts a goroutine for <code>users</code>. Each iteration has its own <code>i</code> and <code>name</code> (Go 1.22+).</li>
+      <li data-lines="13-14" data-state="i=2; name=invoices; running=3">The loop finishes quickly: three goroutines are now running in some order.</li>
+      <li data-lines="15-16" data-state="results=[loaded users, loaded orders, loaded invoices]">Each writes its own index and returns <code>nil</code>. The order they ran in does not matter: results land in fixed slots.</li>
+      <li data-lines="20" data-state="err=nil"><code>Wait</code> blocks until all three return. No one failed, so it returns <code>nil</code> and we skip the error branch.</li>
+      <li data-lines="24-25" data-state="r=loaded users" data-out="loaded users">Back on main, we range over results in index order.</li>
+      <li data-lines="24-25" data-state="r=loaded orders" data-out="loaded orders">Second entry.</li>
+      <li data-lines="24-25" data-state="r=loaded invoices" data-out="loaded invoices">Third entry. Output order is deterministic even though execution order was not.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>loaded users
+loaded orders
+loaded invoices</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p><code>errgroup.WithContext</code> + <code>SetLimit</code> is the default answer to "fetch these N things concurrently, but not too many at once, and give up if any fails." It replaces a page of WaitGroup + mutex + error-channel code. One subtlety: the derived <code>ctx</code> is cancelled when <code>Wait</code> returns too, so don't keep using it afterwards.</p></div>
+
+  <h3>Graceful stop</h3>
+  <p>Long-running goroutines (background jobs, consumers, tickers) need a way to be told "please stop", and the owner needs a way to know "they have stopped." The classic recipe: a <code>quit</code> channel that you <strong>close</strong> (closing is a broadcast — every receiver wakes up) plus a <code>WaitGroup</code> to wait for cleanup.</p>
+  <div class="code" data-file="graceful/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type Worker struct {
+	quit chan struct{}
+	wg   sync.WaitGroup
+}
+
+func NewWorker() *Worker {
+	return &amp;Worker{quit: make(chan struct{})}
+}
+
+func (w *Worker) Start(n int) {
+	for id := 1; id &lt;= n; id++ {
+		w.wg.Go(func() {
+			tick := time.NewTicker(15 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case &lt;-tick.C:
+					// do one unit of work
+				case &lt;-w.quit:
+					fmt.Printf("worker %d: cleaning up\n", id)
+					return
+				}
+			}
+		})
+	}
+}
+
+// Stop signals every worker (close = broadcast) and waits for them to finish.
+func (w *Worker) Stop() {
+	close(w.quit)
+	w.wg.Wait()
+}
+
+func main() {
+	w := NewWorker()
+	w.Start(3)
+	time.Sleep(50 * time.Millisecond)
+
+	fmt.Println("main: stopping")
+	w.Stop()
+	fmt.Println("main: all workers stopped")
+}</code></pre></div>
+  <div class="output" data-label="Output (worker order varies)"><pre>main: stopping
+worker 1: cleaning up
+worker 3: cleaning up
+worker 2: cleaning up
+main: all workers stopped</pre></div>
+  <div class="callout tip"><p>In modern code, the <code>quit</code> channel is usually replaced by a <code>context.Context</code>: <code>case &lt;-ctx.Done():</code>. It's the same idea, standardised across every library. That's exactly what the next chapter is about.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">You need to call a payment API for 500 orders, at most 10 at a time, and stop everything if any call fails. What's the most idiomatic tool?</div>
+    <div class="quiz-opts"><button>500 goroutines and a sync.WaitGroup</button><button>errgroup.WithContext with g.SetLimit(10)</button><button>A sync.Map of order IDs to errors</button><button>sync.Cond with Broadcast on failure</button></div>
+    <div class="quiz-explain"><code>errgroup.WithContext</code> cancels the shared context on the first error, <code>SetLimit(10)</code> bounds concurrency, and <code>Wait</code> returns the first error. A WaitGroup alone neither limits concurrency nor reports errors.</div>
+  </div>
+
+  <h2>Channels or mutexes? Choosing the right tool</h2>
+  <p>Both are correct tools; the question is which makes the code clearer. A rule of thumb: <strong>channels for passing ownership of data and coordinating work; mutexes for protecting state that lives in one place.</strong></p>
+  <table>
+    <thead><tr><th>Situation</th><th>Reach for</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>A counter / gauge / flag</td><td><code>atomic.Int64</code>, <code>atomic.Bool</code></td><td>Single value, fastest, simplest</td></tr>
+      <tr><td>A struct or map shared by many goroutines (cache, registry)</td><td><code>sync.Mutex</code> / <code>RWMutex</code></td><td>State stays in one place; methods hide the locking</td></tr>
+      <tr><td>Handing work items from producers to consumers</td><td>Channel</td><td>Ownership of each item moves with it</td></tr>
+      <tr><td>Waiting for N goroutines to finish</td><td><code>sync.WaitGroup</code> / <code>wg.Go</code></td><td>Built for exactly that</td></tr>
+      <tr><td>N goroutines that may fail; stop on first error</td><td><code>errgroup</code></td><td>Error collection + cancellation + limit</td></tr>
+      <tr><td>Signalling "stop" or "done" to many goroutines</td><td><code>close(ch)</code> or <code>context</code></td><td>Close is a broadcast</td></tr>
+      <tr><td>Timeouts, "whichever happens first"</td><td>Channels + <code>select</code></td><td>Mutexes can't time out</td></tr>
+      <tr><td>Lazy one-time initialisation</td><td><code>sync.OnceValue</code></td><td>Race-free and concise</td></tr>
+      <tr><td>Limit concurrency to N</td><td>Buffered channel semaphore, <code>SetLimit</code>, or a worker pool</td><td>Simple and composable</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A <strong>mutex</strong> is a lock on a room: the data stays put and people take turns going in. A <strong>channel</strong> is a conveyor belt: the data moves, and whoever holds it is the only one using it. If you find yourself building a "manager goroutine" just to guard a map with request/response channels, a mutex is probably simpler. If you find yourself juggling a mutex, a slice and a "ready" flag to pass work around, a channel is probably simpler.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Every goroutine you start should have an answer to "<strong>how does it stop?</strong>" before you write the <code>go</code> keyword. Goroutine leaks are the most common concurrency bug in production Go: they slowly eat memory until the service restarts. Expose stop mechanisms (context, close, <code>Stop()</code>), wait for shutdown (WaitGroup), and check <code>runtime.NumGoroutine()</code> or a pprof goroutine profile when memory creeps up.</p></div>
+
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1 — Fix the racy word counter</summary>
+    <p>This code counts words from several "documents" concurrently but has a data race on the map (and would crash with <code>concurrent map writes</code> under load). Fix it with a mutex inside a small type with an <code>Add(word)</code> method and a <code>Get(word)</code> method, and use <code>wg.Go</code>. Verify with <code>go run -race</code>.</p>
+    <div class="code" data-file="starter.go"><pre><code class="language-go">counts := map[string]int{}
+var wg sync.WaitGroup
+for _, doc := range docs {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, w := range strings.Fields(doc) {
+			counts[w]++ // RACE
+		}
+	}()
+}
+wg.Wait()</code></pre></div>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="solution.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+)
+
+type WordCount struct {
+	mu     sync.Mutex
+	counts map[string]int // guarded by mu
+}
+
+func NewWordCount() *WordCount {
+	return &amp;WordCount{counts: make(map[string]int)}
+}
+
+func (wc *WordCount) Add(word string) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	wc.counts[word]++
+}
+
+func (wc *WordCount) Get(word string) int {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.counts[word]
+}
+
+func main() {
+	docs := []string{
+		"go is fun and go is fast",
+		"channels and mutexes",
+		"go go go",
+	}
+
+	wc := NewWordCount()
+	var wg sync.WaitGroup
+	for _, doc := range docs {
+		wg.Go(func() {
+			for _, w := range strings.Fields(doc) {
+				wc.Add(w)
+			}
+		})
+	}
+	wg.Wait()
+
+	fmt.Println("go:", wc.Get("go"), "and:", wc.Get("and"), "is:", wc.Get("is"))
+}</code></pre></div>
+    <div class="output" data-label="go run -race (no race reported)"><pre>go: 5 and: 2 is: 2</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2 — Parallel checksum with errgroup and a limit</summary>
+    <p>Given a list of strings, compute the SHA-256 of each concurrently with at most 2 goroutines in flight. If any input is empty, return an error <code>"item N is empty"</code> and stop. Print the first 8 hex chars of each hash in input order.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="solution.go"><pre><code class="language-go">package main
+
+import (
+	"crypto/sha256"
+	"fmt"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func checksums(items []string) ([]string, error) {
+	var g errgroup.Group
+	g.SetLimit(2)
+
+	out := make([]string, len(items))
+	for i, item := range items {
+		g.Go(func() error {
+			if item == "" {
+				return fmt.Errorf("item %d is empty", i)
+			}
+			sum := sha256.Sum256([]byte(item))
+			out[i] = fmt.Sprintf("%x", sum[:4])
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func main() {
+	sums, err := checksums([]string{"alpha", "beta", "gamma"})
+	fmt.Println(sums, err)
+
+	sums, err = checksums([]string{"alpha", "", "gamma"})
+	fmt.Println(sums, err)
+}</code></pre></div>
+    <div class="output"><pre>[8ed3f6ad f44e64e7 be9d587d] &lt;nil&gt;
+[] item 1 is empty</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3 — A stoppable ticker job</summary>
+    <p>Write a <code>Heartbeat</code> type with <code>Start()</code> and <code>Stop()</code>. While running it increments an <code>atomic.Int64</code> every 10ms. <code>Stop()</code> must be safe to call twice (hint: <code>sync.OnceFunc</code>) and must wait until the goroutine has exited.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="solution.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+type Heartbeat struct {
+	beats atomic.Int64
+	quit  chan struct{}
+	wg    sync.WaitGroup
+	Stop  func()
+}
+
+func NewHeartbeat() *Heartbeat {
+	h := &amp;Heartbeat{quit: make(chan struct{})}
+	h.Stop = sync.OnceFunc(func() {
+		close(h.quit) // only ever closed once
+		h.wg.Wait()
+	})
+	return h
+}
+
+func (h *Heartbeat) Start() {
+	h.wg.Go(func() {
+		t := time.NewTicker(10 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case &lt;-t.C:
+				h.beats.Add(1)
+			case &lt;-h.quit:
+				return
+			}
+		}
+	})
+}
+
+func main() {
+	h := NewHeartbeat()
+	h.Start()
+	time.Sleep(55 * time.Millisecond)
+	h.Stop()
+	h.Stop() // second call is a no-op, no "close of closed channel" panic
+	fmt.Println("beats:", h.beats.Load())
+}</code></pre></div>
+    <div class="output" data-label="Output (beat count varies slightly)"><pre>beats: 5</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>A data race = two goroutines, same memory, at least one write, no synchronization. Results are undefined. Find them with <code>-race</code>; run it in CI.</li>
+      <li><code>sync.WaitGroup</code> waits for goroutines. <code>Add</code> before <code>go</code>, or simply use <code>wg.Go</code> (Go 1.25+).</li>
+      <li>Guard shared state with a <code>Mutex</code> inside the struct, <code>defer Unlock()</code>, pointer receivers. <code>go vet</code> catches copied locks. Mutexes aren't re-entrant.</li>
+      <li><code>RWMutex</code> only pays off for read-heavy workloads with non-trivial reads — benchmark first.</li>
+      <li><code>sync.Once</code>, <code>OnceFunc</code>, <code>OnceValue(s)</code> make lazy initialisation race-free; they don't retry failures.</li>
+      <li>Typed atomics (<code>atomic.Int64</code>, <code>atomic.Bool</code>, <code>atomic.Pointer[T]</code>) are for single independent values.</li>
+      <li><code>sync.Map</code> and <code>sync.Cond</code> are specialised; prefer <code>map + Mutex</code> and channels.</li>
+      <li>Core patterns: worker pool, fan-out/fan-in, pipeline (each stage closes its output), semaphore channel, ticker rate limit, errgroup with <code>SetLimit</code>, close-to-broadcast graceful stop.</li>
+      <li>Channels move data and coordinate; mutexes protect data that stays put. Every goroutine needs a clear way to stop.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

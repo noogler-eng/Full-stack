@@ -1,0 +1,1878 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 15 · Testing &amp; Benchmarking — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="15">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part V · Chapter 15</div>
+  <h1>Testing &amp; Benchmarking</h1>
+  <p class="lead">Go ships a complete testing toolkit in the box: a test runner, subtests, parallelism, HTTP test servers, documentation examples that are checked by the compiler, benchmarks, a fuzzer, coverage, a race detector and even a fake clock. No frameworks to choose, no config files. In this chapter we build real packages and run every one of these tools against them.</p>
+  <div class="meta">
+    <span class="pill">⏱ 50 min read</span>
+    <span class="pill">◆ Beginner → Advanced</span>
+    <span class="pill">▶ 13 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>How <code>go test</code> finds and runs <code>_test.go</code> files, and how to read its output</li>
+      <li><code>t.Error</code> vs <code>t.Fatal</code>, table-driven tests and subtests with <code>t.Run</code></li>
+      <li>Test helpers: <code>t.Helper</code>, <code>t.Cleanup</code>, <code>t.TempDir</code>, <code>t.Parallel</code>, <code>t.Context</code> (1.24)</li>
+      <li>Fixtures in <code>testdata/</code> and golden files with an <code>-update</code> flag</li>
+      <li>Replacing dependencies with interfaces and hand-written fakes</li>
+      <li>Testing HTTP code with <code>httptest.NewRecorder</code> and <code>httptest.NewServer</code></li>
+      <li>Example tests that appear in your docs and are verified by <code>go test</code></li>
+      <li>Benchmarks with <code>b.Loop</code> (1.24) and <code>-benchmem</code>; fuzzing that finds real bugs</li>
+      <li>Coverage, the race detector in tests, <code>testing/synctest</code>, external test packages and <code>TestMain</code></li>
+    </ul>
+  </div>
+
+  <h2>go test basics</h2>
+  <p>Why do tests matter so much in Go? Because Go code tends to live a long time in production, gets changed by many people, and runs concurrently. Tests are how you change code without fear. Go makes writing them so cheap that there's no excuse not to.</p>
+  <p>The rules are simple:</p>
+  <ul>
+    <li>Tests live in files ending in <strong><code>_test.go</code></strong>, next to the code they test. The normal build ignores these files; only <code>go test</code> compiles them.</li>
+    <li>A test is a function named <strong><code>TestXxx(t *testing.T)</code></strong> — it must start with <code>Test</code> followed by a capital letter (or nothing).</li>
+    <li>You report failures through <code>t</code>. If a test returns without reporting a failure, it passes. There are no assertion keywords — just <code>if</code> statements.</li>
+  </ul>
+  <p>Here's the package we'll test throughout the chapter, <code>textkit</code>, with a few small text helpers:</p>
+  <div class="code" data-file="textkit/textkit.go"><pre><code class="language-go">// Package textkit has small text helpers used to demonstrate Go testing.
+package textkit
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"unicode"
+)
+
+// Slugify turns a title into a URL-friendly slug: "Hello, World!" -&gt; "hello-world".
+func Slugify(title string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(title) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			dash = false
+		case !dash &amp;&amp; b.Len() &gt; 0:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
+}
+
+// WordFreq counts words case-insensitively, ignoring punctuation.
+func WordFreq(text string) map[string]int {
+	freq := make(map[string]int)
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) &amp;&amp; !unicode.IsDigit(r) &amp;&amp; r != '\''
+	})
+	for _, w := range words {
+		freq[w]++
+	}
+	return freq
+}
+
+// Truncate shortens s to at most n runes, adding "…" if it cut anything.
+func Truncate(s string, n int) (string, error) {
+	if n &lt; 1 {
+		return "", fmt.Errorf("truncate: n must be &gt;= 1, got %d", n)
+	}
+	r := []rune(s)
+	if len(r) &lt;= n {
+		return s, nil
+	}
+	return string(r[:n-1]) + "…", nil
+}
+
+// Report renders word counts as an aligned, sorted table.
+func Report(freq map[string]int) string {
+	words := make([]string, 0, len(freq))
+	for w := range freq {
+		words = append(words, w)
+	}
+	sort.Slice(words, func(i, j int) bool {
+		if freq[words[i]] != freq[words[j]] {
+			return freq[words[i]] &gt; freq[words[j]]
+		}
+		return words[i] &lt; words[j]
+	})
+	var b strings.Builder
+	fmt.Fprintf(&amp;b, "%-10s %5s\n", "WORD", "COUNT")
+	for _, w := range words {
+		fmt.Fprintf(&amp;b, "%-10s %5d\n", w, freq[w])
+	}
+	return b.String()
+}
+
+// SaveLines writes lines to path, one per line.
+func SaveLines(path string, lines []string) error {
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// LoadLines reads a file written by SaveLines.
+func LoadLines(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), nil
+}
+
+// JoinPlus concatenates with + (allocates a new string every time).
+func JoinPlus(parts []string) string {
+	s := ""
+	for _, p := range parts {
+		s += p
+	}
+	return s
+}
+
+// JoinBuilder concatenates with a pre-sized strings.Builder.
+func JoinBuilder(parts []string) string {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for _, p := range parts {
+		b.WriteString(p)
+	}
+	return b.String()
+}</code></pre></div>
+  <p>And the simplest possible test:</p>
+  <div class="live" data-title="Your first test, run by go test">
+    <pre><code class="language-go">package textkit
+
+import "testing"
+
+func TestSlugifyBasic(t *testing.T) {
+	got := Slugify("Hello, World!")
+	want := "hello-world"
+	if got != want {
+		t.Errorf("Slugify(%q) = %q, want %q", "Hello, World!", got, want)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1,3" data-state="package=textkit" data-out="$ go test -run TestSlugifyBasic -v ./textkit">The file ends in <code>_test.go</code> and sits in the same package, so it can see unexported names. <code>go test</code> compiles it into a temporary test binary; <code>-run</code> selects tests by regex.</li>
+      <li data-lines="5" data-state="test=TestSlugifyBasic; failed=false" data-out="=== RUN   TestSlugifyBasic">The runner finds every <code>func TestXxx(t *testing.T)</code> and calls it with a fresh <code>*testing.T</code>. <code>-v</code> prints a RUN line for each.</li>
+      <li data-lines="6" data-state="got=hello-world">We call the code under test. <code>Slugify</code> lowercases, drops the punctuation and joins words with a dash.</li>
+      <li data-lines="7" data-state="got=hello-world; want=hello-world">The expected value, named <code>want</code> by convention.</li>
+      <li data-lines="8-10" data-state="got=hello-world; match=true; failed=false">They match, so <code>t.Errorf</code> is never called. A test with no failures <strong>passes</strong>; there is no "assert true" step.</li>
+      <li data-lines="11" data-state="failed=false" data-out="--- PASS: TestSlugifyBasic (0.00s)">The function returns. The runner records a PASS and the time taken.</li>
+      <li data-lines="11" data-state="all tests=passed" data-out="PASS\nok  &#9;example.com/ch15/textkit&#9;0.129s">Every selected test passed, so the binary prints <code>PASS</code> and <code>go test</code> prints the <code>ok</code> line with the package and total time.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>$ go test -run TestSlugifyBasic -v ./textkit
+=== RUN   TestSlugifyBasic
+--- PASS: TestSlugifyBasic (0.00s)
+PASS
+ok  	example.com/ch15/textkit	0.129s</pre></div>
+  <p>The <strong>got/want</strong> naming and the message format <code>Func(input) = got, want want</code> are Go conventions. When a test fails at 2 a.m. in CI, a message like that tells you everything without opening the file.</p>
+
+  <h3>The commands you'll use every day</h3>
+  <table>
+    <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>go test</code></td><td>Test the package in the current directory</td></tr>
+      <tr><td><code>go test ./...</code></td><td>Test every package in the module</td></tr>
+      <tr><td><code>go test -v</code></td><td>Verbose: show each test, <code>t.Log</code> output, subtests</td></tr>
+      <tr><td><code>go test -run 'Slug|Trunc/cut'</code></td><td>Only tests whose name matches the regex (one regex per <code>/</code> level)</td></tr>
+      <tr><td><code>go test -count=1</code></td><td>Bypass the test cache (Go caches passing results of unchanged packages)</td></tr>
+      <tr><td><code>go test -race</code></td><td>Run with the race detector</td></tr>
+      <tr><td><code>go test -cover</code></td><td>Report statement coverage</td></tr>
+      <tr><td><code>go test -bench=. -benchmem</code></td><td>Run benchmarks with memory stats</td></tr>
+      <tr><td><code>go test -fuzz=FuzzXxx</code></td><td>Run the fuzzer on one fuzz target</td></tr>
+      <tr><td><code>go test -shuffle=on</code></td><td>Randomise test order to catch hidden dependencies between tests</td></tr>
+      <tr><td><code>go test -failfast</code></td><td>Stop after the first failing test</td></tr>
+    </tbody>
+  </table>
+  <div class="output" data-label="Testing several packages at once"><pre>$ go test ./textkit ./users ./reverse ./cache
+ok  	example.com/ch15/textkit	0.132s
+ok  	example.com/ch15/users	0.175s
+ok  	example.com/ch15/reverse	0.420s
+ok  	example.com/ch15/cache	0.129s</pre></div>
+
+  <h2>t.Error vs t.Fatal</h2>
+  <p>There are two families of failure methods, and the difference is whether the test <em>keeps going</em>:</p>
+  <ul>
+    <li><strong><code>t.Error</code> / <code>t.Errorf</code></strong> — mark the test failed, log the message, <strong>continue</strong>. Use it when later checks are still meaningful, so one run shows you every problem.</li>
+    <li><strong><code>t.Fatal</code> / <code>t.Fatalf</code></strong> — mark failed, log, and <strong>stop this test immediately</strong> (it calls <code>runtime.Goexit</code>). Use it when continuing makes no sense: setup failed, or a nil value would make the next line panic.</li>
+    <li><code>t.Log</code> / <code>t.Logf</code> — just log (shown with <code>-v</code> or when the test fails). <code>t.Skip</code> marks the test skipped.</li>
+  </ul>
+  <p>Here's a package with two bugs, and tests showing both styles:</p>
+  <div class="code" data-file="demo/failing/calc.go"><pre><code class="language-go">package failing
+
+func Add(a, b int) int { return a + b + 1 } // oops: off by one
+
+type User struct{ Name string }
+
+func Find(id int) *User { return nil } // bug: never finds anyone</code></pre></div>
+  <div class="live" data-title="t.Errorf keeps going, t.Fatal stops">
+    <pre><code class="language-go">package failing
+
+import "testing"
+
+func TestAddError(t *testing.T) {
+	// t.Error: report and KEEP GOING, so we see every bad case at once.
+	if got := Add(1, 2); got != 3 {
+		t.Errorf("Add(1, 2) = %d, want 3", got)
+	}
+	if got := Add(0, 0); got != 0 {
+		t.Errorf("Add(0, 0) = %d, want 0", got)
+	}
+	t.Log("still running after two t.Errorf calls")
+}
+
+func TestFindFatal(t *testing.T) {
+	u := Find(1)
+	if u == nil {
+		// t.Fatal: report and STOP this test, because the next line would panic.
+		t.Fatal("Find(1) returned nil")
+	}
+	t.Log("never printed")
+	if u.Name != "ana" {
+		t.Errorf("name = %q", u.Name)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5" data-state="test=TestAddError; failed=false" data-out="$ go test -v ./demo/failing\n=== RUN   TestAddError">Tests run in source order. First up: <code>TestAddError</code>.</li>
+      <li data-lines="7-8" data-state="got=4; failed=true" data-out="    calc_test.go:8: Add(1, 2) = 4, want 3">The buggy <code>Add</code> returns 4. <code>t.Errorf</code> logs the message with file:line and marks the test failed, but execution <strong>continues</strong>.</li>
+      <li data-lines="10-11" data-state="got=1; failed=true" data-out="    calc_test.go:11: Add(0, 0) = 1, want 0">So the second check also runs and reports. One run shows you every broken case.</li>
+      <li data-lines="13" data-state="failed=true" data-out="    calc_test.go:13: still running after two t.Errorf calls"><code>t.Log</code> proves we're still running. (Without <code>-v</code>, logs only show for failing tests.)</li>
+      <li data-lines="14" data-state="failed=true" data-out="--- FAIL: TestAddError (0.00s)">The function returns and the runner reports FAIL.</li>
+      <li data-lines="16-17" data-state="test=TestFindFatal; u=nil" data-out="=== RUN   TestFindFatal">Next test. <code>Find</code> is buggy and returns <code>nil</code>.</li>
+      <li data-lines="18-20" data-state="u=nil; failed=true" data-out="    calc_test.go:20: Find(1) returned nil"><code>t.Fatal</code> logs, marks failed and <strong>stops this test</strong> immediately. Continuing would dereference a nil pointer on line 23.</li>
+      <li data-lines="22-25" data-state="u=nil; failed=true" data-out="--- FAIL: TestFindFatal (0.00s)">Lines 22-25 never run, so "never printed" really is never printed. Only this test stopped; others would still run.</li>
+      <li data-lines="26" data-state="failed tests=2" data-out="FAIL\nFAIL&#9;example.com/ch15/demo/failing&#9;0.493s\nFAIL">The package fails, and <code>go test</code> exits non-zero, which is what makes CI go red.</li>
+    </ol>
+  </div>
+  <div class="output error" data-label="Test failures (real output)"><pre>$ go test -v ./demo/failing
+=== RUN   TestAddError
+    calc_test.go:8: Add(1, 2) = 4, want 3
+    calc_test.go:11: Add(0, 0) = 1, want 0
+    calc_test.go:13: still running after two t.Errorf calls
+--- FAIL: TestAddError (0.00s)
+=== RUN   TestFindFatal
+    calc_test.go:20: Find(1) returned nil
+--- FAIL: TestFindFatal (0.00s)
+FAIL
+FAIL	example.com/ch15/demo/failing	0.493s
+FAIL</pre></div>
+
+  <div class="live" data-title="t.Fatal stops the test">
+    <pre><code class="language-go">func TestFindFatal(t *testing.T) {
+	u := Find(1)
+	if u == nil {
+		t.Fatal("Find(1) returned nil")
+	}
+	t.Log("never printed")
+	if u.Name != "ana" {
+		t.Errorf("name = %q", u.Name)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="test=running; failed=false">The test runner calls our function in its own goroutine with a fresh <code>*testing.T</code>.</li>
+      <li data-lines="2" data-state="u=nil; failed=false">The buggy <code>Find</code> returns <code>nil</code>.</li>
+      <li data-lines="3-4" data-state="u=nil; failed=true; test=stopping" data-out="calc_test.go:20: Find(1) returned nil"><code>t.Fatal</code> logs the message (with file:line), marks the test failed, and calls <code>runtime.Goexit()</code>: the test goroutine ends right here. Deferred functions and cleanups still run.</li>
+      <li data-lines="6-9" data-state="u=nil; failed=true; test=stopped">These lines never execute. Good thing: <code>u.Name</code> on a nil pointer would have panicked and buried the real message.</li>
+      <li data-lines="10" data-state="result=FAIL" data-out="--- FAIL: TestFindFatal (0.00s)">The runner records the failure and moves on to the next test.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: t.Fatal from another goroutine</div><p><code>t.Fatal</code>, <code>t.FailNow</code> and <code>t.Skip</code> must be called from the <strong>test's own goroutine</strong>. Called from a goroutine you started, they only stop <em>that</em> goroutine, and the test keeps running. In spawned goroutines, use <code>t.Error</code> (which is safe from any goroutine) or send the error back over a channel. <code>go vet</code>'s <code>testinggoroutine</code> check flags this mistake.</p></div>
+
+  <h2>Table-driven tests and subtests</h2>
+  <p>Writing one function per case gets repetitive fast. The idiomatic Go style is a <strong>table-driven test</strong>: a slice of anonymous structs, one per case, and one loop that runs them. Adding a case becomes a one-line change. Wrap each case in <strong><code>t.Run(name, func)</code></strong> to make it a <strong>subtest</strong>: it gets its own name in the output, its own pass/fail, and can be run on its own.</p>
+  <div class="code" data-file="textkit/textkit_test.go"><pre><code class="language-go">package textkit
+
+import (
+	"maps"
+	"testing"
+)
+
+// The simplest possible test: one input, one expected output.
+func TestSlugifyBasic(t *testing.T) {
+	got := Slugify("Hello, World!")
+	want := "hello-world"
+	if got != want {
+		t.Errorf("Slugify(%q) = %q, want %q", "Hello, World!", got, want)
+	}
+}
+
+// Table-driven test with subtests: the idiomatic Go style.
+func TestSlugify(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple", "Hello World", "hello-world"},
+		{"punctuation", "Go: 1.27 is out!", "go-1-27-is-out"},
+		{"extra spaces", "  lots   of   space  ", "lots-of-space"},
+		{"unicode", "Crème Brûlée", "crème-brûlée"},
+		{"empty", "", ""},
+		{"only symbols", "!!!", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Slugify(tt.input); got != tt.want {
+				t.Errorf("Slugify(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWordFreq(t *testing.T) {
+	got := WordFreq("The cat and the hat. THE END")
+	want := map[string]int{"the": 3, "cat": 1, "and": 1, "hat": 1, "end": 1}
+	if !maps.Equal(got, want) {
+		t.Errorf("WordFreq() = %v, want %v", got, want)
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name    string
+		s       string
+		n       int
+		want    string
+		wantErr bool
+	}{
+		{"short enough", "go", 5, "go", false},
+		{"exact", "gopher", 6, "gopher", false},
+		{"cut", "gopher", 4, "gop…", false},
+		{"runes not bytes", "héllo wörld", 5, "héll…", false},
+		{"invalid n", "x", 0, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Truncate(tt.s, tt.n)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Truncate(%q, %d) error = %v, wantErr %v", tt.s, tt.n, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("Truncate(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
+			}
+		})
+	}
+}</code></pre></div>
+  <div class="output" data-label="go test -v ./textkit (real output, excerpt)"><pre>=== RUN   TestSlugify
+=== RUN   TestSlugify/simple
+=== RUN   TestSlugify/punctuation
+=== RUN   TestSlugify/extra_spaces
+=== RUN   TestSlugify/unicode
+=== RUN   TestSlugify/empty
+=== RUN   TestSlugify/only_symbols
+--- PASS: TestSlugify (0.00s)
+    --- PASS: TestSlugify/simple (0.00s)
+    --- PASS: TestSlugify/punctuation (0.00s)
+    --- PASS: TestSlugify/extra_spaces (0.00s)
+    --- PASS: TestSlugify/unicode (0.00s)
+    --- PASS: TestSlugify/empty (0.00s)
+    --- PASS: TestSlugify/only_symbols (0.00s)
+=== RUN   TestWordFreq
+--- PASS: TestWordFreq (0.00s)
+=== RUN   TestTruncate
+=== RUN   TestTruncate/short_enough
+=== RUN   TestTruncate/exact
+=== RUN   TestTruncate/cut
+=== RUN   TestTruncate/runes_not_bytes
+=== RUN   TestTruncate/invalid_n
+--- PASS: TestTruncate (0.00s)
+    --- PASS: TestTruncate/short_enough (0.00s)
+    --- PASS: TestTruncate/exact (0.00s)
+    --- PASS: TestTruncate/cut (0.00s)
+    --- PASS: TestTruncate/runes_not_bytes (0.00s)
+    --- PASS: TestTruncate/invalid_n (0.00s)
+PASS
+ok  	example.com/ch15/textkit	0.177s</pre></div>
+  <p>Spaces in subtest names become underscores. You can run a single case with <code>-run</code>; the pattern is split on <code>/</code> and each part is an <em>unanchored</em> regex for that level. That's why <code>TestSlugifyBasic</code> also matched below — "TestSlugify" is a substring of it:</p>
+  <div class="output"><pre>$ go test -run "TestSlugify/unicode|TestTruncate/cut" -v ./textkit
+=== RUN   TestSlugifyBasic
+--- PASS: TestSlugifyBasic (0.00s)
+=== RUN   TestSlugify
+=== RUN   TestSlugify/unicode
+--- PASS: TestSlugify (0.00s)
+    --- PASS: TestSlugify/unicode (0.00s)
+=== RUN   TestTruncate
+=== RUN   TestTruncate/cut
+--- PASS: TestTruncate (0.00s)
+    --- PASS: TestTruncate/cut (0.00s)
+PASS
+ok  	example.com/ch15/textkit	0.159s</pre></div>
+
+  <div class="live" data-title="A table-driven test, case by case">
+    <pre><code class="language-go">tests := []struct {
+	name string
+	s    string
+	n    int
+	want string
+}{
+	{"short enough", "go", 5, "go"},
+	{"cut", "gopher", 4, "gop…"},
+}
+for _, tt := range tests {
+	t.Run(tt.name, func(t *testing.T) {
+		got, _ := Truncate(tt.s, tt.n)
+		if got != tt.want {
+			t.Errorf("got %q, want %q", got, tt.want)
+		}
+	})
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-6" data-state="type=struct{name,s,n,want}">An anonymous struct type describes one case: a name, the inputs, the expected output.</li>
+      <li data-lines="7-9" data-state="len(tests)=2">Two cases in the table. Adding a third is one line.</li>
+      <li data-lines="10-11" data-state="tt.name=short enough" data-out="=== RUN   TestTruncate/short_enough">First case. <code>t.Run</code> creates a subtest named after the case, with its own <code>t</code>.</li>
+      <li data-lines="12-13" data-state="tt.s=go; tt.n=5; got=go; want=go">Call the function. "go" fits in 5 runes, so it comes back unchanged. <code>got == want</code>.</li>
+      <li data-lines="16" data-state="short enough=PASS">The subtest function returns without errors: it passes.</li>
+      <li data-lines="10-11" data-state="tt.name=cut" data-out="=== RUN   TestTruncate/cut">Second case, second subtest.</li>
+      <li data-lines="12-13" data-state="tt.s=gopher; tt.n=4; got=gop…; want=gop…; cut=PASS">"gopher" becomes 3 runes + "…" = 4 runes. Matches. If it didn't, <code>t.Errorf</code> would fail <em>only this subtest</em> and the loop would continue.</li>
+      <li data-lines="17" data-state="TestTruncate=PASS" data-out="--- PASS: TestTruncate (0.00s)">The parent passes because all subtests passed.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Good tables include the boring edge cases: empty input, one element, unicode, the maximum, the invalid. Most production bugs live at the edges, not in the happy path. Name every case — <code>"runes not bytes"</code> tells the next reader <em>why</em> the case exists. For complex structs, compare with <code>reflect.DeepEqual</code> or (very popular) <code>github.com/google/go-cmp/cmp.Diff</code>, which prints a readable diff.</p></div>
+
+  <div class="callout info"><p>Since Go 1.22 every loop iteration has its own <code>tt</code> variable, so the old <code>tt := tt</code> line you'll see in older code (needed for parallel subtests) is no longer necessary.</p></div>
+
+  <h2>Test helpers: Helper, Cleanup, TempDir, Parallel, Context</h2>
+  <h3>t.Helper: blame the right line</h3>
+  <p>When you write your own assertion function, failures are reported at the line <em>inside the helper</em>, which is useless when it's called 20 times. Calling <code>t.Helper()</code> at the top marks the function as a helper, so the reported line is the <em>caller's</em>.</p>
+  <div class="live" data-title="t.Helper moves the blame to the caller">
+    <pre><code class="language-go">package helper
+
+import "testing"
+
+func assertEqualNoHelper(t *testing.T, got, want int) {
+	if got != want {
+		t.Errorf("got %d, want %d", got, want) // reported at THIS line
+	}
+}
+
+func assertEqual(t *testing.T, got, want int) {
+	t.Helper() // "I'm a helper: blame my caller's line instead"
+	if got != want {
+		t.Errorf("got %d, want %d", got, want)
+	}
+}
+
+func TestWithoutHelper(t *testing.T) {
+	assertEqualNoHelper(t, 1+1, 2)
+	assertEqualNoHelper(t, 2*2, 5) // which call failed? the output won't say
+}
+
+func TestWithHelper(t *testing.T) {
+	assertEqual(t, 1+1, 2)
+	assertEqual(t, 2*2, 5) // the failure points right here
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="18-19,5-6" data-state="test=TestWithoutHelper; got=2; want=2" data-out="$ go test ./demo/helper"><code>TestWithoutHelper</code> calls the helper with 2 and 2. They match, nothing is reported.</li>
+      <li data-lines="20,6-7" data-state="got=4; want=5; failed=true">The second call fails. <code>t.Errorf</code> records the line where it was <em>called</em>: line 7, inside the helper.</li>
+      <li data-lines="21" data-state="failed=true" data-out="--- FAIL: TestWithoutHelper (0.00s)\n    helper_test.go:7: got 4, want 5">Without <code>-v</code>, logs print under the FAIL line. "line 7" points into the helper, so you can't tell which of the two calls failed.</li>
+      <li data-lines="23-24,11-13" data-state="test=TestWithHelper; got=2; want=2"><code>TestWithHelper</code> uses <code>assertEqual</code>, whose first line is <code>t.Helper()</code>. The first call passes.</li>
+      <li data-lines="25,12,14" data-state="got=4; want=5; failed=true">The second call fails. Because the function is marked as a helper, the testing package skips its frame and blames the <strong>caller's</strong> line.</li>
+      <li data-lines="26" data-state="failed=true" data-out="--- FAIL: TestWithHelper (0.00s)\n    helper_test.go:25: got 4, want 5">Now the report says line 25: exactly the failing assertion.</li>
+      <li data-lines="26" data-state="failed tests=2" data-out="FAIL\nFAIL&#9;example.com/ch15/demo/helper&#9;0.468s\nFAIL">Both tests failed (on purpose). Put <code>t.Helper()</code> first in every assertion helper.</li>
+    </ol>
+  </div>
+  <div class="output error" data-label="Line 7 (inside the helper) vs line 25 (the actual failing call)"><pre>$ go test ./demo/helper
+--- FAIL: TestWithoutHelper (0.00s)
+    helper_test.go:7: got 4, want 5
+--- FAIL: TestWithHelper (0.00s)
+    helper_test.go:25: got 4, want 5
+FAIL
+FAIL	example.com/ch15/demo/helper	0.468s
+FAIL</pre></div>
+
+  <h3>t.Cleanup and t.TempDir</h3>
+  <p><code>t.Cleanup(f)</code> registers a function to run when the test (and all its subtests) finishes, in <strong>last-in, first-out</strong> order — like <code>defer</code>, but it can be registered from inside a helper function, which <code>defer</code> can't. <code>t.TempDir()</code> creates a fresh, unique directory and registers a cleanup that deletes it.</p>
+  <div class="live" data-title="TempDir round trip">
+    <pre><code class="language-go">package textkit
+
+import (
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+func TestSaveLoadLines(t *testing.T) {
+	dir := t.TempDir() // fresh directory, deleted automatically after the test
+	path := filepath.Join(dir, "notes.txt")
+
+	want := []string{"buy milk", "write tests", "ship it"}
+	if err := SaveLines(path, want); err != nil {
+		t.Fatalf("SaveLines: %v", err)
+	}
+	got, err := LoadLines(path)
+	if err != nil {
+		t.Fatalf("LoadLines: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("round trip = %q, want %q", got, want)
+	}
+}
+
+func TestLoadLinesMissing(t *testing.T) {
+	_, err := LoadLines(filepath.Join(t.TempDir(), "nope.txt"))
+	if err == nil {
+		t.Fatal("expected an error for a missing file, got nil")
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="dir=/tmp/TestSaveLoadLines123/001"><code>t.TempDir()</code> creates a fresh, empty directory unique to this test (the exact path varies). It registers a cleanup that deletes it afterwards.</li>
+      <li data-lines="11,13" data-state="path=.../notes.txt; want=[buy milk write tests ship it]">We build a path inside it and the lines we expect to survive the round trip.</li>
+      <li data-lines="14-16" data-state="err=nil"><code>SaveLines</code> writes the file. If it failed, <code>t.Fatalf</code> would stop here, because nothing after it makes sense without the file.</li>
+      <li data-lines="17-20" data-state="got=[buy milk write tests ship it]; err=nil"><code>LoadLines</code> reads it back.</li>
+      <li data-lines="21-23" data-state="slices.Equal=true"><code>slices.Equal</code> compares element by element. Equal, so no error is reported.</li>
+      <li data-lines="24" data-state="dir=(deleted)">The test returns and the TempDir cleanup removes the directory. No leftover files, no clashes between tests.</li>
+      <li data-lines="27" data-state="err=open .../nope.txt: no such file or directory">The second test asks for a file that does not exist in another fresh TempDir.</li>
+      <li data-lines="28-30" data-state="err=non-nil">An error came back, as expected, so <code>t.Fatal</code> is skipped and the test passes. Testing the failure path matters as much as the happy path.</li>
+    </ol>
+  </div>
+  <div class="callout tip"><p>A helper that creates something should clean it up itself: <code>func newTestDB(t *testing.T) *DB { t.Helper(); db := open(); t.Cleanup(func() { db.Close() }); return db }</code>. Callers get a one-liner, and can never forget the cleanup. Similarly, <code>t.Setenv("KEY", "v")</code> sets an env var and restores it after the test, and <code>t.Chdir(dir)</code> (Go 1.24) does the same for the working directory.</p></div>
+
+  <h3>t.Parallel and t.Context</h3>
+  <p><code>t.Parallel()</code> tells the runner "this test may run at the same time as other parallel tests." The test <strong>pauses</strong> at that call, and resumes once the non-parallel tests at its level are done. Then all paused tests run together (up to <code>-parallel</code>, default <code>GOMAXPROCS</code>). <code>t.Context()</code> (Go 1.24) returns a context that is cancelled just before cleanups run — perfect for passing into code under test.</p>
+  <div class="live" data-title="Cleanup order, parallel subtests, t.Context">
+    <pre><code class="language-go">package lifecycle
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestCleanupOrder(t *testing.T) {
+	t.Cleanup(func() { t.Log("cleanup 1: close database") })
+	t.Cleanup(func() { t.Log("cleanup 2: stop server") })
+	t.Log("test body runs")
+	// Cleanups run after the test (and its subtests) finish, last-registered first.
+}
+
+func TestParallel(t *testing.T) {
+	for _, name := range []string{"a", "b", "c"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel() // pause here; resume alongside the other parallel subtests
+			time.Sleep(100 * time.Millisecond)
+			t.Log("done", name)
+		})
+	}
+}
+
+// waitReady blocks until ready is closed or ctx is done.
+func waitReady(ctx context.Context, ready &lt;-chan struct{}) error {
+	select {
+	case &lt;-ready:
+		return nil
+	case &lt;-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestContext(t *testing.T) {
+	ctx := t.Context() // Go 1.24+: cancelled just before Cleanup functions run
+	t.Cleanup(func() { t.Log("in cleanup, ctx.Err() =", ctx.Err()) })
+
+	ready := make(chan struct{})
+	go func() { time.Sleep(10 * time.Millisecond); close(ready) }()
+	if err := waitReady(ctx, ready); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("ready; ctx.Err() =", ctx.Err())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-11" data-state="test=TestCleanupOrder; cleanups=[1 2]" data-out="$ go test -v ./demo/lifecycle\n=== RUN   TestCleanupOrder"><code>t.Cleanup</code> only <strong>registers</strong> functions; nothing runs yet. Two are queued.</li>
+      <li data-lines="12" data-state="cleanups=[1 2]" data-out="    lifecycle_test.go:12: test body runs">The body runs.</li>
+      <li data-lines="14,11,10" data-state="cleanups=[]" data-out="    lifecycle_test.go:11: cleanup 2: stop server\n    lifecycle_test.go:10: cleanup 1: close database\n--- PASS: TestCleanupOrder (0.00s)">After the test returns, cleanups run <strong>last-registered first</strong>, like <code>defer</code>: the server stops before the database closes.</li>
+      <li data-lines="17-19" data-state="test=TestParallel; paused=[a b c]" data-out="=== RUN   TestParallel\n=== RUN   TestParallel/a\n=== PAUSE TestParallel/a\n=== RUN   TestParallel/b\n=== PAUSE TestParallel/b\n=== RUN   TestParallel/c\n=== PAUSE TestParallel/c">Each <code>t.Run</code> starts a subtest, which hits <code>t.Parallel()</code> and immediately <strong>pauses</strong>. <code>t.Run</code> returns, so the loop moves on.</li>
+      <li data-lines="24" data-state="paused=[]; running=[a b c]" data-out="=== CONT  TestParallel/a\n=== CONT  TestParallel/b\n=== CONT  TestParallel/c">When the parent function returns, the paused subtests are released to run together.</li>
+      <li data-lines="20-21" data-state="running=[a b c]; t≈100ms" data-out="    lifecycle_test.go:21: done c\n=== NAME  TestParallel/b\n    lifecycle_test.go:21: done b\n=== NAME  TestParallel/a\n    lifecycle_test.go:21: done a">All three sleep at the same time. The finish order varies; this run finished c, b, a. <code>=== NAME</code> lines say whose log follows.</li>
+      <li data-lines="24" data-state="elapsed≈100ms (not 300ms)" data-out="--- PASS: TestParallel (0.00s)\n    --- PASS: TestParallel/c (0.10s)\n    --- PASS: TestParallel/b (0.10s)\n    --- PASS: TestParallel/a (0.10s)">Each subtest took 0.10s, but they overlapped, so the whole group took about 100ms.</li>
+      <li data-lines="36-38" data-state="test=TestContext; ctx.Err()=nil" data-out="=== RUN   TestContext"><code>t.Context()</code> gives a context tied to this test. A cleanup is registered that will inspect it later.</li>
+      <li data-lines="40-42,27-30" data-state="ready=open; ctx.Err()=nil">A goroutine closes <code>ready</code> after 10ms. <code>waitReady</code> selects on <code>ready</code> and <code>ctx.Done()</code>; <code>ready</code> wins.</li>
+      <li data-lines="45" data-state="ctx.Err()=nil" data-out="    lifecycle_test.go:45: ready; ctx.Err() = &lt;nil&gt;">During the test body the context is still live.</li>
+      <li data-lines="46,38" data-state="ctx.Err()=context canceled" data-out="    lifecycle_test.go:38: in cleanup, ctx.Err() = context canceled\n--- PASS: TestContext (0.01s)">The test returns. The context is cancelled <em>just before</em> cleanups run, so the cleanup sees <code>context canceled</code>. Goroutines using <code>t.Context()</code> get told to stop.</li>
+      <li data-lines="46" data-state="all tests=passed" data-out="PASS\nok  &#9;example.com/ch15/demo/lifecycle&#9;0.599s">All three tests pass.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Real output"><pre>$ go test -v ./demo/lifecycle
+=== RUN   TestCleanupOrder
+    lifecycle_test.go:12: test body runs
+    lifecycle_test.go:11: cleanup 2: stop server
+    lifecycle_test.go:10: cleanup 1: close database
+--- PASS: TestCleanupOrder (0.00s)
+=== RUN   TestParallel
+=== RUN   TestParallel/a
+=== PAUSE TestParallel/a
+=== RUN   TestParallel/b
+=== PAUSE TestParallel/b
+=== RUN   TestParallel/c
+=== PAUSE TestParallel/c
+=== CONT  TestParallel/a
+=== CONT  TestParallel/b
+=== CONT  TestParallel/c
+    lifecycle_test.go:21: done c
+=== NAME  TestParallel/b
+    lifecycle_test.go:21: done b
+=== NAME  TestParallel/a
+    lifecycle_test.go:21: done a
+--- PASS: TestParallel (0.00s)
+    --- PASS: TestParallel/c (0.10s)
+    --- PASS: TestParallel/b (0.10s)
+    --- PASS: TestParallel/a (0.10s)
+=== RUN   TestContext
+    lifecycle_test.go:45: ready; ctx.Err() = &lt;nil&gt;
+    lifecycle_test.go:38: in cleanup, ctx.Err() = context canceled
+--- PASS: TestContext (0.01s)
+PASS
+ok  	example.com/ch15/demo/lifecycle	0.599s</pre></div>
+  <p>Read the output closely. Cleanups ran in reverse order. The three parallel subtests each <code>PAUSE</code>d, then <code>CONT</code>inued together: three 100ms sleeps finished in about 100ms total, not 300ms. And the test's context was live during the test and cancelled by the time the cleanup ran.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>Parallel tests share package-level state. If two parallel tests write to the same global variable, map or file, you've created a race (and <code>-race</code> will tell you). Also, <code>t.Setenv</code> and <code>t.Chdir</code> affect the whole process, so they panic in parallel tests.</p></div>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="230" fill="#262624"/>
+      <defs>
+        <marker id="ar15" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#a8a49a"/></marker>
+      </defs>
+      <text x="20" y="28" fill="#e0b45c" font-size="13">What happens when you type go test</text>
+      <rect x="20" y="50" width="120" height="54" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="80" y="73" fill="#ece9e1" font-size="13" text-anchor="middle">build test</text>
+      <text x="80" y="91" fill="#ece9e1" font-size="13" text-anchor="middle">binary</text>
+      <rect x="170" y="50" width="120" height="54" rx="8" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="1.5"/>
+      <text x="230" y="73" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">TestMain</text>
+      <text x="230" y="91" fill="#a8a49a" font-size="11" text-anchor="middle">setup (optional)</text>
+      <rect x="320" y="50" width="130" height="54" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="385" y="73" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">m.Run()</text>
+      <text x="385" y="91" fill="#a8a49a" font-size="11" text-anchor="middle">Tests, Examples, Fuzz seeds</text>
+      <rect x="480" y="50" width="100" height="54" rx="8" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="1.5"/>
+      <text x="530" y="73" fill="#ece9e1" font-size="13" text-anchor="middle">teardown</text>
+      <text x="530" y="91" fill="#a8a49a" font-size="11" text-anchor="middle">in TestMain</text>
+      <rect x="610" y="50" width="90" height="54" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="1.5"/>
+      <text x="655" y="73" fill="#ece9e1" font-size="13" text-anchor="middle">os.Exit</text>
+      <text x="655" y="91" fill="#a8a49a" font-size="11" text-anchor="middle">ok / FAIL</text>
+      <line x1="140" y1="77" x2="168" y2="77" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar15)"/>
+      <line x1="290" y1="77" x2="318" y2="77" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar15)"/>
+      <line x1="450" y1="77" x2="478" y2="77" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar15)"/>
+      <line x1="580" y1="77" x2="608" y2="77" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar15)"/>
+      <line x1="385" y1="104" x2="385" y2="138" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar15)"/>
+      <rect x="120" y="140" width="530" height="70" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="140" y="164" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">for each TestXxx: run body → t.Run subtests (parallel ones PAUSE, then CONT)</text>
+      <text x="140" y="186" fill="#ece9e1" font-size="12" font-family="JetBrains Mono, monospace">→ wait for subtests → cancel t.Context() → t.Cleanup funcs (LIFO)</text>
+      <text x="140" y="203" fill="#a8a49a" font-size="11">each test runs in its own goroutine; t.Fatal ends only that goroutine</text>
+    </svg>
+    <figcaption>The life of a test binary. Without a <code>TestMain</code>, Go generates one that just calls <code>m.Run()</code>.</figcaption>
+  </figure>
+
+  <h2>Fixtures, testdata and golden files</h2>
+  <p>A <strong>fixture</strong> is input data a test needs: a sample config file, a JSON payload, an image. Put them in a directory named <strong><code>testdata/</code></strong>. The Go tool ignores it completely (it's never treated as a package), and tests run with the package directory as their working directory, so <code>os.ReadFile("testdata/x")</code> just works.</p>
+  <p>A <strong>golden file</strong> stores the <em>expected output</em> of a test, for outputs too big to write inline: rendered reports, generated code, HTML. The test compares fresh output to the golden file. When the output changes on purpose, you regenerate the file with a flag and review the diff in your pull request.</p>
+  <div class="live" data-title="A golden-file test, first run">
+    <pre><code class="language-go">package textkit
+
+import (
+	"flag"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// Run `go test -update` to (re)write the golden files.
+var update = flag.Bool("update", false, "update golden files")
+
+func TestReportGolden(t *testing.T) {
+	// testdata/ is ignored by the go tool, perfect for fixtures.
+	input, err := os.ReadFile(filepath.Join("testdata", "speech.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Report(WordFreq(string(input)))
+
+	golden := filepath.Join("testdata", "report.golden")
+	if *update {
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("missing golden file (run go test -update): %v", err)
+	}
+	if got != string(want) {
+		t.Errorf("Report() mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="update=false" data-out="$ go test ./textkit -run Golden">A package-level <code>flag.Bool</code> registers <code>-update</code>. <code>go test</code> parses it before tests run; this time we didn't pass it.</li>
+      <li data-lines="15-18" data-state="input=(speech.txt bytes)">The input fixture lives in <code>testdata/</code>, a folder the go tool ignores. The test's working directory is the package folder, so relative paths work.</li>
+      <li data-lines="19" data-state="got=WORD COUNT\ngo 3\n...">The code under test turns the text into a formatted report string.</li>
+      <li data-lines="21-26" data-state="update=false; golden=testdata/report.golden">Without <code>-update</code>, we skip writing the golden file.</li>
+      <li data-lines="27-30" data-state="err=no such file or directory" data-out="--- FAIL: TestReportGolden (0.00s)\n    golden_test.go:29: missing golden file (run go test -update): open testdata/report.golden: no such file or directory">On the very first run there is no golden file, so <code>ReadFile</code> fails and <code>t.Fatalf</code> tells you how to create it.</li>
+      <li data-lines="34" data-state="failed=true" data-out="FAIL\nFAIL&#9;example.com/ch15/textkit&#9;0.161s\nFAIL">The package fails. Running with <code>-update</code> writes the file (lines 22-25); every later run compares <code>got</code> against it on line 31.</li>
+    </ol>
+  </div>
+  <p>The first run has no golden file yet:</p>
+  <div class="output error" data-label="First run"><pre>$ go test ./textkit -run Golden
+--- FAIL: TestReportGolden (0.00s)
+    golden_test.go:29: missing golden file (run go test -update): open testdata/report.golden: no such file or directory
+FAIL
+FAIL	example.com/ch15/textkit	0.161s
+FAIL</pre></div>
+  <p>So we generate it. (Custom flags go <em>after</em> the package list, otherwise <code>go test</code> itself tries to parse them.)</p>
+  <div class="output"><pre>$ go test ./textkit -run Golden -update
+ok  	example.com/ch15/textkit	0.143s
+$ cat textkit/testdata/report.golden
+WORD       COUNT
+go             3
+is             3
+simple         2
+fast           1
+in             1
+testing        1
+too            1</pre></div>
+  <p>Now suppose someone "tidies up" the format string from <code>%5d</code> to <code>%4d</code>. The golden test catches the accidental change instantly:</p>
+  <div class="output error" data-label="Regression caught"><pre>$ go test ./textkit -run Golden
+--- FAIL: TestReportGolden (0.00s)
+    golden_test.go:32: Report() mismatch
+        --- got ---
+        WORD       COUNT
+        go            3
+        is            3
+        simple        2
+        fast          1
+        in            1
+        testing       1
+        too           1
+        --- want ---
+        WORD       COUNT
+        go             3
+        is             3
+        simple         2
+        fast           1
+        in             1
+        testing        1
+        too            1
+FAIL
+FAIL	example.com/ch15/textkit	0.518s
+FAIL</pre></div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Golden files are only as good as the review of their diffs. Commit them, keep them deterministic (sort map keys, fix timestamps, strip absolute paths), and treat a changed <code>.golden</code> file in a PR as a real behaviour change that needs a look. The Go project itself uses this pattern heavily (gofmt, the compiler's error tests).</p></div>
+
+  <h2>Mocking with interfaces and fakes</h2>
+  <p>Real code talks to databases, payment APIs, email servers and the clock. Tests shouldn't: they'd be slow, flaky and expensive. The Go way to isolate code is simple: <strong>depend on a small interface, and give tests a fake implementation</strong>. No mocking framework needed — a fake is just a struct you write in the test file.</p>
+  <div class="code" data-file="users/users.go"><pre><code class="language-go">// Package users exposes a tiny user service over HTTP.
+package users
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+)
+
+type User struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+var ErrNotFound = errors.New("user not found")
+
+// Store is the dependency we will fake in tests. Keep it small.
+type Store interface {
+	GetUser(ctx context.Context, id int) (User, error)
+}
+
+// Service holds business logic and depends only on the interface.
+type Service struct {
+	Store Store
+}
+
+func (s *Service) Greeting(ctx context.Context, id int) (string, error) {
+	u, err := s.Store.GetUser(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("greeting for %d: %w", id, err)
+	}
+	return "Hello, " + u.Name + "!", nil
+}
+
+// Handler serves GET /users/{id}.
+func Handler(store Store) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "bad id", http.StatusBadRequest)
+			return
+		}
+		u, err := store.GetUser(r.Context(), id)
+		if errors.Is(err, ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(u)
+	})
+	return mux
+}
+
+// Client calls a remote users API.
+type Client struct {
+	BaseURL string
+	HTTP    *http.Client
+}
+
+func (c *Client) GetUser(ctx context.Context, id int) (User, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/users/%d", c.BaseURL, id), nil)
+	if err != nil {
+		return User{}, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return User{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var u User
+		err := json.NewDecoder(resp.Body).Decode(&amp;u)
+		return u, err
+	case http.StatusNotFound:
+		return User{}, ErrNotFound
+	default:
+		return User{}, fmt.Errorf("users api: unexpected status %d", resp.StatusCode)
+	}
+}</code></pre></div>
+  <div class="code" data-file="users/fake_test.go"><pre><code class="language-go">package users
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+// fakeStore is an in-memory Store for tests. No database needed.
+type fakeStore struct {
+	users map[int]User
+	err   error // if set, every call fails with it
+	calls int   // lets tests assert how the dependency was used
+}
+
+func (f *fakeStore) GetUser(ctx context.Context, id int) (User, error) {
+	f.calls++
+	if f.err != nil {
+		return User{}, f.err
+	}
+	u, ok := f.users[id]
+	if !ok {
+		return User{}, ErrNotFound
+	}
+	return u, nil
+}
+
+func TestGreeting(t *testing.T) {
+	store := &amp;fakeStore{users: map[int]User{1: {ID: 1, Name: "Ana"}}}
+	svc := &amp;Service{Store: store}
+
+	got, err := svc.Greeting(t.Context(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "Hello, Ana!" {
+		t.Errorf("got %q", got)
+	}
+	if store.calls != 1 {
+		t.Errorf("store called %d times, want 1", store.calls)
+	}
+}
+
+func TestGreetingErrors(t *testing.T) {
+	boom := errors.New("connection refused")
+	tests := []struct {
+		name  string
+		store *fakeStore
+		want  error
+	}{
+		{"not found", &amp;fakeStore{users: map[int]User{}}, ErrNotFound},
+		{"store down", &amp;fakeStore{err: boom}, boom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &amp;Service{Store: tt.store}
+			_, err := svc.Greeting(t.Context(), 99)
+			if !errors.Is(err, tt.want) {
+				t.Errorf("err = %v, want it to wrap %v", err, tt.want)
+			}
+		})
+	}
+}</code></pre></div>
+  <p>The fake is tiny but powerful: it can return data, simulate failures (<code>err</code>), and record how it was used (<code>calls</code>). Because <code>Service</code> only knows about the <code>Store</code> interface, it can't tell the difference.</p>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Hard to test"><pre><code class="language-go">type Service struct{}
+
+func (s *Service) Greeting(id int) (string, error) {
+	db, _ := sql.Open("postgres", os.Getenv("DB_URL"))
+	var name string
+	err := db.QueryRow("SELECT name FROM users WHERE id=$1", id).Scan(&amp;name)
+	if err != nil {
+		return "", err
+	}
+	return "Hello, " + name + "!", nil
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Easy to test"><pre><code class="language-go">type Store interface {
+	GetUser(ctx context.Context, id int) (User, error)
+}
+
+type Service struct{ Store Store } // injected
+
+func (s *Service) Greeting(ctx context.Context, id int) (string, error) {
+	u, err := s.Store.GetUser(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("greeting for %d: %w", id, err)
+	}
+	return "Hello, " + u.Name + "!", nil
+}</code></pre></div></div>
+  </div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A fake is a <strong>stunt double</strong>. The director (your test) needs a scene shot safely and repeatably, so a double that looks the same from the camera's point of view (implements the same interface) stands in for the real actor (the database). Fakes have working, simplified behaviour (an in-memory map); mocks just record calls and return canned answers. In Go, simple hand-written fakes are usually the clearest.</p></div>
+
+  <div class="callout tip"><p>Define interfaces where they're <em>used</em> (in the consumer package), and keep them small — one or two methods. "Accept interfaces, return structs." A 30-method interface is painful to fake; a 1-method one takes four lines. The same trick works for time: inject a <code>Clock</code> interface (see Exercise 3), or use <code>testing/synctest</code> (below).</p></div>
+
+  <h2>Testing HTTP with httptest</h2>
+  <p>The <code>net/http/httptest</code> package gives you two tools:</p>
+  <ul>
+    <li><strong><code>httptest.NewRecorder()</code></strong> — an in-memory <code>http.ResponseWriter</code>. You call your handler directly with a request from <code>httptest.NewRequest</code> and inspect <code>rec.Code</code>, <code>rec.Header()</code>, <code>rec.Body</code>. No network, microseconds per test. Use it to test <strong>handlers</strong>.</li>
+    <li><strong><code>httptest.NewServer(handler)</code></strong> — a real HTTP server on a random <code>127.0.0.1</code> port. Use it to test <strong>clients</strong>: code that makes HTTP calls. Point the client at <code>srv.URL</code>.</li>
+  </ul>
+  <div class="code" data-file="users/http_test.go"><pre><code class="language-go">package users
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// httptest.NewRecorder: call the handler directly, no network at all.
+func TestHandler(t *testing.T) {
+	h := Handler(&amp;fakeStore{users: map[int]User{7: {ID: 7, Name: "Bo"}}})
+
+	tests := []struct {
+		path     string
+		wantCode int
+		wantBody string
+	}{
+		{"/users/7", http.StatusOK, `{"id":7,"name":"Bo"}`},
+		{"/users/8", http.StatusNotFound, "not found"},
+		{"/users/abc", http.StatusBadRequest, "bad id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			rec := httptest.NewRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantCode)
+			}
+			if body := strings.TrimSpace(rec.Body.String()); body != tt.wantBody {
+				t.Errorf("body = %q, want %q", body, tt.wantBody)
+			}
+		})
+	}
+}
+
+// httptest.NewServer: a real HTTP server on a random localhost port,
+// perfect for testing code that MAKES requests (our Client).
+func TestClient(t *testing.T) {
+	srv := httptest.NewServer(Handler(&amp;fakeStore{users: map[int]User{1: {ID: 1, Name: "Ana"}}}))
+	defer srv.Close()
+	t.Log("test server at", srv.URL)
+
+	c := &amp;Client{BaseURL: srv.URL, HTTP: srv.Client()}
+
+	u, err := c.GetUser(t.Context(), 1)
+	if err != nil || u.Name != "Ana" {
+		t.Fatalf("GetUser(1) = %+v, %v", u, err)
+	}
+	if _, err := c.GetUser(t.Context(), 2); err != ErrNotFound {
+		t.Errorf("GetUser(2) err = %v, want ErrNotFound", err)
+	}
+}
+
+// A hand-written HandlerFunc lets you simulate a misbehaving upstream.
+func TestClientServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := &amp;Client{BaseURL: srv.URL, HTTP: srv.Client()}
+	_, err := c.GetUser(t.Context(), 1)
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("err = %v, want a 503 error", err)
+	}
+}</code></pre></div>
+
+  <div class="live" data-title="httptest.ResponseRecorder in action">
+    <pre><code class="language-go">h := Handler(&amp;fakeStore{users: map[int]User{7: {ID: 7, Name: "Bo"}}})
+
+req := httptest.NewRequest(http.MethodGet, "/users/8", nil)
+rec := httptest.NewRecorder()
+
+h.ServeHTTP(rec, req)
+
+if rec.Code != http.StatusNotFound {
+	t.Errorf("status = %d, want 404", rec.Code)
+}
+fmt.Println(rec.Code, strings.TrimSpace(rec.Body.String()))</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="store={7:Bo}">Build the real handler (real routing, real JSON) on top of a fake store holding one user.</li>
+      <li data-lines="3" data-state="req=GET /users/8">Create a request. <code>httptest.NewRequest</code> never fails (it panics on bad input) — handy in tests.</li>
+      <li data-lines="4" data-state="rec.Code=200; rec.Body=&quot;&quot;">A fresh recorder. Its code defaults to 200 until the handler writes one.</li>
+      <li data-lines="6" data-state="PathValue(id)=8; store→ErrNotFound">We call <code>ServeHTTP</code> directly: no sockets. The mux matches <code>GET /users/{id}</code>, the fake returns <code>ErrNotFound</code>.</li>
+      <li data-lines="6" data-state="rec.Code=404; rec.Body=&quot;not found\n&quot;"><code>http.Error</code> writes a 404 and the body into the recorder.</li>
+      <li data-lines="8-10" data-state="rec.Code=404; check=ok">Assert on the status. It matches, so no error.</li>
+      <li data-lines="11" data-out="404 not found">Inspect the body — trimmed, since <code>http.Error</code> adds a newline.</li>
+    </ol>
+  </div>
+
+  <h3>TestMain: package-wide setup</h3>
+  <p>If you define <code>func TestMain(m *testing.M)</code>, Go calls it <em>instead</em> of running tests directly. You do setup, call <code>m.Run()</code> to run all the tests, do teardown, and exit with the code it returned. Use it sparingly — for genuinely expensive shared setup like starting a database container.</p>
+  <div class="code" data-file="users/main_test.go"><pre><code class="language-go">package users
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+// TestMain runs instead of the tests; m.Run() runs them.
+// Use it for expensive, package-wide setup (a Docker DB, a temp dir, env vars).
+func TestMain(m *testing.M) {
+	fmt.Println("TestMain: setup (e.g. start a test database)")
+	code := m.Run()
+	fmt.Println("TestMain: teardown")
+	os.Exit(code)
+}</code></pre></div>
+  <div class="output" data-label="go test -v ./users (real output)"><pre>$ go test -v ./users
+TestMain: setup (e.g. start a test database)
+=== RUN   TestGreeting
+--- PASS: TestGreeting (0.00s)
+=== RUN   TestGreetingErrors
+=== RUN   TestGreetingErrors/not_found
+=== RUN   TestGreetingErrors/store_down
+--- PASS: TestGreetingErrors (0.00s)
+    --- PASS: TestGreetingErrors/not_found (0.00s)
+    --- PASS: TestGreetingErrors/store_down (0.00s)
+=== RUN   TestHandler
+=== RUN   TestHandler//users/7
+=== RUN   TestHandler//users/8
+=== RUN   TestHandler//users/abc
+--- PASS: TestHandler (0.00s)
+    --- PASS: TestHandler//users/7 (0.00s)
+    --- PASS: TestHandler//users/8 (0.00s)
+    --- PASS: TestHandler//users/abc (0.00s)
+=== RUN   TestClient
+    http_test.go:45: test server at http://127.0.0.1:50899
+--- PASS: TestClient (0.00s)
+=== RUN   TestClientServerError
+--- PASS: TestClientServerError (0.00s)
+PASS
+TestMain: teardown
+ok  	example.com/ch15/users	0.561s</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>Deferred calls in <code>TestMain</code> don't run if you <code>os.Exit</code> in the same function — do teardown explicitly before exiting, as above. (Since Go 1.15 you may also just <code>return</code> from <code>TestMain</code> and the runner exits with <code>m.Run()</code>'s result.) Prefer per-test helpers with <code>t.Cleanup</code> whenever setup is cheap; <code>TestMain</code> state is shared by every test, which invites coupling.</p></div>
+
+  <h2>Example tests: documentation that can't go stale</h2>
+  <p>An <strong>example function</strong> is named <code>ExampleXxx</code> (for function <code>Xxx</code>), <code>ExampleType_Method</code>, or just <code>Example</code> for the package. It ends with an <code>// Output:</code> comment. <code>go test</code> runs it and <strong>fails if stdout doesn't match</strong>. And <code>pkg.go.dev</code> (and the local <code>pkgsite</code> doc server) display it in your package documentation under the function — runnable docs that are guaranteed to be correct.</p>
+  <p>This file also shows an <strong>external test package</strong>: <code>package textkit_test</code>. Files in the same directory may declare the package name with a <code>_test</code> suffix. It's compiled as a separate package that imports <code>textkit</code> like any user would, so it can only use the <strong>exported</strong> API. That's exactly what you want for examples, and for "black-box" tests that check the public contract. It also avoids import cycles in integration tests.</p>
+  <div class="live" data-title="How go test checks an Example">
+    <pre><code class="language-go">package textkit_test // external test package: only the exported API is visible
+
+import (
+	"fmt"
+
+	"example.com/ch15/textkit"
+)
+
+func ExampleSlugify() {
+	fmt.Println(textkit.Slugify("Hello, World!"))
+	fmt.Println(textkit.Slugify("  Go 1.27 Release Notes  "))
+	// Output:
+	// hello-world
+	// go-1-27-release-notes
+}
+
+func ExampleTruncate() {
+	s, _ := textkit.Truncate("The Go Programming Language", 10)
+	fmt.Println(s)
+	// Output: The Go Pr…
+}
+
+func ExampleWordFreq() {
+	freq := textkit.WordFreq("a b a")
+	fmt.Println(freq["a"], freq["b"])
+	// Output: 2 1
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1,6" data-state="package=textkit_test">An <strong>external</strong> test package: it imports <code>textkit</code> like any user would, so only exported names are visible.</li>
+      <li data-lines="9" data-state="example=ExampleSlugify; captured=&quot;&quot;" data-out="=== RUN   ExampleSlugify"><code>go test</code> finds <code>ExampleXxx</code> functions that have an <code>// Output:</code> comment and runs them, capturing stdout.</li>
+      <li data-lines="10-11" data-state="captured=hello-world\ngo-1-27-release-notes">Both <code>Println</code> calls go into the capture buffer, not the terminal.</li>
+      <li data-lines="12-14" data-state="match=true" data-out="--- PASS: ExampleSlugify (0.00s)">The captured text is compared with the comment lines (leading/trailing space trimmed). They match: PASS. Change the code and the example fails, so docs can't go stale.</li>
+      <li data-lines="17-20" data-state="example=ExampleTruncate; s=The Go Pr…" data-out="=== RUN   ExampleTruncate\n--- PASS: ExampleTruncate (0.00s)">A single-line <code>// Output:</code> works too. <code>Truncate</code> cuts to 10 runes including the ellipsis.</li>
+      <li data-lines="23-26" data-state="example=ExampleWordFreq; freq[a]=2; freq[b]=1" data-out="=== RUN   ExampleWordFreq\n--- PASS: ExampleWordFreq (0.00s)">Prints <code>2 1</code>, matching the comment. These examples also appear in <code>go doc</code> and on pkg.go.dev, attached to the functions they're named after.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go test -v -run Example ./textkit (real output, excerpt)"><pre>=== RUN   ExampleSlugify
+--- PASS: ExampleSlugify (0.00s)
+=== RUN   ExampleTruncate
+--- PASS: ExampleTruncate (0.00s)
+=== RUN   ExampleWordFreq
+--- PASS: ExampleWordFreq (0.00s)</pre></div>
+  <div class="callout tip"><p>Use <code>// Unordered output:</code> when the lines can come out in any order (e.g., iterating a map). An example without an output comment is compiled but not run — useful for code that needs a network.</p></div>
+
+  <table>
+    <thead><tr><th>Internal test (<code>package textkit</code>)</th><th>External test (<code>package textkit_test</code>)</th></tr></thead>
+    <tbody>
+      <tr><td>Can see unexported identifiers</td><td>Exported API only</td></tr>
+      <tr><td>White-box: test internals and helpers directly</td><td>Black-box: test the contract your users rely on</td></tr>
+      <tr><td>Most unit tests</td><td>Examples, integration tests, breaking import cycles</td></tr>
+    </tbody>
+  </table>
+
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">Which of these will <code>go test</code> actually execute and check against expected output?</div>
+    <div class="quiz-opts"><button><code>func testSlug(t *testing.T)</code></button><button><code>func Testslug(t *testing.T)</code></button><button><code>func ExampleSlugify()</code> with no output comment</button><button><code>func ExampleSlugify()</code> ending in <code>// Output: hello-world</code></button></div>
+    <div class="quiz-explain">Test names must start with <code>Test</code> followed by a non-lowercase letter, so <code>testSlug</code> and <code>Testslug</code> are ignored (vet warns about the second). An example without an <code>// Output:</code> comment is compiled but not run. Only the last one is executed and its stdout compared.</div>
+  </div>
+
+  <h2>Benchmarks with b.Loop and -benchmem</h2>
+  <p>A <strong>benchmark</strong> measures how long code takes. It's named <code>BenchmarkXxx(b *testing.B)</code> and lives in a <code>_test.go</code> file. Since Go 1.24, the body is a <code>for b.Loop() { ... }</code> loop. The framework runs the loop many times, increasing the count until the measurement is stable (about 1 second by default), and reports time per iteration.</p>
+  <div class="live" data-title="How a benchmark run unfolds">
+    <pre><code class="language-go">package textkit
+
+import (
+	"strings"
+	"testing"
+)
+
+var parts = strings.Fields(strings.Repeat("gopher ", 100)) // 100 words
+
+func BenchmarkJoinPlus(b *testing.B) {
+	for b.Loop() { // Go 1.24+: replaces for i := 0; i &lt; b.N; i++
+		JoinPlus(parts)
+	}
+}
+
+func BenchmarkJoinBuilder(b *testing.B) {
+	for b.Loop() {
+		JoinBuilder(parts)
+	}
+}
+
+func BenchmarkSlugify(b *testing.B) {
+	title := "The Go Handbook: Testing &amp; Benchmarking, Chapter 15"
+	for b.Loop() {
+		Slugify(title)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="8" data-state="len(parts)=100" data-out="$ go test -bench=. -benchmem ./textkit\ngoos: darwin\ngoarch: arm64\npkg: example.com/ch15/textkit\ncpu: Apple M1">Package-level setup runs once, before any benchmark. <code>-bench=.</code> selects all benchmarks; the package's normal tests run first unless you add <code>-run=^$</code>. The header describes the machine: numbers only compare on the same hardware.</li>
+      <li data-lines="10-11" data-state="bench=JoinPlus; iterations=1"><code>b.Loop()</code> returns true while the framework wants more iterations. It starts small to estimate how long one call takes.</li>
+      <li data-lines="11-12" data-state="bench=JoinPlus; iterations=266254">The framework keeps going until about 1 second of work has been measured. Setup outside the loop is not timed, and <code>b.Loop</code> stops the compiler from optimising the call away.</li>
+      <li data-lines="13-14" data-state="ns/op=4451; allocs/op=99" data-out="BenchmarkJoinPlus-8      &#9;  266254&#9;      4451 ns/op&#9;   31728 B/op&#9;      99 allocs/op">Result: iterations, time per call, bytes and allocations per call (from <code>-benchmem</code>). <code>+</code> in a loop allocates a new string every step: 99 allocations for 100 words. <code>-8</code> is GOMAXPROCS.</li>
+      <li data-lines="16-19" data-state="bench=JoinBuilder; ns/op=463.6; allocs/op=1" data-out="BenchmarkJoinBuilder-8   &#9; 2650478&#9;       463.6 ns/op&#9;     640 B/op&#9;       1 allocs/op">Same input with <code>strings.Builder</code>: about 10x faster and a single allocation. Because each call is faster, the framework ran it ten times as often.</li>
+      <li data-lines="22-25" data-state="bench=Slugify; ns/op=335.1; allocs/op=5" data-out="BenchmarkSlugify-8       &#9; 3565192&#9;       335.1 ns/op&#9;     184 B/op&#9;       5 allocs/op">The title is built once outside the loop; only <code>Slugify</code> is measured.</li>
+      <li data-lines="27" data-state="all=done" data-out="PASS\nok  &#9;example.com/ch15/textkit&#9;3.817s">Roughly a second per benchmark, plus overhead. Your numbers will differ; compare runs with <code>benchstat</code>, not by eye.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go test -bench (real numbers from an Apple M1; yours will differ)"><pre>$ go test -bench=. -benchmem ./textkit
+goos: darwin
+goarch: arm64
+pkg: example.com/ch15/textkit
+cpu: Apple M1
+BenchmarkJoinPlus-8      	  266254	      4451 ns/op	   31728 B/op	      99 allocs/op
+BenchmarkJoinBuilder-8   	 2650478	       463.6 ns/op	     640 B/op	       1 allocs/op
+BenchmarkSlugify-8       	 3565192	       335.1 ns/op	     184 B/op	       5 allocs/op
+PASS
+ok  	example.com/ch15/textkit	3.817s</pre></div>
+  <p>How to read a line like <code>BenchmarkJoinPlus-8  266254  4451 ns/op  31728 B/op  99 allocs/op</code>:</p>
+  <ul>
+    <li><code>-8</code> — GOMAXPROCS during the run.</li>
+    <li><code>266254</code> — how many iterations were run to get a stable number.</li>
+    <li><code>4451 ns/op</code> — time per iteration.</li>
+    <li><code>31728 B/op</code>, <code>99 allocs/op</code> — bytes and heap allocations per iteration (from <code>-benchmem</code>).</li>
+  </ul>
+  <p>The verdict is clear: concatenating 100 strings with <code>+</code> allocates a new string 99 times (each copy bigger than the last) and is ~10x slower than a pre-sized <code>strings.Builder</code> with exactly one allocation.</p>
+
+  <div class="callout info"><div class="callout-title">Why b.Loop?</div><p>The older style was <code>for i := 0; i &lt; b.N; i++ { ... }</code>, plus <code>b.ResetTimer()</code> after setup. <code>b.Loop</code> is better in three ways: setup before the loop is automatically excluded from timing; the function body runs only once per measurement so expensive setup isn't repeated; and the compiler is prevented from optimising away the call under test even if you ignore its result (with <code>b.N</code> loops, you had to assign results to a global "sink").</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>One benchmark run proves nothing — numbers vary with CPU frequency, background load and thermal state. For real decisions: run <code>go test -bench=X -count=10 &gt; old.txt</code>, make your change, run again into <code>new.txt</code>, and compare with <code>benchstat old.txt new.txt</code> (from <code>golang.org/x/perf/cmd/benchstat</code>). It reports the delta and whether it's statistically significant. Also benchmark with realistic input sizes (see Exercise 2 with <code>b.Run</code> sub-benchmarks).</p></div>
+
+  <h2>Fuzzing: let the computer find your bugs</h2>
+  <p>Table tests check the cases <em>you</em> thought of. <strong>Fuzzing</strong> generates millions of inputs you didn't think of. You write a <code>FuzzXxx(f *testing.F)</code> function: add some <strong>seed</strong> inputs with <code>f.Add</code>, then give <code>f.Fuzz</code> a function that checks <strong>properties</strong> — things that must be true for <em>any</em> input. The fuzzer mutates inputs, guided by code coverage, looking for one that breaks a property.</p>
+  <p>Here's a string reverser that looks correct and passes its unit test:</p>
+  <div class="code" data-file="reverse/reverse.go (first version)"><pre><code class="language-bash">package reverse
+
+// Reverse returns s reversed... byte by byte. (Can you spot the bug?)
+func Reverse(s string) string {
+	b := []byte(s)
+	for i, j := 0, len(b)-1; i &lt; j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return string(b)
+}</code></pre></div>
+  <div class="code" data-file="reverse/reverse_test.go"><pre><code class="language-go">package reverse
+
+import (
+	"testing"
+	"unicode/utf8"
+)
+
+func TestReverse(t *testing.T) {
+	for in, want := range map[string]string{"abc": "cba", "": "", "Go!": "!oG"} {
+		if got := Reverse(in); got != want {
+			t.Errorf("Reverse(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// FuzzReverse checks PROPERTIES that must hold for any input,
+// instead of specific input/output pairs.
+func FuzzReverse(f *testing.F) {
+	f.Add("hello") // seed corpus: example inputs to start mutating from
+	f.Add("Go is fun!")
+	f.Fuzz(func(t *testing.T, s string) {
+		rev := Reverse(s)
+		if Reverse(rev) != s {
+			t.Errorf("double reverse changed %q into %q", s, Reverse(rev))
+		}
+		if utf8.ValidString(s) &amp;&amp; !utf8.ValidString(rev) {
+			t.Errorf("Reverse produced invalid UTF-8 from valid %q: %q", s, rev)
+		}
+	})
+}</code></pre></div>
+  <p>Two properties: reversing twice gives back the original; and reversing valid UTF-8 gives valid UTF-8. The unit test passes. Now we fuzz:</p>
+  <div class="output error" data-label="Fuzzer found a bug in well under a second"><pre>$ go test -fuzz=FuzzReverse -fuzztime=30s ./reverse
+fuzz: elapsed: 0s, gathering baseline coverage: 0/2 completed
+fuzz: elapsed: 0s, gathering baseline coverage: 2/2 completed, now fuzzing with 8 workers
+fuzz: minimizing 29-byte failing input file
+fuzz: elapsed: 0s, minimizing
+--- FAIL: FuzzReverse (0.04s)
+    --- FAIL: FuzzReverse (0.00s)
+        reverse_test.go:27: Reverse produced invalid UTF-8 from valid "ڪ": "\xaa\xda"
+    
+    Failing input written to testdata/fuzz/FuzzReverse/aafe564b0b93ceed
+    To re-run:
+    go test -run=FuzzReverse/aafe564b0b93ceed
+FAIL
+exit status 1
+FAIL	example.com/ch15/reverse	0.536s</pre></div>
+  <p>The fuzzer found an input (the Arabic letter "ڪ", two bytes in UTF-8) where reversing the <em>bytes</em> scrambles the character. It <strong>minimised</strong> the failing input to the smallest one it could find and saved it to <code>testdata/fuzz/FuzzReverse/</code>:</p>
+  <div class="output" data-label="testdata/fuzz/FuzzReverse/aafe564b0b93ceed"><pre>go test fuzz v1
+string("ڪ")</pre></div>
+  <p>That file is now part of the <strong>seed corpus</strong>. Plain <code>go test</code> (without <code>-fuzz</code>) runs every seed, so the bug becomes a permanent regression test:</p>
+  <div class="output error" data-label="Error"><pre>$ go test -v ./reverse   # the failing input is now a permanent regression test
+=== RUN   TestReverse
+--- PASS: TestReverse (0.00s)
+=== RUN   FuzzReverse
+=== RUN   FuzzReverse/seed#0
+=== RUN   FuzzReverse/seed#1
+=== RUN   FuzzReverse/aafe564b0b93ceed
+    reverse_test.go:27: Reverse produced invalid UTF-8 from valid "ڪ": "\xaa\xda"
+--- FAIL: FuzzReverse (0.00s)
+    --- PASS: FuzzReverse/seed#0 (0.00s)
+    --- PASS: FuzzReverse/seed#1 (0.00s)
+    --- FAIL: FuzzReverse/aafe564b0b93ceed (0.00s)
+FAIL
+FAIL	example.com/ch15/reverse	0.158s
+FAIL</pre></div>
+  <p>We fix it by reversing runes instead of bytes, and run again. The saved seed now passes... but the fuzzer immediately finds a <em>second</em> bug:</p>
+  <div class="output error" data-label="Second round: rune version"><pre>$ go test -v ./reverse
+=== RUN   TestReverse
+--- PASS: TestReverse (0.00s)
+=== RUN   FuzzReverse
+=== RUN   FuzzReverse/seed#0
+=== RUN   FuzzReverse/seed#1
+=== RUN   FuzzReverse/aafe564b0b93ceed
+--- PASS: FuzzReverse (0.00s)
+    --- PASS: FuzzReverse/seed#0 (0.00s)
+    --- PASS: FuzzReverse/seed#1 (0.00s)
+    --- PASS: FuzzReverse/aafe564b0b93ceed (0.00s)
+PASS
+ok  	example.com/ch15/reverse	0.474s
+$ go test -fuzz=FuzzReverse -fuzztime=10s ./reverse
+fuzz: elapsed: 0s, gathering baseline coverage: 0/15 completed
+fuzz: minimizing 36-byte failing input file
+fuzz: elapsed: 0s, gathering baseline coverage: 4/15 completed
+--- FAIL: FuzzReverse (0.02s)
+    --- FAIL: FuzzReverse (0.00s)
+        reverse_test.go:24: double reverse changed "\xd9" into "�"
+    
+    Failing input written to testdata/fuzz/FuzzReverse/ee4745c7324edeaf
+    To re-run:
+    go test -run=FuzzReverse/ee4745c7324edeaf
+FAIL
+exit status 1
+FAIL	example.com/ch15/reverse	0.488s</pre></div>
+  <p>Converting invalid UTF-8 (a lone byte <code>\xd9</code>) to <code>[]rune</code> replaces it with <code>U+FFFD</code> "�", so double-reversing doesn't round-trip. We decide the behaviour for invalid input — return it unchanged — and fuzz once more:</p>
+  <div class="code" data-file="reverse/reverse.go (final)"><pre><code class="language-go">package reverse
+
+import "unicode/utf8"
+
+// Reverse returns s reversed rune by rune.
+// Invalid UTF-8 can't be reversed meaningfully, so it is returned unchanged.
+func Reverse(s string) string {
+	if !utf8.ValidString(s) {
+		return s
+	}
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i &lt; j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
+}</code></pre></div>
+  <div class="output" data-label="10 seconds, ~740,000 inputs, no failures"><pre>$ go test -fuzz=FuzzReverse -fuzztime=10s ./reverse
+fuzz: elapsed: 0s, gathering baseline coverage: 0/16 completed
+fuzz: elapsed: 0s, gathering baseline coverage: 16/16 completed, now fuzzing with 8 workers
+fuzz: elapsed: 3s, execs: 394908 (131590/sec), new interesting: 23 (total: 39)
+fuzz: elapsed: 6s, execs: 394908 (0/sec), new interesting: 23 (total: 39)
+fuzz: elapsed: 9s, execs: 729901 (111669/sec), new interesting: 30 (total: 46)
+fuzz: elapsed: 11s, execs: 743399 (6674/sec), new interesting: 31 (total: 47)
+PASS
+ok  	example.com/ch15/reverse	11.488s</pre></div>
+
+  <div class="live" data-title="Tracing the fixed Reverse">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unicode/utf8"
+)
+
+func Reverse(s string) string {
+	if !utf8.ValidString(s) {
+		return s
+	}
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i &lt; j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
+}
+
+func main() {
+	fmt.Printf("%q\n", Reverse("Go!"))
+	fmt.Printf("%q\n", Reverse("ڪ"))    // the fuzzer's crasher: one 2-byte rune
+	fmt.Printf("%q\n", Reverse("\xff")) // invalid UTF-8: returned as-is
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20,8-9" data-state="s=Go!; valid=true">Call <code>Reverse("Go!")</code>. The input is valid UTF-8, so we don't take the early return.</li>
+      <li data-lines="12" data-state="r=[G o !]; len(r)=3">Convert to <code>[]rune</code> so we swap whole characters, not bytes.</li>
+      <li data-lines="13-14" data-state="i=0; j=2; r=[! o G]">Two indexes walk inward from both ends. First pass swaps positions 0 and 2.</li>
+      <li data-lines="13" data-state="i=1; j=1; r=[! o G]">Now <code>i == j</code>, so <code>i &lt; j</code> is false and the loop ends. The middle rune stays put.</li>
+      <li data-lines="16,20" data-state="result=!oG" data-out="&quot;!oG&quot;">Convert back to a string and print it quoted.</li>
+      <li data-lines="21,12-16" data-state="s=ڪ; len(s)=2 bytes; r=[ڪ]">The fuzzer's crasher is a single 2-byte rune. As runes it's a slice of length 1, so the loop body never runs and nothing gets split.</li>
+      <li data-lines="21" data-state="result=ڪ" data-out="&quot;ڪ&quot;">Valid in, valid out. The first byte-by-byte version turned this into <code>"\xaa\xda"</code>.</li>
+      <li data-lines="22,9-10" data-state="s=\xff; valid=false">A lone <code>0xff</code> byte is not valid UTF-8. Converting it to runes would replace it with U+FFFD, and double-reversing would no longer give back the input.</li>
+      <li data-lines="10,22" data-state="result=\xff" data-out="&quot;\xff&quot;">So we return it unchanged, which keeps the fuzz property <code>Reverse(Reverse(s)) == s</code> true for every input.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>&quot;!oG&quot;
+&quot;ڪ&quot;
+&quot;\xff&quot;</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Fuzz anything that parses untrusted input: decoders, URL/route parsers, protocol handlers, template engines. Good properties: round-trip (<code>Decode(Encode(x)) == x</code>), "never panics", "output is always valid", or comparing against a slow-but-obviously-correct reference implementation. Fuzzing supports <code>string</code>, <code>[]byte</code>, ints, floats, <code>bool</code> and <code>rune</code> arguments. Run it for minutes or hours locally or in a nightly job; commit the interesting crashers in <code>testdata/fuzz</code>.</p></div>
+
+  <h2>Coverage, the race detector and synctest</h2>
+  <h3>Coverage</h3>
+  <p><strong>Coverage</strong> tells you which statements your tests executed. <code>-cover</code> prints a percentage; <code>-coverprofile</code> writes a detailed profile that <code>go tool cover</code> can summarise per function or render as colour-coded HTML (<code>go tool cover -html=cover.out</code> opens it in your browser).</p>
+  <div class="output"><pre>$ go test -cover ./textkit ./users
+ok  	example.com/ch15/textkit	0.536s	coverage: 76.0% of statements
+ok  	example.com/ch15/users	0.477s	coverage: 87.9% of statements</pre></div>
+  <div class="output"><pre>$ go test -coverprofile=cover.out ./textkit
+ok  	example.com/ch15/textkit	0.243s	coverage: 76.0% of statements
+$ go tool cover -func=cover.out
+example.com/ch15/textkit/textkit.go:13:	Slugify		100.0%
+example.com/ch15/textkit/textkit.go:30:	WordFreq	100.0%
+example.com/ch15/textkit/textkit.go:42:	Truncate	100.0%
+example.com/ch15/textkit/textkit.go:54:	Report		100.0%
+example.com/ch15/textkit/textkit.go:74:	SaveLines	100.0%
+example.com/ch15/textkit/textkit.go:79:	LoadLines	100.0%
+example.com/ch15/textkit/textkit.go:88:	JoinPlus	0.0%
+example.com/ch15/textkit/textkit.go:97:	JoinBuilder	0.0%
+total:					(statements)	76.0%</pre></div>
+  <p><code>JoinPlus</code> and <code>JoinBuilder</code> are at 0% — they're only exercised by benchmarks, and benchmarks don't run during a normal <code>go test</code>. Coverage just pointed at a real gap.</p>
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Coverage is a <strong>flashlight</strong>, not a grade. It shows dark corners nobody tested. But 100% coverage doesn't mean the code is right: a test can execute a line without checking its result. Aim for meaningful coverage of logic and error paths (often 70–90%) rather than chasing a number with assertion-free tests.</p></div>
+
+  <h3>The race detector in tests</h3>
+  <p>Chapter 13 introduced <code>-race</code>. Tests are where it shines, because they exercise lots of code paths. Here's a counter that isn't safe for concurrent use. The plain test passes by luck; <code>-race</code> fails it:</p>
+  <div class="code" data-file="hits/hits.go"><pre><code class="language-go">package hits
+
+// Counter counts page hits. BUG: not safe for concurrent use.
+type Counter struct {
+	n map[string]int
+}
+
+func New() *Counter { return &amp;Counter{n: make(map[string]int)} }
+
+func (c *Counter) Hit(page string)       { c.n[page]++ }
+func (c *Counter) Count(page string) int { return c.n[page] }</code></pre></div>
+  <div class="code" data-file="hits/hits_test.go"><pre><code class="language-go">package hits
+
+import (
+	"sync"
+	"testing"
+)
+
+func TestConcurrentHits(t *testing.T) {
+	c := New()
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() { c.Hit("/home") })
+	}
+	wg.Wait()
+	if got := c.Count("/home"); got != 2 {
+		t.Errorf("Count = %d, want 2", got)
+	}
+}</code></pre></div>
+  <div class="output error" data-label="Real output (paths shortened)"><pre>$ go test ./hits
+ok  	example.com/ch15/hits	0.436s
+$ go test -race ./hits
+... (first report about the map internals omitted) ...
+==================
+WARNING: DATA RACE
+Read at 0x00c00010c698 by goroutine 9:
+  example.com/ch15/hits.(*Counter).Hit()
+      /home/gopher/ch15/hits/hits.go:10 +0x5c
+  example.com/ch15/hits.TestConcurrentHits.func1()
+      /home/gopher/ch15/hits/hits_test.go:12 +0x18
+
+Previous write at 0x00c00010c698 by goroutine 8:
+  example.com/ch15/hits.(*Counter).Hit()
+      /home/gopher/ch15/hits/hits.go:10 +0x90
+  example.com/ch15/hits.TestConcurrentHits.func1()
+      /home/gopher/ch15/hits/hits_test.go:12 +0x18
+
+Goroutine 9 (running) created at:
+  sync.(*WaitGroup).Go()
+      $GOROOT/src/sync/waitgroup.go:238 +0x6c
+  testing.tRunner()
+      $GOROOT/src/testing/testing.go:2193 +0x164
+  testing.(*T).Run.gowrap1()
+      $GOROOT/src/testing/testing.go:2258 +0x34
+
+Goroutine 8 (finished) created at:
+  sync.(*WaitGroup).Go()
+      $GOROOT/src/sync/waitgroup.go:238 +0x6c
+  testing.tRunner()
+      $GOROOT/src/testing/testing.go:2193 +0x164
+  testing.(*T).Run.gowrap1()
+      $GOROOT/src/testing/testing.go:2258 +0x34
+==================
+--- FAIL: TestConcurrentHits (0.00s)
+    testing.go:1865: race detected during execution of test
+FAIL
+FAIL	example.com/ch15/hits	0.424s
+FAIL</pre></div>
+
+  <h3>testing/synctest: tests with a fake clock</h3>
+  <p>Code with timeouts, TTLs and retries is hard to test: real sleeps make tests slow, and short sleeps make them flaky. <code>testing/synctest</code> (stable since Go 1.25) solves this. <code>synctest.Test(t, f)</code> runs <code>f</code> in an isolated <strong>bubble</strong> with a <strong>fake clock</strong>. Time inside the bubble only moves when every goroutine in it is blocked — and then it jumps straight to the next timer. A one-hour <code>time.Sleep</code> returns instantly, deterministically.</p>
+  <div class="code" data-file="cache/cache.go"><pre><code class="language-go">package cache
+
+import (
+	"sync"
+	"time"
+)
+
+// Cache stores values that expire after a TTL.
+type Cache struct {
+	mu   sync.Mutex
+	ttl  time.Duration
+	data map[string]entry
+}
+
+type entry struct {
+	val     string
+	expires time.Time
+}
+
+func New(ttl time.Duration) *Cache {
+	return &amp;Cache{ttl: ttl, data: make(map[string]entry)}
+}
+
+func (c *Cache) Set(k, v string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[k] = entry{v, time.Now().Add(c.ttl)}
+}
+
+func (c *Cache) Get(k string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.data[k]
+	if !ok || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.val, true
+}</code></pre></div>
+  <div class="code" data-file="cache/cache_test.go"><pre><code class="language-go">package cache
+
+import (
+	"context"
+	"testing"
+	"testing/synctest"
+	"time"
+)
+
+// Inside synctest.Test, time is FAKE: it only advances when every goroutine
+// in the "bubble" is blocked. A 1-hour sleep finishes instantly.
+func TestExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := New(time.Hour)
+		c.Set("k", "v")
+
+		time.Sleep(59 * time.Minute)
+		if _, ok := c.Get("k"); !ok {
+			t.Fatal("expired too early")
+		}
+
+		time.Sleep(2 * time.Minute)
+		if _, ok := c.Get("k"); ok {
+			t.Fatal("should have expired after 61 minutes")
+		}
+	})
+}
+
+func TestTimeoutWithFakeClock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+
+		&lt;-ctx.Done() // blocks; fake clock jumps straight to the deadline
+		t.Logf("ctx done after %v of fake time: %v", time.Since(start), ctx.Err())
+	})
+}</code></pre></div>
+  <div class="output" data-label="Over an hour of "time" in 0.00s"><pre>$ go test -v ./cache
+=== RUN   TestExpiry
+--- PASS: TestExpiry (0.00s)
+=== RUN   TestTimeoutWithFakeClock
+    cache_test.go:36: ctx done after 5s of fake time: context deadline exceeded
+--- PASS: TestTimeoutWithFakeClock (0.00s)
+PASS
+ok  	example.com/ch15/cache	0.477s</pre></div>
+
+  <div class="live" data-title="Fake time inside a synctest bubble">
+    <pre><code class="language-go">synctest.Test(t, func(t *testing.T) {
+	c := New(time.Hour)
+	c.Set("k", "v")
+
+	time.Sleep(59 * time.Minute)
+	_, ok := c.Get("k")
+	t.Log("after 59m:", ok)
+
+	time.Sleep(2 * time.Minute)
+	_, ok = c.Get("k")
+	t.Log("after 61m:", ok)
+})</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="fake now=00:00; real elapsed=0s">Enter the bubble. The fake clock starts at a fixed moment (midnight UTC, 2000-01-01).</li>
+      <li data-lines="2-3" data-state="fake now=00:00; k expires=01:00">The entry expires one fake hour from now.</li>
+      <li data-lines="5" data-state="fake now=00:59; real elapsed≈0s">The test goroutine sleeps. It's the only goroutine in the bubble and it's blocked, so the clock jumps 59 minutes instantly.</li>
+      <li data-lines="6-7" data-state="fake now=00:59; ok=true" data-out="after 59m: true">Not expired yet.</li>
+      <li data-lines="9" data-state="fake now=01:01; real elapsed≈0s">Another jump: 2 more minutes.</li>
+      <li data-lines="10-11" data-state="fake now=01:01; ok=false" data-out="after 61m: false">Now it's expired. We tested an hour of behaviour in microseconds, with no flakiness.</li>
+      <li data-lines="12" data-state="bubble=done"><code>synctest.Test</code> waits for all goroutines started in the bubble to exit, which also catches goroutine leaks.</li>
+    </ol>
+  </div>
+
+  <div class="callout info"><p><code>synctest.Wait()</code> blocks until every other goroutine in the bubble is durably blocked — useful for "start the background worker, wait until it's idle, then assert." Note that goroutines blocked on real I/O (network sockets) don't count as durably blocked; use in-memory fakes like <code>net.Pipe</code> inside bubbles.</p></div>
+
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1 — Table-test a palindrome checker</summary>
+    <p>Write <code>IsPalindrome(s string) bool</code> that ignores case, spaces and punctuation, then a table-driven test with parallel subtests covering: empty, one letter, mixed case, a full sentence with punctuation, a non-ASCII word, and two negatives.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="palindrome.go"><pre><code class="language-go">package ex1
+
+import (
+	"strings"
+	"unicode"
+)
+
+// IsPalindrome reports whether s reads the same backwards,
+// ignoring case, spaces and punctuation.
+func IsPalindrome(s string) bool {
+	var r []rune
+	for _, c := range strings.ToLower(s) {
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
+			r = append(r, c)
+		}
+	}
+	for i, j := 0, len(r)-1; i &lt; j; i, j = i+1, j-1 {
+		if r[i] != r[j] {
+			return false
+		}
+	}
+	return true
+}</code></pre></div>
+    <div class="code" data-file="palindrome_test.go"><pre><code class="language-go">package ex1
+
+import "testing"
+
+func TestIsPalindrome(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"", true},
+		{"a", true},
+		{"racecar", true},
+		{"Racecar", true},
+		{"A man, a plan, a canal: Panama", true},
+		{"été", true},
+		{"gopher", false},
+		{"ab", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			if got := IsPalindrome(tt.in); got != tt.want {
+				t.Errorf("IsPalindrome(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}</code></pre></div>
+    <div class="output"><pre>$ go test ./ex1
+ok  	example.com/ch15/ex1	0.116s</pre></div>
+    <p>With <code>-v</code>, the empty-string case shows up as <code>TestIsPalindrome/#00</code> — Go's name for an empty subtest name. Another reason to give cases explicit names.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2 — Sub-benchmarks across input sizes</summary>
+    <p>Benchmark summing a slice with an index loop versus a <code>range</code> loop, for sizes 10, 1,000 and 100,000, using <code>b.Run</code> sub-benchmarks and <code>b.Loop</code>. Is there a real difference?</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="sum_test.go"><pre><code class="language-go">package ex2
+
+import (
+	"fmt"
+	"testing"
+)
+
+func sumIndex(xs []int) int {
+	s := 0
+	for i := 0; i &lt; len(xs); i++ {
+		s += xs[i]
+	}
+	return s
+}
+
+func sumRange(xs []int) int {
+	s := 0
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
+func BenchmarkSum(b *testing.B) {
+	for _, n := range []int{10, 1000, 100000} {
+		xs := make([]int, n) // setup is outside b.Loop: not timed
+		for i := range xs {
+			xs[i] = i
+		}
+		b.Run(fmt.Sprintf("index/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				sumIndex(xs)
+			}
+		})
+		b.Run(fmt.Sprintf("range/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				sumRange(xs)
+			}
+		})
+	}
+}</code></pre></div>
+    <div class="output" data-label="Real output (Apple M1)"><pre>$ go test -bench=Sum -benchmem ./ex2
+goos: darwin
+goarch: arm64
+pkg: example.com/ch15/ex2
+cpu: Apple M1
+BenchmarkSum/index/n=10-8         	240888838	         4.855 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum/range/n=10-8         	251555428	         4.782 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum/index/n=1000-8       	 3681504	       326.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum/range/n=1000-8       	 3684692	       361.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum/index/n=100000-8     	   32510	     37258 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum/range/n=100000-8     	   33661	     36363 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	example.com/ch15/ex2	8.445s</pre></div>
+    <p>No meaningful difference — the compiler generates nearly identical code, and the small variations are noise (that's what <code>benchstat</code> with <code>-count=10</code> would confirm). Zero allocations either way. Lesson: measure before "optimising" style choices.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3 — Fake a sender and a clock</summary>
+    <p>A <code>Reminder</code> sends "standup in 5 minutes" via a <code>Sender</code> — but only on weekdays, using a <code>Clock</code> interface. Write the code and a table test with a fake sender (that can fail) and a fixed clock, covering weekday, weekend and send failure.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="notify.go"><pre><code class="language-go">package ex3
+
+import (
+	"fmt"
+	"time"
+)
+
+// Sender is the dependency: email in production, a fake in tests.
+type Sender interface {
+	Send(to, msg string) error
+}
+
+// Clock lets tests control "now".
+type Clock interface {
+	Now() time.Time
+}
+
+type Reminder struct {
+	Sender Sender
+	Clock  Clock
+}
+
+// Remind sends a reminder only on weekdays and returns whether it sent one.
+func (r Reminder) Remind(to string) (bool, error) {
+	day := r.Clock.Now().Weekday()
+	if day == time.Saturday || day == time.Sunday {
+		return false, nil
+	}
+	if err := r.Sender.Send(to, "standup in 5 minutes"); err != nil {
+		return false, fmt.Errorf("remind %s: %w", to, err)
+	}
+	return true, nil
+}</code></pre></div>
+    <div class="code" data-file="notify_test.go"><pre><code class="language-go">package ex3
+
+import (
+	"errors"
+	"testing"
+	"time"
+)
+
+type fakeSender struct {
+	sent []string
+	err  error
+}
+
+func (f *fakeSender) Send(to, msg string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sent = append(f.sent, to+": "+msg)
+	return nil
+}
+
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
+
+var (
+	monday   = time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	saturday = time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
+)
+
+func TestRemind(t *testing.T) {
+	tests := []struct {
+		name     string
+		now      time.Time
+		sendErr  error
+		wantSent bool
+		wantErr  bool
+	}{
+		{"weekday sends", monday, nil, true, false},
+		{"weekend skips", saturday, nil, false, false},
+		{"sender fails", monday, errors.New("smtp down"), false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &amp;fakeSender{err: tt.sendErr}
+			r := Reminder{Sender: s, Clock: fixedClock{tt.now}}
+
+			sent, err := r.Remind("ana@example.com")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if sent != tt.wantSent {
+				t.Errorf("sent = %v, want %v", sent, tt.wantSent)
+			}
+			if tt.wantSent &amp;&amp; len(s.sent) != 1 {
+				t.Errorf("fake recorded %d messages, want 1", len(s.sent))
+			}
+		})
+	}
+}</code></pre></div>
+    <div class="output"><pre>$ go test -v ./ex3
+=== RUN   TestRemind
+=== RUN   TestRemind/weekday_sends
+=== RUN   TestRemind/weekend_skips
+=== RUN   TestRemind/sender_fails
+--- PASS: TestRemind (0.00s)
+    --- PASS: TestRemind/weekday_sends (0.00s)
+    --- PASS: TestRemind/weekend_skips (0.00s)
+    --- PASS: TestRemind/sender_fails (0.00s)
+PASS
+ok  	example.com/ch15/ex3	0.477s</pre></div>
+  </details>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Your cache test uses <code>time.Sleep(2 * time.Second)</code> to wait for expiry and is slow and occasionally flaky in CI. What's the best modern fix?</div>
+    <div class="quiz-opts"><button>Lower the sleep to 2ms and add <code>t.Parallel()</code></button><button>Wrap the test body in <code>synctest.Test</code> so time is fake and sleeps are instant</button><button>Mark it with <code>t.Skip</code> in CI</button><button>Run it with <code>-count=10</code></button></div>
+    <div class="quiz-explain">Inside a <code>synctest</code> bubble the clock is virtual and only advances when every goroutine is blocked, so sleeps complete instantly and deterministically. Shrinking sleeps makes flakiness worse; skipping or repeating hides the problem.</div>
+  </div>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Tests are <code>TestXxx(t *testing.T)</code> functions in <code>_test.go</code> files; run them with <code>go test ./...</code>. No assertion library needed.</li>
+      <li><code>t.Error</code> records and continues; <code>t.Fatal</code> records and stops the test goroutine. Write messages as <code>Func(in) = got, want want</code>.</li>
+      <li>Table-driven tests + <code>t.Run</code> subtests are the idiomatic default. Name every case.</li>
+      <li><code>t.Helper</code> fixes line numbers, <code>t.Cleanup</code> runs LIFO teardown, <code>t.TempDir</code> gives a self-deleting dir, <code>t.Parallel</code> runs tests concurrently, <code>t.Context</code> gives a per-test context.</li>
+      <li>Fixtures go in <code>testdata/</code>; golden files + an <code>-update</code> flag handle big outputs.</li>
+      <li>Depend on small interfaces and write tiny fakes. Use <code>httptest.NewRecorder</code> for handlers and <code>httptest.NewServer</code> for clients.</li>
+      <li><code>ExampleXxx</code> with <code>// Output:</code> is documentation that's tested. External <code>_test</code> packages test the public API.</li>
+      <li>Benchmarks use <code>for b.Loop()</code>; add <code>-benchmem</code>; compare runs with <code>benchstat</code>.</li>
+      <li>Fuzz parsers and transformations with property checks; failing inputs become permanent seeds in <code>testdata/fuzz</code>.</li>
+      <li>Use <code>-cover</code> as a flashlight, <code>-race</code> in CI, <code>synctest</code> for time-dependent code, and <code>TestMain</code> only for expensive package-wide setup.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

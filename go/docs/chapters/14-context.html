@@ -1,0 +1,1252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 14 · Context — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="14">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part IV · Chapter 14</div>
+  <h1>Context</h1>
+  <p class="lead">A user closes their browser tab. A request blows past its time budget. Someone presses Ctrl+C. In every case, a whole tree of goroutines, database queries and HTTP calls should stop — <em>now</em>. The <code>context</code> package is Go's standard way to carry that "stop" signal (plus deadlines and a few request-scoped values) across every function and package boundary.</p>
+  <div class="meta">
+    <span class="pill">⏱ 40 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 13 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>The problem context solves, and the four methods of the <code>context.Context</code> interface</li>
+      <li><code>Background</code> vs <code>TODO</code>, and how to derive contexts with <code>WithCancel</code>, <code>WithTimeout</code>, <code>WithDeadline</code></li>
+      <li>Explaining <em>why</em> you stopped with <code>WithCancelCause</code>, <code>WithTimeoutCause</code> and <code>context.Cause</code></li>
+      <li>Newer tools: <code>WithoutCancel</code> and <code>AfterFunc</code></li>
+      <li>How cancellation flows down a tree of contexts (and never up)</li>
+      <li>Checking <code>ctx.Done()</code> and <code>ctx.Err()</code> in loops and <code>select</code></li>
+      <li>Context in HTTP clients (<code>NewRequestWithContext</code>) and servers (<code>r.Context()</code>)</li>
+      <li>Context values done right: typed keys, request-scoped data only</li>
+      <li>The classic mistakes, and graceful Ctrl+C handling with <code>signal.NotifyContext</code></li>
+    </ul>
+  </div>
+
+  <h2>Why context exists</h2>
+  <p>Picture an HTTP handler that calls a service, which runs three database queries and calls another API. The user gives up after 150ms and closes the tab. Without some shared signal, every one of those calls keeps running to completion, burning CPU, holding DB connections, and producing a result nobody will read.</p>
+  <div class="live" data-title="No way to say stop">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// search pretends to query 3 slow backends. It has no way to be told "stop".
+func search(query string) []string {
+	var results []string
+	for _, backend := range []string{"db", "cache", "index"} {
+		time.Sleep(100 * time.Millisecond)
+		fmt.Println("  queried", backend)
+		results = append(results, backend+":"+query)
+	}
+	return results
+}
+
+func main() {
+	start := time.Now()
+	// The user gave up after 150ms... but we have no way to tell search().
+	res := search("golang")
+	fmt.Println(res, "after", time.Since(start).Round(100*time.Millisecond))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20,22" data-state="t=0ms">Main records the start time and calls <code>search</code>. It has no context parameter, so the caller has no handle to stop it.</li>
+      <li data-lines="11-13" data-state="backend=db; t=100ms; results=[]" data-out="  queried db">First backend: sleep 100ms, then print.</li>
+      <li data-lines="14" data-state="backend=db; results=[db:golang]">Append the result and move on.</li>
+      <li data-lines="11-14" data-state="backend=cache; t=200ms; results=[db:golang cache:golang]" data-out="  queried cache">The user gave up at 150ms, but <code>search</code> cannot know. It keeps working.</li>
+      <li data-lines="11-14" data-state="backend=index; t=300ms; results=[db:golang cache:golang index:golang]" data-out="  queried index">Third backend: 100ms more of work nobody wants.</li>
+      <li data-lines="16,23" data-state="t=300ms" data-out="[db:golang cache:golang index:golang] after 300ms">The full 300ms is spent. A <code>context.Context</code> parameter is exactly the missing "stop" signal.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>  queried db
+  queried cache
+  queried index
+[db:golang cache:golang index:golang] after 300ms</pre></div>
+  <p>The function ran for the full 300ms because nothing could tell it to stop. You could add your own <code>quit</code> channel parameter (like Chapter 13's graceful stop), but then every library would invent its own — one takes a channel, one a timeout int, one a callback. They wouldn't compose.</p>
+  <p>The <code>context</code> package is the standard answer. A <code>context.Context</code> is a small value you pass as the <strong>first parameter</strong> of every function that does I/O or may take a while. It carries three things across API boundaries:</p>
+  <ol>
+    <li><strong>A cancellation signal</strong> — "stop, nobody needs this anymore."</li>
+    <li><strong>A deadline</strong> — "you must be done by 12:00:00.250."</li>
+    <li><strong>Request-scoped values</strong> — a request ID, the authenticated user (use sparingly).</li>
+  </ol>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A context is like the <strong>work order</strong> stapled to a job in a factory. Every worker who touches the job sees the same order. If the customer cancels, the manager stamps "CANCELLED" on the order, and every worker who glances at it stops. Workers can attach a sub-order with a tighter deadline for their own helpers, but they can never loosen the original.</p></div>
+
+  <h3>The Context interface</h3>
+  <p>It's just four methods:</p>
+  <div class="code" data-file="context (stdlib)"><pre><code class="language-go">type Context interface {
+	Deadline() (deadline time.Time, ok bool) // when will I be cancelled automatically?
+	Done() &lt;-chan struct{}                   // closed when cancelled or the deadline passes
+	Err() error                              // nil while active; Canceled or DeadlineExceeded after
+	Value(key any) any                       // request-scoped values
+}</code></pre></div>
+  <p><code>Done()</code> is the clever part: it returns a channel that is <strong>closed</strong> on cancellation. Closing a channel wakes up <em>every</em> receiver at once (a broadcast), and you can wait on it inside a <code>select</code> alongside any other channel. <code>Err()</code> then tells you why: <code>context.Canceled</code> or <code>context.DeadlineExceeded</code>.</p>
+
+  <h3>Where contexts start: Background and TODO</h3>
+  <p>Contexts form a tree, and every tree needs a root. There are two empty roots — never cancelled, no deadline, no values:</p>
+  <ul>
+    <li><code>context.Background()</code> — the root you use in <code>main</code>, in tests, at the top of a background job.</li>
+    <li><code>context.TODO()</code> — identical behaviour, but it <em>means</em> "I haven't figured out which context belongs here yet." It's a flag for reviewers and linters during a refactor.</li>
+  </ul>
+  <p>Everything else is <em>derived</em> from a parent with a <code>With…</code> function, which returns a child context and (usually) a <code>cancel</code> function.</p>
+
+  <h2>WithCancel: stop on demand</h2>
+  <p><code>context.WithCancel(parent)</code> returns a child context and a <code>cancel</code> function. Calling <code>cancel()</code> closes the child's <code>Done</code> channel. Here's the search again, now cancellable:</p>
+  <div class="code" data-file="cancel/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func search(ctx context.Context, query string) ([]string, error) {
+	var results []string
+	for _, backend := range []string{"db", "cache", "index"} {
+		select {
+		case &lt;-time.After(100 * time.Millisecond): // the "work"
+			fmt.Println("  queried", backend)
+			results = append(results, backend+":"+query)
+		case &lt;-ctx.Done(): // someone said stop
+			return results, ctx.Err()
+		}
+	}
+	return results, nil
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // always release resources, even if we cancel earlier
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		fmt.Println("  user clicked Cancel")
+		cancel()
+	}()
+
+	start := time.Now()
+	res, err := search(ctx, "golang")
+	fmt.Println(res, err, "after", time.Since(start).Round(50*time.Millisecond))
+}</code></pre></div>
+  <div class="output"><pre>  queried db
+  user clicked Cancel
+[db:golang] context canceled after 150ms</pre></div>
+  <p>The search stopped at 150ms — the moment the user cancelled — and returned the partial results with the error <code>context canceled</code>.</p>
+
+  <div class="live" data-title="Cancellation reaching a select">
+    <pre><code class="language-go">ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+go func() {
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+}()
+
+for _, b := range []string{"db", "cache", "index"} {
+	select {
+	case &lt;-time.After(100 * time.Millisecond):
+		fmt.Println("queried", b)
+	case &lt;-ctx.Done():
+		fmt.Println("stopped:", ctx.Err())
+		return
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="ctx.Err()=nil; Done=open">We derive a cancellable context. <code>defer cancel()</code> guarantees cleanup even on the normal path.</li>
+      <li data-lines="4-7" data-state="ctx.Err()=nil; t=0ms">A goroutine will call <code>cancel()</code> after 150ms. It starts sleeping.</li>
+      <li data-lines="9-11" data-state="b=db; t=0ms">First backend. <code>select</code> waits on <em>two</em> channels: the 100ms timer, and <code>ctx.Done()</code>.</li>
+      <li data-lines="11-12" data-state="b=db; t=100ms" data-out="queried db">The timer fires first. We print and loop.</li>
+      <li data-lines="9-11" data-state="b=cache; t=100ms">Second backend: a fresh 100ms timer (it would fire at 200ms).</li>
+      <li data-lines="5-6" data-state="b=cache; t=150ms; Done=closed; ctx.Err()=context canceled">At 150ms the goroutine calls <code>cancel()</code>. The <code>Done</code> channel is <strong>closed</strong>.</li>
+      <li data-lines="13-15" data-state="b=cache; t=150ms" data-out="stopped: context canceled">A closed channel is always ready to receive, so <code>select</code> picks this case right away. We stop without waiting for the cache.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: always call cancel</div><p>Every <code>With…</code> function that returns a <code>cancel</code> registers the child with its parent. If you never call <code>cancel</code>, that registration (and for timeouts, a timer) lives until the <em>parent</em> is cancelled — possibly forever for <code>Background()</code>. That's a leak. The rule: <strong><code>defer cancel()</code> on the very next line</strong>. Calling cancel more than once is harmless. <code>go vet</code> catches the most obvious version:</p></div>
+  <div class="code" data-file="lostcancel/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func main() {
+	ctx, _ := context.WithTimeout(context.Background(), time.Second) // cancel discarded!
+	fmt.Println(ctx.Err())
+}</code></pre></div>
+  <div class="output error" data-label="go vet"><pre>$ go vet ./lostcancel
+lostcancel/main.go:10:7: the cancel function returned by context.WithTimeout should be called, not discarded, to avoid a context leak</pre></div>
+
+  <h2>Timeouts and deadlines</h2>
+  <p>Most of the time you don't cancel by hand; you give work a <strong>time budget</strong>.</p>
+  <ul>
+    <li><code>WithTimeout(parent, 100*time.Millisecond)</code> — cancel automatically after a duration.</li>
+    <li><code>WithDeadline(parent, t)</code> — cancel automatically at an absolute time. (<code>WithTimeout</code> is literally <code>WithDeadline(parent, time.Now().Add(d))</code>.)</li>
+  </ul>
+  <div class="live" data-title="WithTimeout: one fast query, one slow">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+func slowQuery(ctx context.Context, d time.Duration) (string, error) {
+	select {
+	case &lt;-time.After(d):
+		return "rows", nil
+	case &lt;-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func run(d time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	res, err := slowQuery(ctx, d)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		fmt.Printf("query of %v: timed out (%v)\n", d, err)
+	case err != nil:
+		fmt.Printf("query of %v: failed: %v\n", d, err)
+	default:
+		fmt.Printf("query of %v: got %q\n", d, res)
+	}
+}
+
+func main() {
+	run(50 * time.Millisecond)
+	run(300 * time.Millisecond)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="35,20-21" data-state="d=50ms; deadline=now+100ms"><code>run(50ms)</code> creates a context that will cancel itself in 100ms. <code>defer cancel()</code> frees its timer when <code>run</code> returns.</li>
+      <li data-lines="23,11-13" data-state="d=50ms; t=50ms"><code>slowQuery</code> races the 50ms timer against <code>ctx.Done()</code>. The timer wins at 50ms.</li>
+      <li data-lines="13,23" data-state="res=rows; err=nil">It returns <code>"rows", nil</code>.</li>
+      <li data-lines="24,29-30" data-state="res=rows; err=nil" data-out="query of 50ms: got &quot;rows&quot;">Neither error case matches, so the default branch prints the result. The deferred <code>cancel</code> runs as <code>run</code> exits.</li>
+      <li data-lines="36,20-21" data-state="d=300ms; deadline=now+100ms">Second call: a brand-new context, again 100ms.</li>
+      <li data-lines="23,14-15" data-state="d=300ms; t=100ms; err=context deadline exceeded">This time the deadline hits first. <code>ctx.Done()</code> closes and <code>slowQuery</code> returns <code>ctx.Err()</code>.</li>
+      <li data-lines="25-26" data-state="err=context deadline exceeded" data-out="query of 300ms: timed out (context deadline exceeded)"><code>errors.Is(err, context.DeadlineExceeded)</code> is true, so we report a timeout. Use <code>errors.Is</code>, not <code>==</code>, in case the error was wrapped.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>query of 50ms: got "rows"
+query of 300ms: timed out (context deadline exceeded)</pre></div>
+  <p>When the timer wins, <code>ctx.Err()</code> is <code>context.DeadlineExceeded</code>. Always compare with <code>errors.Is</code>, because errors are usually wrapped by the time they reach you (<code>"summary: repo.Find(3): context deadline exceeded"</code>).</p>
+  <div class="live" data-title="Deadlines: absolute time, children can only shorten">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func main() {
+	// A deadline is an absolute moment; a timeout is "now + duration".
+	deadline := time.Now().Add(80 * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	if d, ok := ctx.Deadline(); ok {
+		fmt.Println("has deadline, time left ~", time.Until(d).Round(10*time.Millisecond))
+	}
+
+	// A child can only SHORTEN the deadline, never extend it.
+	child, cancelChild := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelChild()
+	d, _ := child.Deadline()
+	fmt.Println("child deadline == parent deadline:", d.Equal(deadline))
+
+	fmt.Println("err before:", ctx.Err())
+	&lt;-ctx.Done()
+	fmt.Println("err after: ", ctx.Err())
+	fmt.Println("child err: ", child.Err())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11-13" data-state="deadline=now+80ms; ctx.Err()=nil"><code>WithDeadline</code> takes an absolute moment. <code>WithTimeout(d)</code> is just <code>WithDeadline(now+d)</code>.</li>
+      <li data-lines="15-16" data-state="ok=true; left≈80ms" data-out="has deadline, time left ~ 80ms"><code>ctx.Deadline()</code> reports it, so downstream code can decide whether there's time to even start.</li>
+      <li data-lines="20-23" data-state="child.deadline=parent deadline" data-out="child deadline == parent deadline: true">The child asks for 5 seconds, but a child can never outlive its parent. Go keeps the earlier deadline: the parent's 80ms.</li>
+      <li data-lines="25" data-state="ctx.Err()=nil" data-out="err before: &lt;nil&gt;">Before the deadline, <code>Err()</code> is <code>nil</code>.</li>
+      <li data-lines="26" data-state="t=80ms; ctx.Done=closed">Main blocks on <code>&lt;-ctx.Done()</code> until the deadline passes at about 80ms.</li>
+      <li data-lines="27" data-state="ctx.Err()=context deadline exceeded" data-out="err after:  context deadline exceeded">Now <code>Err()</code> explains why: the deadline passed.</li>
+      <li data-lines="28" data-state="child.Err()=context deadline exceeded" data-out="child err:  context deadline exceeded">Cancellation flows down: the child is done too, with the same reason.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>has deadline, time left ~ 80ms
+child deadline == parent deadline: true
+err before: &lt;nil&gt;
+err after:  context deadline exceeded
+child err:  context deadline exceeded</pre></div>
+  <p>Note the second line: the child asked for 5 seconds, but its parent ends in 80ms, so the child's deadline is the parent's. <strong>A child can shorten a deadline but never extend it.</strong> That's what makes deadlines trustworthy: no library deep down can accidentally outlive the caller's budget.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Set timeouts at the <strong>edges</strong> of your system — where a request enters (HTTP handler, queue consumer) and where you call out (each DB query, each downstream API). Inner layers just pass <code>ctx</code> along. Pick budgets deliberately: if your SLA is 1s and you call two services in sequence, giving each a 2s timeout means the whole request can never meet its SLA. Many teams use <code>ctx.Deadline()</code> to forward the <em>remaining</em> budget to downstream services (gRPC does this automatically).</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A handler creates <code>ctx</code> with a 2s timeout. Deep inside, a library calls <code>context.WithTimeout(ctx, 10*time.Second)</code>. When is the library's context cancelled?</div>
+    <div class="quiz-opts"><button>After 10 seconds</button><button>After 12 seconds</button><button>After at most 2 seconds — whichever deadline is earlier wins</button><button>Never, because it has its own timer</button></div>
+    <div class="quiz-explain">A derived context is cancelled when its parent is cancelled, or when its own deadline passes — whichever comes first. The parent's 2s deadline arrives first, so the library's 10s request is cut short.</div>
+  </div>
+
+  <h3>Saying why: WithCancelCause and WithTimeoutCause</h3>
+  <p><code>ctx.Err()</code> only ever returns two generic errors. In a big system, "context canceled" in a log is frustrating: cancelled by <em>whom</em>? Go 1.20 added <code>WithCancelCause</code>, whose cancel function takes an error, and <code>context.Cause(ctx)</code> to read it back. Go 1.21 added <code>WithTimeoutCause</code> and <code>WithDeadlineCause</code>.</p>
+  <div class="live" data-title="Err() says that, Cause() says why">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+var ErrPaymentDeclined = errors.New("payment declined")
+
+func main() {
+	ctx, cancel := context.WithCancelCause(context.Background())
+
+	// Some goroutine discovers WHY we must stop and records it.
+	cancel(ErrPaymentDeclined)
+
+	fmt.Println("ctx.Err():         ", ctx.Err())          // always the generic error
+	fmt.Println("context.Cause(ctx):", context.Cause(ctx)) // the specific reason
+	fmt.Println("is declined?       ", errors.Is(context.Cause(ctx), ErrPaymentDeclined))
+
+	// A context that wasn't cancelled with a cause reports ctx.Err() as its cause.
+	plain, stop := context.WithCancel(context.Background())
+	stop()
+	fmt.Println("plain cause:       ", context.Cause(plain))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12" data-state="ctx.Err()=nil; cause=nil"><code>WithCancelCause</code> gives a cancel function that takes an <code>error</code>: the reason.</li>
+      <li data-lines="15" data-state="ctx.Err()=context canceled; cause=payment declined">We cancel with <code>ErrPaymentDeclined</code>. The context is now done and remembers the cause.</li>
+      <li data-lines="17" data-state="ctx.Err()=context canceled" data-out="ctx.Err():          context canceled"><code>ctx.Err()</code> stays the generic <code>context.Canceled</code>, so existing code that checks for it keeps working.</li>
+      <li data-lines="18" data-state="cause=payment declined" data-out="context.Cause(ctx): payment declined"><code>context.Cause</code> returns the specific reason we passed in.</li>
+      <li data-lines="19" data-state="is=true" data-out="is declined?        true">It's a normal error value, so <code>errors.Is</code> works on it.</li>
+      <li data-lines="22-23" data-state="plain.Err()=context canceled">A plain <code>WithCancel</code> context is cancelled the old way, with no cause.</li>
+      <li data-lines="24" data-state="cause(plain)=context canceled" data-out="plain cause:        context canceled">With no cause recorded, <code>Cause</code> falls back to <code>ctx.Err()</code>. It never returns nil for a done context.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>ctx.Err():          context canceled
+context.Cause(ctx): payment declined
+is declined?        true
+plain cause:        context canceled</pre></div>
+  <div class="live" data-title="A timeout that explains itself">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+var ErrSlowUpstream = errors.New("inventory service took longer than 50ms")
+
+func main() {
+	ctx, cancel := context.WithTimeoutCause(context.Background(), 50*time.Millisecond, ErrSlowUpstream)
+	defer cancel()
+
+	&lt;-ctx.Done()
+	fmt.Println("Err:  ", ctx.Err())
+	fmt.Println("Cause:", context.Cause(ctx))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13-14" data-state="deadline=now+50ms; cause=(armed)"><code>WithTimeoutCause</code> is <code>WithTimeout</code> plus a custom error to record <em>if</em> the timer fires.</li>
+      <li data-lines="16" data-state="t=50ms; Done=closed">Main blocks until the 50ms timer expires and closes <code>Done</code>.</li>
+      <li data-lines="17" data-state="Err=context deadline exceeded" data-out="Err:   context deadline exceeded"><code>Err()</code> is still the standard <code>DeadlineExceeded</code>.</li>
+      <li data-lines="18" data-state="Cause=inventory service took longer than 50ms" data-out="Cause: inventory service took longer than 50ms"><code>Cause</code> gives the human-friendly reason, great for logs. If we had called <code>cancel()</code> first, the cause would be plain <code>context.Canceled</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Err:   context deadline exceeded
+Cause: inventory service took longer than 50ms</pre></div>
+  <div class="callout tip"><p><code>ctx.Err()</code> stays the generic error on purpose, so all existing code that checks <code>errors.Is(err, context.Canceled)</code> keeps working. Use <code>context.Cause(ctx)</code> when you <em>log</em> or <em>report</em> a cancellation. <code>signal.NotifyContext</code> (later in this chapter) uses causes too: its cause is the signal that arrived.</p></div>
+
+  <h2>The cancellation tree</h2>
+  <p>Every derived context remembers its parent. When a context is cancelled, it cancels <strong>all of its descendants</strong>. It never affects its parent or its siblings. This is what lets one <code>cancel()</code> at the top of a request stop dozens of goroutines spread across packages.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="300" fill="#262624"/>
+      <defs>
+        <marker id="ar14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#a8a49a"/></marker>
+      </defs>
+      <rect x="280" y="18" width="160" height="40" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="360" y="43" fill="#a8a49a" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">Background()</text>
+      <rect x="280" y="90" width="160" height="40" rx="8" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="1.5"/>
+      <text x="360" y="115" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">request (2s)</text>
+      <rect x="130" y="170" width="160" height="40" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+      <text x="210" y="195" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">db ✕ cancel()</text>
+      <rect x="430" y="170" width="160" height="40" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="1.5"/>
+      <text x="510" y="195" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">cache</text>
+      <rect x="40" y="245" width="140" height="40" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5" stroke-dasharray="5 3"/>
+      <text x="110" y="270" fill="#d97757" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">query ✕</text>
+      <rect x="230" y="245" width="140" height="40" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5" stroke-dasharray="5 3"/>
+      <text x="300" y="270" fill="#d97757" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">tx ✕</text>
+      <line x1="360" y1="58" x2="360" y2="88" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar14)"/>
+      <line x1="330" y1="130" x2="230" y2="168" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar14)"/>
+      <line x1="390" y1="130" x2="490" y2="168" stroke="#a8a49a" stroke-width="1.5" marker-end="url(#ar14)"/>
+      <line x1="190" y1="210" x2="120" y2="243" stroke="#d97757" stroke-width="1.5" marker-end="url(#ar14)"/>
+      <line x1="230" y1="210" x2="290" y2="243" stroke="#d97757" stroke-width="1.5" marker-end="url(#ar14)"/>
+      <text x="600" y="115" fill="#a8a49a" font-size="12">unaffected ↑ (parents)</text>
+      <text x="600" y="195" fill="#8fbf7f" font-size="12">unaffected (sibling)</text>
+      <text x="400" y="270" fill="#d97757" font-size="12">cancelled automatically (children)</text>
+      <text x="20" y="30" fill="#e0b45c" font-size="12">cancel flows DOWN only</text>
+    </svg>
+    <figcaption>Cancelling <code>db</code> cancels its whole subtree (<code>query</code>, <code>tx</code>). Its parent <code>request</code> and sibling <code>cache</code> keep running. Cancelling <code>request</code> would cancel everything below it.</figcaption>
+  </figure>
+
+  <div class="code" data-file="tree/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+)
+
+func status(name string, ctx context.Context) {
+	fmt.Printf("  %-8s err=%v\n", name, ctx.Err())
+}
+
+func main() {
+	root := context.Background()
+	request, cancelRequest := context.WithCancel(root)
+	db, cancelDB := context.WithCancel(request)
+	cache, cancelCache := context.WithCancel(request)
+	query, cancelQuery := context.WithCancel(db)
+	defer cancelRequest()
+	defer cancelDB()
+	defer cancelCache()
+	defer cancelQuery()
+
+	fmt.Println("cancel db (a middle node):")
+	cancelDB()
+	status("request", request)
+	status("db", db)
+	status("query", query)
+	status("cache", cache)
+
+	fmt.Println("cancel request (the parent):")
+	cancelRequest()
+	status("request", request)
+	status("cache", cache)
+}</code></pre></div>
+  <div class="output"><pre>cancel db (a middle node):
+  request  err=&lt;nil&gt;
+  db       err=context canceled
+  query    err=context canceled
+  cache    err=&lt;nil&gt;
+cancel request (the parent):
+  request  err=context canceled
+  cache    err=context canceled</pre></div>
+
+  <div class="live" data-title="Cancel a middle node, then the root">
+    <pre><code class="language-go">request, cancelReq := context.WithCancel(context.Background())
+db, cancelDB := context.WithCancel(request)
+cache, cancelCache := context.WithCancel(request)
+query, cancelQuery := context.WithCancel(db)
+defer cancelCache()
+defer cancelQuery()
+
+cancelDB()
+fmt.Println(request.Err(), db.Err(), query.Err(), cache.Err())
+
+cancelReq()
+fmt.Println(cache.Err())</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="request=active">Child of Background: <code>request</code>.</li>
+      <li data-lines="2-3" data-state="request=active; db=active; cache=active">Two children of <code>request</code>: <code>db</code> and <code>cache</code>. They're siblings.</li>
+      <li data-lines="4" data-state="request=active; db=active; cache=active; query=active">A grandchild: <code>query</code> hangs under <code>db</code>.</li>
+      <li data-lines="5-6" data-state="request=active; db=active; cache=active; query=active">We defer the cancels we're not calling explicitly — no leaks, even on early return.</li>
+      <li data-lines="8" data-state="request=active; db=canceled; cache=active; query=canceled">Cancel <code>db</code>. It walks its children and cancels <code>query</code> too. <code>request</code> and <code>cache</code> don't notice.</li>
+      <li data-lines="9" data-state="request=active; db=canceled; cache=active; query=canceled" data-out="&lt;nil&gt; context canceled context canceled &lt;nil&gt;">The four errors confirm it: only the <code>db</code> subtree is cancelled.</li>
+      <li data-lines="11" data-state="request=canceled; db=canceled; cache=canceled; query=canceled">Cancel the root of our tree. Every descendant, including <code>cache</code>, is cancelled.</li>
+      <li data-lines="12" data-state="request=canceled; cache=canceled" data-out="context canceled"><code>cache</code> was never touched directly but is cancelled through its parent.</li>
+    </ol>
+  </div>
+
+  <h2>Propagating ctx: the first-parameter rule</h2>
+  <p>The convention is strict and universal: if a function might block, do I/O, or call something that does, its <strong>first parameter is <code>ctx context.Context</code></strong>. Every layer passes it straight down. You'll see this signature on every database driver, HTTP client, gRPC stub and cloud SDK.</p>
+  <div class="code" data-file="layers/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// --- repository layer -------------------------------------------------
+
+type OrderRepo struct{}
+
+func (OrderRepo) Find(ctx context.Context, id int) (string, error) {
+	select {
+	case &lt;-time.After(40 * time.Millisecond): // the "SQL query"
+		return fmt.Sprintf("order#%d", id), nil
+	case &lt;-ctx.Done():
+		return "", fmt.Errorf("repo.Find(%d): %w", id, ctx.Err())
+	}
+}
+
+// --- service layer ----------------------------------------------------
+
+type OrderService struct{ repo OrderRepo }
+
+func (s OrderService) Summary(ctx context.Context, ids []int) ([]string, error) {
+	var out []string
+	for _, id := range ids {
+		o, err := s.repo.Find(ctx, id) // same ctx passed straight down
+		if err != nil {
+			return out, fmt.Errorf("summary: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// --- "handler" layer ----------------------------------------------------
+
+func handle(ctx context.Context, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	svc := OrderService{}
+	res, err := svc.Summary(ctx, []int{1, 2, 3})
+	fmt.Printf("budget %v -&gt; %v\n", budget, res)
+	if err != nil {
+		fmt.Println("   error:", err)
+		fmt.Println("   timed out?", errors.Is(err, context.DeadlineExceeded))
+	}
+}
+
+func main() {
+	handle(context.Background(), 200*time.Millisecond)
+	handle(context.Background(), 100*time.Millisecond)
+}</code></pre></div>
+  <div class="output"><pre>budget 200ms -&gt; [order#1 order#2 order#3]
+budget 100ms -&gt; [order#1 order#2]
+   error: summary: repo.Find(3): context deadline exceeded
+   timed out? true</pre></div>
+  <p>The handler set a single budget. The service and repository didn't know or care about time limits — they just passed <code>ctx</code> on. With 100ms, the third query got cut off, and the error came back up wrapped with context at each layer, while <code>errors.Is</code> still finds <code>DeadlineExceeded</code> underneath.</p>
+
+  <table>
+    <thead><tr><th>Function</th><th>Use it when</th><th>Cancel func?</th></tr></thead>
+    <tbody>
+      <tr><td><code>Background()</code></td><td>Root of main, tests, top-level jobs</td><td>—</td></tr>
+      <tr><td><code>TODO()</code></td><td>Placeholder while plumbing ctx through a codebase</td><td>—</td></tr>
+      <tr><td><code>WithCancel(p)</code></td><td>You decide when to stop (first result wins, user clicks cancel)</td><td>Yes</td></tr>
+      <tr><td><code>WithCancelCause(p)</code></td><td>Same, but record a reason error</td><td>Yes, takes an error</td></tr>
+      <tr><td><code>WithTimeout(p, d)</code> / <code>WithTimeoutCause</code></td><td>A relative budget ("200ms for this query")</td><td>Yes</td></tr>
+      <tr><td><code>WithDeadline(p, t)</code> / <code>WithDeadlineCause</code></td><td>An absolute moment ("finish by the batch cutoff")</td><td>Yes</td></tr>
+      <tr><td><code>WithValue(p, k, v)</code></td><td>Attach request-scoped data</td><td>No</td></tr>
+      <tr><td><code>WithoutCancel(p)</code></td><td>Keep values, detach from parent's cancellation (1.21+)</td><td>No</td></tr>
+      <tr><td><code>AfterFunc(ctx, f)</code></td><td>Run <code>f</code> when ctx is done (1.21+)</td><td>Returns <code>stop()</code></td></tr>
+      <tr><td><code>signal.NotifyContext(p, sigs...)</code></td><td>Cancel on Ctrl+C / SIGTERM</td><td>Returns <code>stop()</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Checking ctx in loops and select</h2>
+  <p>Context is <strong>cooperative</strong>. Cancelling doesn't kill anything; it closes a channel. Your code has to look at it. There are two ways:</p>
+  <ul>
+    <li><strong><code>ctx.Err() != nil</code></strong> — a cheap, non-blocking check. Use it between iterations of CPU-bound loops.</li>
+    <li><strong><code>case &lt;-ctx.Done():</code></strong> in a <code>select</code> — use it whenever you would otherwise <em>block</em> (a channel send/receive, a timer). Without it, a blocked goroutine can't hear the cancellation.</li>
+  </ul>
+  <div class="code" data-file="loop/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// processAll is CPU-bound work with no channels; check ctx between items.
+func processAll(ctx context.Context, items []int) (int, error) {
+	total := 0
+	for i, it := range items {
+		if err := ctx.Err(); err != nil { // cheap, non-blocking check
+			return total, fmt.Errorf("stopped at item %d: %w", i, err)
+		}
+		time.Sleep(10 * time.Millisecond) // pretend: expensive computation
+		total += it
+	}
+	return total, nil
+}
+
+// produce sends on a channel; use select so a blocked send can be abandoned.
+func produce(ctx context.Context, out chan&lt;- int) error {
+	for i := 0; ; i++ {
+		select {
+		case out &lt;- i:
+		case &lt;-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer cancel()
+
+	items := make([]int, 100)
+	for i := range items {
+		items[i] = 1
+	}
+	total, err := processAll(ctx, items)
+	fmt.Println("total:", total, "err:", err)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	ch := make(chan int)
+	done := make(chan error)
+	go func() { done &lt;- produce(ctx2, ch) }()
+
+	fmt.Println(&lt;-ch, &lt;-ch, &lt;-ch)
+	cancel2() // consumer is done: producer must not block forever
+	fmt.Println("producer exited with:", &lt;-done)
+}</code></pre></div>
+  <div class="output" data-label="Output (stop point depends on timing)"><pre>total: 4 err: stopped at item 4: context deadline exceeded
+0 1 2
+producer exited with: context canceled</pre></div>
+
+  <div class="live" data-title="Checking ctx.Err() between items">
+    <pre><code class="language-go">ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+defer cancel()
+
+total := 0
+for i, it := range items { // items = [1 1 1 1 ...]
+	if err := ctx.Err(); err != nil {
+		fmt.Println("stopped at", i, err)
+		break
+	}
+	time.Sleep(10 * time.Millisecond)
+	total += it
+}
+fmt.Println("total:", total)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="budget=35ms; t=0ms">A 35ms budget for the whole loop.</li>
+      <li data-lines="4-6" data-state="i=0; total=0; t=0ms; ctx.Err()=nil">Item 0: check the context first. Still active.</li>
+      <li data-lines="10-11" data-state="i=0; total=1; t=10ms">Do 10ms of "work" and add to the total.</li>
+      <li data-lines="5-11" data-state="i=1; total=2; t=20ms">Item 1: check passes, work, total 2.</li>
+      <li data-lines="5-11" data-state="i=3; total=4; t=40ms">Items 2 and 3 likewise. Somewhere during item 3 (at 35ms), the deadline passes. The work in progress isn't interrupted — context can't preempt code.</li>
+      <li data-lines="5-8" data-state="i=4; total=4; ctx.Err()=DeadlineExceeded" data-out="stopped at 4 context deadline exceeded">Item 4: the check now sees the error, and we stop. The granularity of cancellation is one loop iteration.</li>
+      <li data-lines="13" data-state="total=4" data-out="total: 4">We report the partial result.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>"Every blocking operation has an exit" is a great code-review rule. Look at each channel send and receive in a goroutine: if it's not in a <code>select</code> with <code>ctx.Done()</code> (or guaranteed to complete), it's a potential goroutine leak. The producer in <code>loop/main.go</code> would block forever on <code>out &lt;- i</code> after the consumer leaves; the <code>ctx.Done()</code> case is what lets it exit.</p></div>
+
+  <div class="callout info"><p>Go 1.23 changed timers so that an unstopped <code>time.After</code> in a <code>select</code> is garbage-collected once unreachable. Older advice to avoid <code>time.After</code> in loops for memory reasons no longer applies, though a reusable <code>time.Timer</code> is still a little cheaper in very hot loops.</p></div>
+
+  <h2>WithoutCancel and AfterFunc</h2>
+  <h3>WithoutCancel: keep the values, lose the cancellation</h3>
+  <p>Sometimes work must <em>outlive</em> the request that triggered it: writing an audit record, sending a "your order shipped" email. If you pass the request context, the work is cancelled the moment the handler returns. <code>context.WithoutCancel(ctx)</code> (Go 1.21) returns a context that keeps all of the parent's <strong>values</strong> (request ID, user, tracing span) but is <strong>never cancelled</strong> and has no deadline.</p>
+  <div class="live" data-title="WithoutCancel keeps values, drops cancellation">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+type ctxKey string
+
+func audit(ctx context.Context, event string) {
+	time.Sleep(30 * time.Millisecond) // writing to the audit log takes a while
+	fmt.Printf("audit %q for user=%v, ctx.Err()=%v\n", event, ctx.Value(ctxKey("user")), ctx.Err())
+}
+
+func main() {
+	reqCtx, cancel := context.WithCancel(
+		context.WithValue(context.Background(), ctxKey("user"), "ana"))
+
+	// WithoutCancel: keep the values, drop the cancellation.
+	bg := context.WithoutCancel(reqCtx)
+
+	done := make(chan struct{})
+	go func() {
+		audit(bg, "order.created")
+		close(done)
+	}()
+
+	cancel() // the HTTP request finished: reqCtx is cancelled
+	fmt.Println("request ctx:", reqCtx.Err())
+	&lt;-done
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17-18" data-state="reqCtx.user=ana; reqCtx.Err()=nil">The request context carries <code>user=ana</code> and can be cancelled.</li>
+      <li data-lines="21" data-state="bg.user=ana; bg.Err()=nil"><code>WithoutCancel</code> derives <code>bg</code>: it still sees parent values, but is <strong>never</strong> cancelled by the parent.</li>
+      <li data-lines="23-25,12" data-state="goroutine=audit (sleeping)">A goroutine starts the audit write with <code>bg</code>. It sleeps 30ms to simulate slow I/O.</li>
+      <li data-lines="29" data-state="reqCtx.Err()=context canceled; bg.Err()=nil">Meanwhile the request ends and <code>cancel()</code> is called. Only <code>reqCtx</code> is affected.</li>
+      <li data-lines="30" data-state="reqCtx.Err()=context canceled" data-out="request ctx: context canceled">Main prints the request context's error.</li>
+      <li data-lines="31,13" data-state="t=30ms; bg.Err()=nil" data-out="audit &quot;order.created&quot; for user=ana, ctx.Err()=&lt;nil&gt;">Main waits on <code>done</code>. The audit wakes, still sees <code>user=ana</code>, and <code>bg</code> is not cancelled, so the write completes.</li>
+      <li data-lines="26,31" data-state="done=closed">The goroutine closes <code>done</code> and main exits. Without <code>WithoutCancel</code>, this audit would have seen <code>context canceled</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>request ctx: context canceled
+audit "order.created" for user=ana, ctx.Err()=&lt;nil&gt;</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>A context from <code>WithoutCancel</code> has no limit at all. Usually you wrap it again: <code>ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)</code>. Detached work with no timeout is how you get goroutines that hang forever on a dead connection.</p></div>
+
+  <h3>AfterFunc: run cleanup when a context ends</h3>
+  <p><code>context.AfterFunc(ctx, f)</code> (Go 1.21) schedules <code>f</code> to run in its own goroutine once <code>ctx</code> is done. It returns <code>stop()</code>, which deregisters <code>f</code> and reports whether it stopped it before it started. It's useful for bridging context into APIs that don't understand context — like closing a connection to unblock a read.</p>
+  <div class="live" data-title="AfterFunc: run cleanup when ctx is done">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// AfterFunc: run f in its own goroutine once ctx is done.
+	stop := context.AfterFunc(ctx, func() {
+		fmt.Println("ctx done -&gt; closing the connection")
+	})
+
+	// A second registration that we deregister before it fires.
+	stop2 := context.AfterFunc(ctx, func() {
+		fmt.Println("this never prints")
+	})
+	fmt.Println("stop2 prevented it:", stop2())
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	time.Sleep(10 * time.Millisecond) // give the AfterFunc goroutine time to run
+
+	fmt.Println("stop after it ran:", stop()) // false: already started
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="ctx.Err()=nil">A cancellable context.</li>
+      <li data-lines="13-15" data-state="f1=registered">We register a callback. It does <strong>not</strong> run now; it will run in its own goroutine once <code>ctx</code> is done.</li>
+      <li data-lines="18-20" data-state="f1=registered; f2=registered">A second callback is registered too.</li>
+      <li data-lines="21" data-state="f1=registered; f2=removed" data-out="stop2 prevented it: true"><code>stop2()</code> deregisters f2 before it fired, and returns <code>true</code> to say "I stopped it".</li>
+      <li data-lines="23-24" data-state="ctx.Err()=context canceled; f1=starting"><code>cancel()</code> closes the context. Go starts f1 in a new goroutine.</li>
+      <li data-lines="25,14" data-state="f1=ran" data-out="ctx done -&gt; closing the connection">Main sleeps briefly, giving that goroutine time to print.</li>
+      <li data-lines="27" data-state="f1=ran" data-out="stop after it ran: false"><code>stop()</code> now returns <code>false</code>: f1 already started, so it was too late to prevent it.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>stop2 prevented it: true
+ctx done -&gt; closing the connection
+stop after it ran: false</pre></div>
+
+  <h2>Context with HTTP clients and servers</h2>
+  <h3>The server side: r.Context()</h3>
+  <p>Every incoming <code>*http.Request</code> carries a context. The <code>net/http</code> server cancels it when the <strong>client disconnects</strong>, when the request finishes (<code>ServeHTTP</code> returns), or when the server is shut down. Pass <code>r.Context()</code> to everything the handler calls, and an abandoned request stops costing you resources.</p>
+  <div class="code" data-file="httpserver/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+)
+
+// generateReport stands in for a slow DB query that respects ctx.
+func generateReport(ctx context.Context) (string, error) {
+	select {
+	case &lt;-time.After(2 * time.Second):
+		return "report ready", nil
+	case &lt;-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func reportHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context() // cancelled when the client disconnects or the server shuts down
+	log.Println("report: started")
+
+	report, err := generateReport(ctx)
+	if err != nil {
+		log.Println("report: abandoned:", err)
+		return // the client is gone; nobody would read a response
+	}
+	fmt.Fprintln(w, report)
+}
+
+func helloHandler(w http.ResponseWriter, r *http.Request) {
+	// Give each request its own budget, derived from the request context.
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	select {
+	case &lt;-time.After(10 * time.Millisecond):
+		fmt.Fprintln(w, "hello, fast path")
+	case &lt;-ctx.Done():
+		http.Error(w, "too slow", http.StatusGatewayTimeout)
+	}
+}
+
+func main() {
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /report", reportHandler)
+	mux.HandleFunc("GET /hello", helloHandler)
+	log.Println("listening on :8089")
+	log.Fatal(http.ListenAndServe("localhost:8089", mux))
+}</code></pre></div>
+  <p>We started this server in the background and hit it with <code>curl</code>, giving up on <code>/report</code> after 0.5s:</p>
+  <div class="output" data-label="Terminal: client"><pre>$ curl -s localhost:8089/hello
+hello, fast path
+$ curl -s --max-time 0.5 localhost:8089/report
+curl exit code: 28 (28 = timed out)</pre></div>
+  <p>Then ran the Go client below (which gives up after 300ms). Here is the server's log for both requests:</p>
+  <div class="output" data-label="Terminal: server log"><pre>23:31:53.252563 listening on :8089
+23:31:53.757208 report: started
+23:31:54.262487 report: abandoned: context canceled
+23:31:55.319059 report: started
+23:31:55.603890 report: abandoned: context canceled</pre></div>
+  <p>Look at the timestamps: each report started and was abandoned at the moment its client hung up (about 0.5s and 0.3s later), not after the full 2 seconds. That's <code>r.Context()</code> doing its job.</p>
+
+  <div class="live" data-title="A client hangs up mid-request">
+    <pre><code class="language-go">func reportHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log.Println("report: started")
+
+	select {
+	case &lt;-time.After(2 * time.Second):
+		fmt.Fprintln(w, "report ready")
+	case &lt;-ctx.Done():
+		log.Println("report: abandoned:", ctx.Err())
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="t=0ms; client=connected; ctx.Err()=nil">A request arrives. We grab its context: it's tied to this connection.</li>
+      <li data-lines="3" data-state="t=0ms" data-out="report: started">Log that work started.</li>
+      <li data-lines="5-6" data-state="t=0ms; waiting on=[timer 2s, ctx.Done()]">The slow "report" is a 2-second timer. We wait on it and on <code>ctx.Done()</code>.</li>
+      <li data-lines="5" data-state="t=500ms; client=disconnected">curl's <code>--max-time 0.5</code> expires and it closes the TCP connection.</li>
+      <li data-lines="8" data-state="t=500ms; ctx.Err()=context canceled">The server notices the closed connection and cancels the request context. <code>Done</code> closes.</li>
+      <li data-lines="9" data-state="t=500ms" data-out="report: abandoned: context canceled">We log and return. No 1.5 extra seconds of wasted work, no response written to a dead socket.</li>
+    </ol>
+  </div>
+
+  <h3>The client side: NewRequestWithContext</h3>
+  <p>For outgoing calls, build requests with <code>http.NewRequestWithContext(ctx, …)</code>. The context covers the whole exchange: DNS, connecting, sending, waiting for headers <em>and</em> reading the body. When it's cancelled, the transport aborts the connection.</p>
+  <div class="live" data-title="One deadline covering two HTTP calls">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+func get(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return string(b), err
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	body, err := get(ctx, "http://localhost:8089/hello")
+	fmt.Printf("hello:  %q err=%v\n", body, err)
+
+	start := time.Now()
+	body, err = get(ctx, "http://localhost:8089/report")
+	fmt.Printf("report: %q err=%v\n", body, err)
+	fmt.Println("gave up after ~", time.Since(start).Round(100*time.Millisecond))
+	fmt.Println("is deadline exceeded:", errors.Is(err, context.DeadlineExceeded))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="27-28" data-state="deadline=now+300ms">One context with a 300ms budget is shared by <strong>both</strong> requests below.</li>
+      <li data-lines="30,13,17" data-state="url=/hello"><code>NewRequestWithContext</code> attaches ctx to the request, and <code>Do</code> sends it. The context now governs DNS, connect, headers and body.</li>
+      <li data-lines="21-23" data-state="body=hello, fast path\n; err=nil">The fast endpoint answers quickly. We read the body; the deferred <code>Close</code> returns the connection to the pool.</li>
+      <li data-lines="31" data-state="body=hello, fast path\n; err=nil" data-out="hello:  &quot;hello, fast path\\n&quot; err=&lt;nil&gt;">Printed with <code>%q</code>, so the newline shows as <code>\n</code>.</li>
+      <li data-lines="33-34,17" data-state="url=/report; t=0ms">The slow endpoint. <code>Do</code> blocks waiting for response headers.</li>
+      <li data-lines="17-19" data-state="t≈300ms; err=context deadline exceeded">The shared deadline hits. The transport aborts the connection and <code>Do</code> returns an error wrapping <code>context.DeadlineExceeded</code>.</li>
+      <li data-lines="35" data-state="body=&quot;&quot;" data-out="report: &quot;&quot; err=Get &quot;http://localhost:8089/report&quot;: context deadline exceeded">The error is a <code>*url.Error</code> that names the method and URL.</li>
+      <li data-lines="36" data-state="elapsed≈300ms" data-out="gave up after ~ 300ms">We waited about the full budget (hello used only a tiny slice of it).</li>
+      <li data-lines="37" data-state="is=true" data-out="is deadline exceeded: true"><code>errors.Is</code> unwraps the <code>*url.Error</code> and finds <code>DeadlineExceeded</code> inside.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>hello:  "hello, fast path\n" err=&lt;nil&gt;
+report: "" err=Get "http://localhost:8089/report": context deadline exceeded
+gave up after ~ 300ms
+is deadline exceeded: true</pre></div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p><code>http.Get(url)</code> and <code>http.DefaultClient</code> have <strong>no timeout at all</strong>. A slow server can hang your goroutine forever. In production always either pass a context with a deadline or use a client with <code>Timeout</code> set (<code>&amp;http.Client{Timeout: 10 * time.Second}</code>) — ideally both: the client timeout as a safety net, the context for per-call budgets and cancellation. The same applies to <code>database/sql</code>: use <code>QueryContext</code>, <code>ExecContext</code>, never the context-less versions.</p></div>
+
+  <h2>Context values: request-scoped data only</h2>
+  <p><code>context.WithValue(parent, key, value)</code> attaches a value; <code>ctx.Value(key)</code> looks it up by walking up the tree. It's meant for data that is <strong>about the request</strong> and must cross API boundaries that you don't control (middleware → handler → logging library): request IDs, trace spans, the authenticated user, a deadline-carrying auth token.</p>
+  <p>Two rules make it safe:</p>
+  <ol>
+    <li><strong>Use an unexported key type.</strong> Keys are compared by type <em>and</em> value. With <code>type ctxKey int</code> declared in your package, no other package can ever create an equal key, so there are no collisions. Never use a plain <code>string</code> like <code>"user"</code> as a key.</li>
+    <li><strong>Wrap access in typed helpers</strong> (<code>WithUser</code>, <code>UserFrom</code>) so callers never see the key or do type assertions.</li>
+  </ol>
+  <div class="live" data-title="Request-scoped values with typed keys">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+)
+
+// An unexported key type: no other package can create a colliding key.
+type ctxKey int
+
+const (
+	requestIDKey ctxKey = iota
+	userKey
+)
+
+type User struct {
+	ID   int
+	Name string
+}
+
+// Typed helpers hide the key and the type assertion.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey, id)
+}
+
+func RequestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey).(string) // "" if missing
+	return id
+}
+
+func WithUser(ctx context.Context, u *User) context.Context {
+	return context.WithValue(ctx, userKey, u)
+}
+
+func UserFrom(ctx context.Context) (*User, bool) {
+	u, ok := ctx.Value(userKey).(*User)
+	return u, ok
+}
+
+func handle(ctx context.Context) {
+	u, ok := UserFrom(ctx)
+	fmt.Printf("[%s] user=%v ok=%v\n", RequestID(ctx), u, ok)
+}
+
+func main() {
+	ctx := WithRequestID(context.Background(), "req-7f3a")
+	handle(ctx) // no user yet
+
+	ctx = WithUser(ctx, &amp;User{ID: 42, Name: "ana"})
+	handle(ctx)
+
+	// A different type with the same underlying value is a DIFFERENT key.
+	fmt.Println("lookup with int(0):", context.Background().Value(0), ctx.Value(0))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="46,22-23" data-state="ctx={requestID:req-7f3a}"><code>WithRequestID</code> wraps Background in a new context node holding one key/value. Contexts are immutable: we get a <strong>new</strong> ctx back.</li>
+      <li data-lines="47,41,35-36" data-state="u=nil; ok=false"><code>handle</code> asks for the user. <code>ctx.Value(userKey)</code> walks up the chain, finds nothing, returns <code>nil</code>, and the comma-ok assertion gives <code>ok=false</code> instead of panicking.</li>
+      <li data-lines="42,26-27" data-state="id=req-7f3a; u=nil; ok=false" data-out="[req-7f3a] user=&lt;nil&gt; ok=false"><code>RequestID</code> finds its key one level up. The typed helpers hide both the key and the assertion.</li>
+      <li data-lines="49,31-32" data-state="ctx={user:&amp;{42 ana}} → {requestID:req-7f3a}"><code>WithUser</code> adds another node on top. The old ctx is unchanged; we reassign the variable to the new one.</li>
+      <li data-lines="50,41-42" data-state="u=&amp;{42 ana}; ok=true" data-out="[req-7f3a] user=&amp;{42 ana} ok=true">Now the user is found in the top node, and the request ID is still reachable further up.</li>
+      <li data-lines="53,12" data-state="requestIDKey=ctxKey(0)" data-out="lookup with int(0): &lt;nil&gt; &lt;nil&gt;">Looking up plain <code>int(0)</code> finds nothing, even though <code>requestIDKey</code> is also 0. Keys compare by type <em>and</em> value, so an unexported key type cannot collide with other packages.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>[req-7f3a] user=&lt;nil&gt; ok=false
+[req-7f3a] user=&amp;{42 ana} ok=true
+lookup with int(0): &lt;nil&gt; &lt;nil&gt;</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">// string key: collides with any other package using "db"
+ctx = context.WithValue(ctx, "db", db)
+
+// optional parameters smuggled through ctx
+func CreateUser(ctx context.Context) error {
+	db := ctx.Value("db").(*sql.DB)    // panics if missing
+	name := ctx.Value("name").(string) // hidden dependency!
+	...
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">type ctxKey int
+
+const requestIDKey ctxKey = 0
+
+// dependencies are explicit; ctx carries only request metadata
+func (s *Store) CreateUser(ctx context.Context, name string) error {
+	log.Printf("[%s] creating %s", RequestID(ctx), name)
+	_, err := s.db.ExecContext(ctx, "INSERT ...", name)
+	return err
+}</code></pre></div></div>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: context is not a bag of parameters</div><p>Database handles, loggers, config and function arguments do <strong>not</strong> belong in context. They become invisible dependencies: the compiler can't check them, and readers can't see what a function needs. If a function needs it to do its job, make it a parameter or a struct field. Value lookup is also a linear walk up the chain, so deep chains with many values are slow.</p></div>
+
+  <h2>Common mistakes</h2>
+  <table>
+    <thead><tr><th>Mistake</th><th>What goes wrong</th><th>Do this instead</th></tr></thead>
+    <tbody>
+      <tr><td>Storing ctx in a struct field</td><td>The struct outlives the request; one stale ctx gets used for many operations; callers can't set per-call deadlines</td><td>Pass <code>ctx</code> as the first parameter of each method</td></tr>
+      <tr><td>Ignoring <code>cancel</code> (<code>ctx, _ := …</code>)</td><td>Leaked timers and child registrations; <code>go vet</code> lostcancel warning</td><td><code>defer cancel()</code> on the next line</td></tr>
+      <tr><td>Passing <code>nil</code> as a context</td><td>Panics (see below) or nil-pointer crashes in libraries</td><td><code>context.TODO()</code> if you don't have one yet</td></tr>
+      <tr><td>Blocking without <code>ctx.Done()</code></td><td>Cancellation can't reach the goroutine; it leaks</td><td><code>select</code> on the operation and <code>ctx.Done()</code></td></tr>
+      <tr><td>Using <code>r.Context()</code> for work after the response</td><td>Work is cancelled when the handler returns</td><td><code>context.WithoutCancel</code> + a fresh timeout</td></tr>
+      <tr><td>Using <code>Background()</code> deep in a call stack</td><td>Breaks the chain: that work ignores the caller's cancellation and deadline</td><td>Accept and pass the caller's <code>ctx</code></td></tr>
+      <tr><td>Comparing <code>err == context.Canceled</code></td><td>Fails once the error is wrapped</td><td><code>errors.Is(err, context.Canceled)</code></td></tr>
+    </tbody>
+  </table>
+  <div class="code" data-file="nilctx/main.go"><pre><code class="language-go">package main
+
+import "context"
+
+func main() {
+	var ctx context.Context // nil interface
+	_, cancel := context.WithCancel(ctx)
+	defer cancel()
+}</code></pre></div>
+  <div class="output error" data-label="Runtime panic (trimmed)"><pre>$ go run ./nilctx
+panic: cannot create context from nil parent
+
+...</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">type Client struct {
+	ctx  context.Context // which request does this belong to?
+	http *http.Client
+}
+
+func (c *Client) Fetch(url string) (*http.Response, error) {
+	req, _ := http.NewRequestWithContext(c.ctx, "GET", url, nil)
+	return c.http.Do(req)
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">type Client struct {
+	http *http.Client
+}
+
+func (c *Client) Fetch(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.http.Do(req)
+}</code></pre></div></div>
+  </div>
+
+  <h2>Graceful Ctrl+C with signal.NotifyContext</h2>
+  <p>When you press Ctrl+C, the OS sends <code>SIGINT</code> to your process; Docker and Kubernetes send <code>SIGTERM</code> before killing a container. By default Go exits immediately — mid-write, with open connections. <code>signal.NotifyContext</code> turns those signals into a context cancellation, so your whole program can shut down the same way it handles any other cancellation.</p>
+  <div class="code" data-file="signal/main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+)
+
+func main() {
+	// ctx is cancelled on the first Ctrl+C (SIGINT) or SIGTERM (what Docker/Kubernetes send).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Println("working... press Ctrl+C to stop")
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+
+	for n := 1; ; n++ {
+		select {
+		case &lt;-tick.C:
+			fmt.Println("tick", n)
+		case &lt;-ctx.Done():
+			stop() // restore default behaviour: a 2nd Ctrl+C now kills immediately
+			fmt.Println("shutting down:", context.Cause(ctx))
+			time.Sleep(100 * time.Millisecond) // flush, close DB, etc.
+			fmt.Println("bye")
+			return
+		}
+	}
+}</code></pre></div>
+  <p>We ran the binary and sent it <code>SIGINT</code> (what Ctrl+C does) after about a second:</p>
+  <div class="output" data-label="Terminal"><pre>working... press Ctrl+C to stop
+tick 1
+tick 2
+tick 3
+tick 4
+tick 5
+^C
+shutting down: interrupt signal received
+bye</pre></div>
+  <p>The context's cause is the signal (<code>interrupt signal received</code>). Calling <code>stop()</code> as soon as shutdown begins restores the default behaviour, so an impatient second Ctrl+C really kills the process. In an HTTP service, the <code>ctx.Done()</code> branch is where you'd call <code>server.Shutdown(shutdownCtx)</code> with its own timeout (see Chapter 17).</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>A clean production <code>main</code> looks like: <code>ctx, stop := signal.NotifyContext(...)</code> → start servers and workers with that <code>ctx</code> (often in an <code>errgroup.WithContext</code>) → <code>&lt;-ctx.Done()</code> → shut down with a fresh, bounded <code>context.WithTimeout(context.Background(), 10*time.Second)</code>. Kubernetes waits <code>terminationGracePeriodSeconds</code> (default 30s) after SIGTERM before SIGKILL — keep your shutdown well under that.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">An HTTP handler wants to send a confirmation email in a goroutine after responding. Which context should that goroutine use?</div>
+    <div class="quiz-opts"><button><code>r.Context()</code></button><button><code>context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)</code></button><button><code>nil</code>, since there's no request any more</button><button><code>context.Background()</code> stored in a global variable</button></div>
+    <div class="quiz-explain"><code>r.Context()</code> is cancelled as soon as the handler returns, which would abort the email. <code>WithoutCancel</code> keeps the request ID and trace values for logging while detaching from the request's lifetime, and the wrapping timeout makes sure the email goroutine can't hang forever.</div>
+  </div>
+
+  <h2>Exercises</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1 — First response wins</summary>
+    <p>Write <code>first(ctx, replicas []time.Duration) (int, error)</code> that "queries" every replica concurrently (each just waits for its duration) and returns the index of the fastest one. As soon as one answers, cancel the others, and make sure no goroutine leaks. If <code>ctx</code> expires first, return its error.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="solution.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func query(ctx context.Context, d time.Duration) error {
+	select {
+	case &lt;-time.After(d):
+		return nil
+	case &lt;-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func first(ctx context.Context, replicas []time.Duration) (int, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // tells the losers to stop when we return
+
+	winner := make(chan int, len(replicas)) // buffered: losers never block on send
+	for i, d := range replicas {
+		go func() {
+			if query(ctx, d) == nil {
+				winner &lt;- i
+			}
+		}()
+	}
+
+	select {
+	case i := &lt;-winner:
+		return i, nil
+	case &lt;-ctx.Done():
+		return -1, ctx.Err()
+	}
+}
+
+func main() {
+	replicas := []time.Duration{80 * time.Millisecond, 20 * time.Millisecond, 50 * time.Millisecond}
+
+	i, err := first(context.Background(), replicas)
+	fmt.Println("fastest replica:", i, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	i, err = first(ctx, replicas)
+	fmt.Println("with 10ms budget:", i, err)
+
+	time.Sleep(20 * time.Millisecond) // let cancelled goroutines exit
+	fmt.Println("goroutines left:", runtime.NumGoroutine())
+}</code></pre></div>
+    <div class="output"><pre>fastest replica: 1 &lt;nil&gt;
+with 10ms budget: -1 context deadline exceeded
+goroutines left: 1</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2 — Request-ID middleware</summary>
+    <p>Write HTTP middleware that reads <code>X-Request-ID</code> (or generates <code>"req-1"</code>, <code>"req-2"</code>, … if absent), stores it in the request context with a typed key, and a handler that echoes it back. Test it with <code>httptest</code> (a preview of Chapter 15) instead of a real server.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="solution.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
+)
+
+type ctxKey int
+
+const requestIDKey ctxKey = 0
+
+func RequestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey).(string)
+	return id
+}
+
+func WithRequestID(next http.Handler) http.Handler {
+	var counter atomic.Int64
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			id = "req-" + strconv.FormatInt(counter.Add(1), 10)
+		}
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		w.Header().Set("X-Request-ID", id)
+		next.ServeHTTP(w, r.WithContext(ctx)) // pass the enriched request on
+	})
+}
+
+func hello(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "hello from %s", RequestID(r.Context()))
+}
+
+func main() {
+	h := WithRequestID(http.HandlerFunc(hello))
+
+	for _, given := range []string{"", "abc-123", ""} {
+		req := httptest.NewRequest("GET", "/", nil)
+		if given != "" {
+			req.Header.Set("X-Request-ID", given)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		fmt.Printf("%d %q header=%s\n", rec.Code, rec.Body.String(), rec.Header().Get("X-Request-ID"))
+	}
+}</code></pre></div>
+    <div class="output"><pre>200 "hello from req-1" header=req-1
+200 "hello from abc-123" header=abc-123
+200 "hello from req-2" header=req-2</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li><code>context.Context</code> carries cancellation, deadlines and request-scoped values across API boundaries. Pass it as the first parameter, named <code>ctx</code>.</li>
+      <li>Roots: <code>Background()</code> (main, tests) and <code>TODO()</code> (placeholder). Derive everything else with <code>With…</code>.</li>
+      <li><code>WithCancel</code>, <code>WithTimeout</code>, <code>WithDeadline</code> all return a <code>cancel</code> — <code>defer cancel()</code> immediately.</li>
+      <li>Cancellation flows <strong>down</strong> the tree, never up or sideways. A child can shorten a deadline, never extend it.</li>
+      <li>Context is cooperative: check <code>ctx.Err()</code> in loops and <code>select</code> on <code>ctx.Done()</code> wherever you block.</li>
+      <li><code>WithCancelCause</code> / <code>context.Cause</code> explain why; <code>WithoutCancel</code> detaches background work; <code>AfterFunc</code> runs cleanup on cancel.</li>
+      <li>Servers: use <code>r.Context()</code>. Clients: <code>NewRequestWithContext</code>, and never rely on <code>http.DefaultClient</code> without a deadline.</li>
+      <li>Values: unexported key types, typed helpers, request metadata only — never dependencies or optional parameters.</li>
+      <li>Don't store ctx in structs, don't pass nil, don't ignore cancel. Use <code>signal.NotifyContext</code> for graceful shutdown.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

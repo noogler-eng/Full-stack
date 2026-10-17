@@ -1,0 +1,1602 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 18 · Performance &amp; Memory — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="18">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part V · Chapter 18</div>
+  <h1>Performance &amp; Memory</h1>
+  <p class="lead">Go is fast by default, but "fast by default" still leaves a lot on the table when code allocates carelessly or does needless work in a hot path. This chapter teaches you to <em>measure</em> before you optimize, to understand where memory lives (stack or heap) and what the garbage collector costs, and to use benchmarks, pprof and the execution tracer the way performance engineers do. Every number here was measured on the author's machine (an Apple M1, 8 cores, Go 1.27.1). Your numbers will differ; the <em>ratios</em> are what matter.</p>
+  <div class="meta">
+    <span class="pill">⏱ 55 min read</span>
+    <span class="pill">◆ Advanced</span>
+    <span class="pill">▶ 12 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>A repeatable workflow: measure → find the bottleneck → change one thing → measure again</li>
+      <li>Stack vs heap, and how to read the compiler's escape analysis (<code>-gcflags=-m</code>)</li>
+      <li>How Go's garbage collector works, in plain terms, and how <code>GOGC</code> and <code>GOMEMLIMIT</code> tune it</li>
+      <li>Practical ways to cut allocations: preallocation, <code>strings.Builder</code>, avoiding conversions and boxing, values vs pointers</li>
+      <li>Writing honest benchmarks with <code>b.Loop</code> and <code>-benchmem</code></li>
+      <li>CPU and heap profiling with pprof, including live services via <code>net/http/pprof</code></li>
+      <li><code>sync.Pool</code>, struct field ordering, profile-guided optimization (PGO) and the execution tracer</li>
+      <li>Common performance myths and pitfalls</li>
+    </ul>
+  </div>
+
+  <h2>Measure first</h2>
+  <p>The most important performance skill isn't a trick. It's discipline. Programmers are famously bad at guessing where time goes. The function you're sure is slow is usually fine, and the real cost is somewhere boring, like a regexp compiled in a loop or JSON encoding a huge struct.</p>
+  <p>So performance work always follows the same loop:</p>
+  <ol>
+    <li><strong>Define the goal.</strong> "p99 latency under 50ms at 2,000 requests/second" is a goal. "Make it faster" is not. Without a goal you don't know when to stop.</li>
+    <li><strong>Measure</strong> with a benchmark or a profile of realistic load.</li>
+    <li><strong>Find the biggest cost</strong> in the profile. Fix only that.</li>
+    <li><strong>Measure again</strong> to prove the change helped, and that it didn't break anything (keep the tests green).</li>
+  </ol>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Optimizing without a profile is like a doctor operating without an X-ray. You might get lucky, but you'll probably cut the wrong thing. Amdahl's law says the same thing in maths: if a function takes 5% of the run time, making it infinitely fast saves at most 5%.</p></div>
+
+  <p>Here's that loop on a real example. This function counts the most frequent words in a text. It looks reasonable at a glance:</p>
+  <div class="code" data-file="report.go"><pre><code class="language-go">package prof
+
+import (
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+)
+
+// TopWords returns the n most frequent words as "word=count" lines.
+// This first version is deliberately naive.
+func TopWords(text string, n int) string {
+	counts := map[string]int{}
+	for _, line := range strings.Split(text, "\n") {
+		re := regexp.MustCompile(`[a-zA-Z]+`) // compiled on EVERY line
+		for _, w := range re.FindAllString(line, -1) {
+			counts[strings.ToLower(w)]++
+		}
+	}
+	keys := make([]string, 0)
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b string) int {
+		if counts[a] != counts[b] {
+			return counts[b] - counts[a]
+		}
+		return strings.Compare(a, b)
+	})
+	out := ""
+	for _, k := range keys[:min(n, len(keys))] {
+		out += fmt.Sprintf("%s=%d\n", k, counts[k])
+	}
+	return out
+}</code></pre></div>
+  <p>A benchmark and a correctness test (we'll write a faster version and need to prove it returns the same result):</p>
+  <div class="code" data-file="report_test.go"><pre><code class="language-go">package prof
+
+import (
+	"strings"
+	"testing"
+)
+
+var corpus = strings.Repeat("The quick brown Fox jumps over the lazy dog.\nGo is fun; the gopher agrees!\n", 2000)
+
+func TestSameResult(t *testing.T) {
+	if a, b := TopWords(corpus, 5), TopWordsFast(corpus, 5); a != b {
+		t.Fatalf("results differ:\n%s\nvs\n%s", a, b)
+	}
+}
+
+func BenchmarkTopWords(b *testing.B) {
+	for b.Loop() {
+		TopWords(corpus, 5)
+	}
+}
+
+func BenchmarkTopWordsFast(b *testing.B) {
+	for b.Loop() {
+		TopWordsFast(corpus, 5)
+	}
+}</code></pre></div>
+  <p>We'll come back to this code in the pprof section, find out exactly where it spends its time, and fix it. First we need some vocabulary about memory.</p>
+
+  <h2>Stack vs heap</h2>
+  <p>Your program's memory has two main areas for variables:</p>
+  <ul>
+    <li><strong>The stack.</strong> Each goroutine has its own stack, a region that grows and shrinks as functions are called and return. Allocating there is just moving a pointer, and freeing is automatic when the function returns. It costs almost nothing. Go stacks start small (a few KB) and grow by copying when needed.</li>
+    <li><strong>The heap.</strong> A shared region for values that must outlive the function that created them, or whose size isn't known at compile time. Allocating there takes real work (finding space, zeroing it), and someone has to clean it up later: that someone is the <strong>garbage collector</strong> (GC).</li>
+  </ul>
+  <p>In C you choose with <code>malloc</code>. In Go <strong>you don't choose: the compiler does</strong>, using <em>escape analysis</em>. Writing <code>&amp;x</code> or <code>new(T)</code> doesn't mean "heap"; it means "a pointer", and the compiler decides where the value lives. A value <strong>escapes</strong> to the heap when the compiler can't prove it's safe on the stack, for example because a pointer to it is returned, stored in a global, or captured by a closure that outlives the function.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="300" fill="#262624"/>
+      <defs><marker id="a18" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <text x="170" y="30" fill="#ece9e1" font-size="15" font-weight="600" text-anchor="middle">Goroutine stack</text>
+      <text x="170" y="48" fill="#a8a49a" font-size="11" text-anchor="middle">private · freed on return · ~free</text>
+      <rect x="60" y="62" width="220" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="170" y="82" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">main()</text>
+      <text x="170" y="98" fill="#a8a49a" font-size="11" text-anchor="middle">c := counter()</text>
+      <rect x="60" y="110" width="220" height="56" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/>
+      <text x="170" y="130" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">sumLocal()</text>
+      <text x="170" y="148" fill="#8fbf7f" font-size="11" text-anchor="middle">p := &amp;point{3,4}  stays here</text>
+      <text x="170" y="161" fill="#a8a49a" font-size="10" text-anchor="middle">pointer never leaves the function</text>
+      <rect x="60" y="170" width="220" height="56" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+      <text x="170" y="190" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">newPointPtr()</text>
+      <text x="170" y="208" fill="#d97757" font-size="11" text-anchor="middle">return &amp;p   → p must survive</text>
+      <text x="170" y="221" fill="#a8a49a" font-size="10" text-anchor="middle">frame is popped on return</text>
+      <text x="170" y="250" fill="#a8a49a" font-size="11" text-anchor="middle">↓ stack grows with each call</text>
+      <text x="530" y="30" fill="#ece9e1" font-size="15" font-weight="600" text-anchor="middle">Heap</text>
+      <text x="530" y="48" fill="#a8a49a" font-size="11" text-anchor="middle">shared · lives until unreachable · GC cleans up</text>
+      <rect x="400" y="62" width="260" height="190" rx="10" fill="#2b2a27" stroke="#3a3936"/>
+      <rect x="420" y="160" width="100" height="40" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+      <text x="470" y="185" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">p {1,2}</text>
+      <rect x="540" y="80" width="100" height="40" rx="6" fill="#2e2d2a" stroke="#e0b45c"/>
+      <text x="590" y="105" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">count</text>
+      <rect x="540" y="200" width="100" height="40" rx="6" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="590" y="225" fill="#ece9e1" font-size="12" text-anchor="middle" font-family="JetBrains Mono, monospace">v (boxed)</text>
+      <line x1="280" y1="198" x2="416" y2="182" stroke="#d97757" stroke-width="2" marker-end="url(#a18)"/>
+      <text x="345" y="178" fill="#d97757" font-size="11" text-anchor="middle">moved to heap</text>
+      <line x1="280" y1="84" x2="536" y2="98" stroke="#e0b45c" stroke-width="2" marker-end="url(#a18)"/>
+      <text x="410" y="80" fill="#e0b45c" font-size="11" text-anchor="middle">closure captures count</text>
+      <text x="360" y="285" fill="#a8a49a" font-size="12" text-anchor="middle">The compiler decides placement; you influence it by how pointers flow.</text>
+    </svg>
+    <figcaption>Values whose pointers escape their function get "moved to heap". Everything else stays on the cheap stack.</figcaption>
+  </figure>
+
+  <h3>Reading escape analysis: go build -gcflags=-m</h3>
+  <p>You can ask the compiler to explain its decisions. Here is a program with several typical cases:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type point struct{ x, y int }
+
+// Returns a value: the struct is copied to the caller. Stays on the stack.
+func newPointValue() point {
+	p := point{1, 2}
+	return p
+}
+
+// Returns a pointer: p must outlive this call, so it moves to the heap.
+func newPointPtr() *point {
+	p := point{1, 2}
+	return &amp;p
+}
+
+// A pointer that never leaves the function can stay on the stack.
+func sumLocal() int {
+	p := &amp;point{3, 4}
+	return p.x + p.y
+}
+
+// Constant size: fits on the stack. Unknown size: must go to the heap.
+func buffers(n int) int {
+	small := make([]byte, 64)
+	dynamic := make([]byte, n)
+	return len(small) + len(dynamic)
+}
+
+// A closure that captures a variable and is returned: the variable escapes.
+func counter() func() int {
+	count := 0
+	return func() int {
+		count++
+		return count
+	}
+}
+
+// Converting to an interface (fmt.Println takes ...any) often escapes.
+func printIt(v int) {
+	fmt.Println(v)
+}
+
+func main() {
+	_ = newPointValue()
+	_ = newPointPtr()
+	_ = sumLocal()
+	_ = buffers(10)
+	c := counter()
+	c()
+	printIt(42)
+}</code></pre></div>
+  <p>Build it with <code>-gcflags='-m -l'</code>. The <code>-m</code> prints escape (and inlining) decisions; <code>-l</code> disables inlining so the output is about the functions as written:</p>
+  <div class="output" data-label="$ go build -gcflags=&#x27;-m -l&#x27; ."><pre># example.com/ch18/escape
+./main.go:15:2: moved to heap: p
+./main.go:21:7: &amp;point{...} does not escape
+./main.go:27:15: make([]byte, 64) does not escape
+./main.go:28:17: make([]byte, n) does not escape
+./main.go:34:2: moved to heap: count
+./main.go:35:9: func literal escapes to heap
+./main.go:43:13: ... argument does not escape
+./main.go:43:14: v escapes to heap</pre></div>
+  <p>Without <code>-l</code> you also see inlining decisions. Inlining means the compiler pastes a small function's body into its caller, which saves the call and often lets values stay on the stack: after inlining <code>counter()</code> into <code>main</code>, its closure no longer escapes.</p>
+  <div class="output" data-label="$ go build -gcflags=-m ."><pre># example.com/ch18/escape
+./main.go:8:6: can inline newPointValue
+./main.go:14:6: can inline newPointPtr
+./main.go:20:6: can inline sumLocal
+./main.go:26:6: can inline buffers
+./main.go:33:6: can inline counter
+./main.go:35:9: can inline counter.func1
+./main.go:42:6: can inline printIt
+./main.go:43:13: inlining call to fmt.Println
+./main.go:47:19: inlining call to newPointValue
+./main.go:48:17: inlining call to newPointPtr
+./main.go:49:14: inlining call to sumLocal
+./main.go:50:13: inlining call to buffers
+./main.go:51:14: inlining call to counter
+./main.go:35:9: can inline counter.func1
+./main.go:52:3: inlining call to counter.func1
+./main.go:53:9: inlining call to printIt
+./main.go:53:9: inlining call to fmt.Println
+./main.go:15:2: moved to heap: p
+./main.go:21:7: &amp;point{...} does not escape
+./main.go:27:15: make([]byte, 64) does not escape
+./main.go:28:17: make([]byte, n) does not escape
+./main.go:34:2: moved to heap: count
+./main.go:35:9: func literal escapes to heap
+./main.go:43:13: ... argument does not escape
+./main.go:43:14: v escapes to heap
+./main.go:49:14: &amp;point{...} does not escape
+./main.go:50:13: make([]byte, 64) does not escape
+./main.go:50:13: make([]byte, 10) does not escape
+./main.go:51:14: func literal does not escape
+./main.go:53:9: ... argument does not escape
+./main.go:53:9: 42 escapes to heap</pre></div>
+  <p>Want to know <em>why</em> something escaped? <code>-m=2</code> prints the chain of reasoning:</p>
+  <div class="output" data-label="$ go build -gcflags='-m=2 -l' . (excerpt)"><pre>./main.go:15:2: p escapes to heap in newPointPtr:
+./main.go:15:2:   flow: ~r0 ← &amp;p:
+./main.go:15:2:     from &amp;p (address-of) at ./main.go:16:9
+./main.go:15:2:     from return &amp;p (return) at ./main.go:16:2
+./main.go:15:2: moved to heap: p</pre></div>
+
+  <div class="live" data-title="Think like the escape analyzer">
+    <pre><code class="language-go">func newPointPtr() *point {
+	p := point{1, 2}
+	return &amp;p
+}
+
+func sumLocal() int {
+	p := &amp;point{3, 4}
+	return p.x + p.y
+}
+
+func counter() func() int {
+	count := 0
+	return func() int {
+		count++
+		return count
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="p=candidate for stack">The compiler sees a local struct <code>p</code>. By default it would love to put it on the stack.</li>
+      <li data-lines="3" data-state="&amp;p flows to: return value; verdict=heap">But <code>&amp;p</code> flows into the return value. After <code>newPointPtr</code> returns, its stack frame is gone, yet the caller still holds the pointer. So: <strong>moved to heap: p</strong>.</li>
+      <li data-lines="7" data-state="p=pointer; flows to: nowhere">Here we take a pointer too, with <code>&amp;point{3, 4}</code>. Pointers alone don't force the heap.</li>
+      <li data-lines="8" data-state="verdict=stack (&quot;does not escape&quot;)">The pointer is only dereferenced locally and never stored or returned. Nothing can observe it after the function ends, so it stays on the stack.</li>
+      <li data-lines="12-13" data-state="count=captured by closure">The closure refers to <code>count</code>. Closures capture variables by reference, so the function value carries a pointer to <code>count</code>.</li>
+      <li data-lines="13-16" data-state="closure=returned; count=heap">The closure itself is returned, so it outlives <code>counter</code>, and so must <code>count</code>. Both are heap-allocated: "moved to heap: count" and "func literal escapes to heap".</li>
+    </ol>
+  </div>
+
+  <p>Common reasons a value escapes:</p>
+  <table>
+    <thead><tr><th>Pattern</th><th>Why it escapes</th></tr></thead>
+    <tbody>
+      <tr><td><code>return &amp;x</code></td><td>Pointer outlives the frame</td></tr>
+      <tr><td>Storing a pointer in a global, a map, a channel, or a heap object</td><td>Someone else can reach it later</td></tr>
+      <tr><td>Closure capturing a variable and outliving the function (returned, or run with <code>go</code>)</td><td>Captured by reference</td></tr>
+      <tr><td>Converting to an interface (<code>any</code>, <code>error</code>, <code>fmt.Println</code> args)</td><td>Often: the compiler can't see what the callee does with it</td></tr>
+      <tr><td>Very large values, or <code>make</code> with a size unknown at compile time</td><td>Too big for the stack. (Go 1.25+ can keep <em>small</em> variable-size <code>make</code>s on the stack, which is why <code>make([]byte, n)</code> above "does not escape"; large ones still go to the heap.)</td></tr>
+      <tr><td>Calling a method through an interface</td><td>The compiler can't see the concrete method's body</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: "escapes" doesn't always mean "slow"</div><p>An escape costs an allocation plus GC work later. That matters in a loop that runs a million times per second, and not at all in startup code. Don't contort readable code to avoid escapes outside proven hot paths. Also note that a function returning a pointer is not automatically worse than one returning a value: for big structs, copying can cost more than allocating. Measure.</p></div>
+
+  <h2>The garbage collector, simply</h2>
+  <p>The GC's job: find heap memory that nothing can reach any more and reuse it. Go uses a <strong>concurrent, tri-color, mark-and-sweep</strong> collector. That sounds scary, so here's what it means.</p>
+  <ul>
+    <li><strong>Mark-and-sweep.</strong> Start from the <em>roots</em> (global variables and every goroutine's stack), follow every pointer and mark what you reach. Whatever wasn't marked is garbage; sweep it up for reuse.</li>
+    <li><strong>Tri-color.</strong> During marking, objects are <em>white</em> (not seen yet), <em>grey</em> (seen, but its pointers not yet followed) or <em>black</em> (seen, and all its pointers followed). Work through grey objects until none are left. Remaining white objects are garbage.</li>
+    <li><strong>Concurrent.</strong> Marking runs <em>while your program keeps running</em>, on about 25% of the CPU, with only tiny stop-the-world pauses (typically well under a millisecond) at the start and end. A <em>write barrier</em> (a few extra instructions on pointer writes during marking) keeps the colors correct while your code changes pointers.</li>
+    <li><strong>Non-moving and non-generational.</strong> Go doesn't compact memory or split it into young/old generations like Java does. It relies on escape analysis to keep short-lived values off the heap in the first place.</li>
+  </ul>
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Imagine a librarian checking which books are still on someone's reading list. Start with every member's list (roots), tick each book (grey), then look at each ticked book's "see also" references (make it black, tick those). Books nobody ever ticked go back to the store room. Meanwhile, the library stays open; the librarian just asks people to note any new "see also" they add while the check is running (the write barrier).</p></div>
+
+  <h3>GOGC: trading memory for CPU</h3>
+  <p>When does a GC cycle start? Go uses a target: after a collection leaves <em>L</em> MB of live heap, the next cycle starts when the heap reaches about <code>L × (1 + GOGC/100)</code>. The default <code>GOGC=100</code> means "let the heap double before collecting again". Higher GOGC = fewer collections and less CPU, but more memory. Lower = the opposite.</p>
+  <p>Let's watch it. This program keeps ~20 MB alive (like a cache) and then churns through ~2.3 GB of short-lived garbage (like requests would):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"math"
+	"runtime"
+	"runtime/debug"
+	"time"
+)
+
+type node struct {
+	payload [64]byte
+	next    *node
+}
+
+var (
+	live []*node // the long-lived part of the heap
+	sink *node   // forces each new node onto the heap
+)
+
+func main() {
+	// Keep about 20 MB alive, like a cache would.
+	for range 300_000 {
+		live = append(live, &amp;node{})
+	}
+
+	start := time.Now()
+	// Then churn through ~2 GB of short-lived garbage, like requests would.
+	for i := range 30_000_000 {
+		n := &amp;node{}
+		n.payload[0] = byte(i)
+		sink = n // escapes: garbage as soon as the next one replaces it
+	}
+	elapsed := time.Since(start)
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&amp;ms)
+	limit := "none"
+	if l := debug.SetMemoryLimit(-1); l != math.MaxInt64 { // -1 = just read it
+		limit = fmt.Sprintf("%dMB", l&gt;&gt;20)
+	}
+	fmt.Printf("GOGC=%-4d limit=%-5s gc cycles=%-4d total pause=%-8v heap now=%dMB  took=%v\n",
+		debug.SetGCPercent(-1), limit, ms.NumGC,
+		time.Duration(ms.PauseTotalNs).Round(time.Microsecond), ms.HeapAlloc&gt;&gt;20, elapsed.Round(time.Millisecond))
+	runtime.KeepAlive(live)
+}</code></pre></div>
+  <div class="output" data-label="$ for g in 50 100 200 400; do GOGC=$g ./gcdemo; done  (then GOMEMLIMIT and GOGC=off)"><pre>GOGC=50   limit=none  gc cycles=192  total pause=13.456ms heap now=37MB  took=1.077s
+GOGC=100  limit=none  gc cycles=98   total pause=6.56ms   heap now=42MB  took=850ms
+GOGC=200  limit=none  gc cycles=46   total pause=2.478ms  heap now=57MB  took=479ms
+GOGC=400  limit=none  gc cycles=22   total pause=1.139ms  heap now=135MB  took=433ms
+GOGC=-1   limit=200MB gc cycles=16   total pause=878µs    heap now=109MB  took=416ms
+GOGC=-1   limit=none  gc cycles=0    total pause=0s       heap now=2325MB  took=620ms</pre></div>
+  <p>Read the trade-off straight from the numbers: going from GOGC=50 to 400 cut the GC cycles from 192 to 22 and the run time from 1.08s to 0.43s, but the peak heap grew. Turning GC off completely made the heap balloon to 2.3 GB, which would get a container killed in production.</p>
+  <p>You can watch each cycle with <code>GODEBUG=gctrace=1</code>:</p>
+  <div class="output" data-label="$ GODEBUG=gctrace=1 ./gcdemo  (excerpt)"><pre>gc 1 @0.000s 6%: 0.014+0.48+0.009 ms clock, 0.11+0.051/0.51/0.018+0.079 ms cpu, 3-&gt;4-&gt;3 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 2 @0.001s 7%: 0.010+0.98+0.009 ms clock, 0.084+0.018/0.77/0.088+0.073 ms cpu, 5-&gt;6-&gt;5 MB, 6 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 3 @0.003s 6%: 0.006+1.8+0.009 ms clock, 0.055+0.069/1.3/0.36+0.078 ms cpu, 10-&gt;13-&gt;11 MB, 11 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 20 @0.097s 6%: 0.021+1.7+0.012 ms clock, 0.17+0.11/2.5/5.2+0.10 ms cpu, 46-&gt;50-&gt;29 MB, 54 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 21 @0.103s 6%: 0.030+1.8+0.011 ms clock, 0.24+0.035/2.5/4.6+0.088 ms cpu, 49-&gt;53-&gt;29 MB, 58 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 22 @0.108s 6%: 0.042+1.9+0.013 ms clock, 0.33+0.18/2.2/4.6+0.10 ms cpu, 49-&gt;53-&gt;29 MB, 58 MB goal, 0 MB stacks, 0 MB globals, 8 P</pre></div>
+  <p>How to read one line: <code>gc 21</code> is the cycle number, <code>@0.103s</code> the time since start, <code>6%</code> the share of CPU spent in GC so far. The three clock times are stop-the-world sweep termination, <em>concurrent</em> mark, and stop-the-world mark termination: note that the pauses are tens of <em>microseconds</em>. <code>49-&gt;53-&gt;29 MB</code> is heap at start, at end, and live after marking; <code>58 MB goal</code> is where the next cycle will begin (29 × 2).</p>
+
+  <h3>GOMEMLIMIT: a soft memory ceiling</h3>
+  <p><code>GOGC</code> alone has a weakness: memory use is relative to the live heap, so a spike in live data can push you past your container's limit. Since Go 1.19, <code>GOMEMLIMIT</code> (or <code>debug.SetMemoryLimit</code>) sets a <strong>soft limit</strong> on total Go memory. As the process approaches it, the GC runs more often, regardless of GOGC. In the output above, <code>GOGC=off GOMEMLIMIT=200MiB</code> meant "don't collect at all until we near 200 MB": only 16 cycles, the fastest run, and bounded memory.</p>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: GC settings for containers</div><p>For a service in a container with a 1 GiB memory limit, a good starting point is <code>GOMEMLIMIT</code> at about 80–90% of the limit (e.g. <code>900MiB</code>), leaving room for non-heap memory, and GOGC at its default. Only use <code>GOGC=off</code> with a memory limit if you understand the risk: if the live heap ever approaches the limit, the GC will run constantly ("death spiral") until the runtime's guard rails cap GC CPU at about 50%. Before tuning knobs at all, reduce allocations; that helps every setting.</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">After a GC cycle, 300 MB of heap is still live. With <code>GOGC=100</code> and no memory limit, roughly when does the next cycle start?</div>
+    <div class="quiz-opts"><button>When the heap reaches 300 MB</button><button>When the heap reaches 400 MB</button><button>When the heap reaches 600 MB</button><button>After 2 minutes, no matter what</button></div>
+    <div class="quiz-explain">The goal is live heap × (1 + GOGC/100) = 300 × 2 = 600 MB. (There is a forced GC every 2 minutes if none has happened, but with an active heap the goal is hit far sooner.)</div>
+  </div>
+
+  <h2>Benchmarks that tell the truth</h2>
+  <p>Benchmarks are covered in the testing chapter; here's the performance-engineer's view. A benchmark is a function <code>BenchmarkXxx(b *testing.B)</code> with the code to measure inside a <code>for b.Loop() { ... }</code> loop (Go 1.24+). <code>b.Loop</code> is better than the old <code>for i := 0; i &lt; b.N; i++</code> because it runs setup code above the loop only once, excludes it from the timing, and keeps the compiler from optimizing away the code inside the loop.</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go test -run=NONE -bench=. -benchmem          # all benchmarks, with allocation stats
+go test -run=NONE -bench=Concat -count=10 &gt; new.txt   # many runs for statistics
+benchstat old.txt new.txt                     # golang.org/x/perf/cmd/benchstat</code></pre></div>
+  <p>The columns you get with <code>-benchmem</code>:</p>
+  <table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>BenchmarkX-8</code></td><td>Name, and GOMAXPROCS (8 CPUs here)</td></tr>
+      <tr><td><code>1452157</code></td><td>How many iterations were run to get a stable measurement</td></tr>
+      <tr><td><code>824.4 ns/op</code></td><td>Time per iteration</td></tr>
+      <tr><td><code>1912 B/op</code></td><td>Heap bytes allocated per iteration</td></tr>
+      <tr><td><code>8 allocs/op</code></td><td>Number of heap allocations per iteration (often the most telling number)</td></tr>
+    </tbody>
+  </table>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: benchmark hygiene</div><p>Laptops change clock speed with temperature and battery. Close other programs, plug in, and run with <code>-count=10</code>, then compare with <code>benchstat</code>, which tells you whether a difference is statistically real (it prints <code>~</code> when it isn't). Benchmark realistic inputs: a function that's fast on 10 items may be slow on 10,000. And always check <code>allocs/op</code>: in a server, fewer allocations means less GC, which helps every other request too, not just this one.</p></div>
+
+  <h2>Reducing allocations</h2>
+  <p>In most Go programs, the cheapest wins come from allocating less. Each pattern below comes with a benchmark from this machine.</p>
+
+  <h3>Build strings with strings.Builder</h3>
+  <p>Strings are immutable. <code>s += w</code> can't extend <code>s</code>; it allocates a brand-new string and copies everything so far. In a loop that's quadratic: 100 words means 100 allocations and ever-larger copies.</p>
+  <div class="live" data-title="Count the allocations in four ways to join strings">
+    <pre><code class="language-go">package bench
+
+import (
+	"strconv"
+	"strings"
+	"testing"
+)
+
+var words = func() []string {
+	w := make([]string, 100)
+	for i := range w {
+		w[i] = "word" + strconv.Itoa(i)
+	}
+	return w
+}()
+
+func BenchmarkConcatPlus(b *testing.B) {
+	for b.Loop() {
+		s := ""
+		for _, w := range words {
+			s += w + "," // creates a brand new string every iteration
+		}
+	}
+}
+
+func BenchmarkConcatBuilder(b *testing.B) {
+	for b.Loop() {
+		var sb strings.Builder
+		for _, w := range words {
+			sb.WriteString(w)
+			sb.WriteByte(',')
+		}
+		_ = sb.String()
+	}
+}
+
+func BenchmarkConcatBuilderGrow(b *testing.B) {
+	for b.Loop() {
+		var sb strings.Builder
+		sb.Grow(800) // one allocation, sized up front
+		for _, w := range words {
+			sb.WriteString(w)
+			sb.WriteByte(',')
+		}
+		_ = sb.String()
+	}
+}
+
+func BenchmarkConcatJoin(b *testing.B) {
+	for b.Loop() {
+		_ = strings.Join(words, ",")
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-15" data-state="words=[word0 … word99]; total bytes=690" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1">Before any benchmark runs, the package-level <code>words</code> is built once. The joined result will be 590 letters plus 100 commas, so <strong>690 bytes</strong>. That's the minimum any approach must allocate.</li>
+      <li data-lines="17-19" data-state="s=&quot;&quot;; allocs=0"><code>b.Loop()</code> runs the body as many times as needed for a stable timing. Each iteration starts with an empty string, which costs no allocation.</li>
+      <li data-lines="20-21" data-state="iteration=1; len(s)=6; allocs=1">Strings are immutable, so <code>s += w + ","</code> must build a <strong>new</strong> string and copy the old <code>s</code> into it. The compiler fuses the two <code>+</code> into one concat, so that's one allocation.</li>
+      <li data-lines="20-21" data-state="iteration=100; len(s)=690; allocs=100" data-out="BenchmarkConcatPlus-8              	  196071	      6117 ns/op	   36120 B/op	     100 allocs/op">By the 100th word we have copied the growing prefix 100 times: 100 allocations and about 36 KB in total for a 690-byte result. The cost is <strong>O(n²)</strong> bytes.</li>
+      <li data-lines="28-31" data-state="cap(sb.buf)=grows 8→16→…; allocs=8"><code>strings.Builder</code> keeps a <code>[]byte</code> and appends in place. When it fills up, <code>append</code> reallocates with roughly double the capacity, so 690 bytes take only about 8 growth steps.</li>
+      <li data-lines="33" data-state="allocs=8" data-out="BenchmarkConcatBuilder-8           	 1452157	       824.4 ns/op	    1912 B/op	       8 allocs/op"><code>sb.String()</code> returns the bytes as a string <strong>without copying</strong>. That's why a Builder must never be copied after use.</li>
+      <li data-lines="39-40" data-state="cap=896; allocs=1"><code>Grow(800)</code> allocates once up front. The runtime rounds 800 up to its 896-byte size class. Every write after that fits.</li>
+      <li data-lines="41-45" data-state="len=690; allocs=1" data-out="BenchmarkConcatBuilderGrow-8       	 1983969	       604.1 ns/op	     896 B/op	       1 allocs/op">No more growth, so <strong>1 alloc/op</strong>. If you know (or can estimate) the final size, tell the Builder.</li>
+      <li data-lines="50-51" data-state="allocs=1" data-out="BenchmarkConcatJoin-8              	 1625253	       735.2 ns/op	     704 B/op	       1 allocs/op"><code>strings.Join</code> measures the total length first, then allocates exactly once (690 rounds to the 704-byte class). The standard library already did the optimization for you.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=Concat -benchmem"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkConcatPlus-8              	  196071	      6117 ns/op	   36120 B/op	     100 allocs/op
+BenchmarkConcatBuilder-8           	 1452157	       824.4 ns/op	    1912 B/op	       8 allocs/op
+BenchmarkConcatBuilderGrow-8       	 1983969	       604.1 ns/op	     896 B/op	       1 allocs/op
+BenchmarkConcatJoin-8              	 1625253	       735.2 ns/op	     704 B/op	       1 allocs/op</pre></div>
+  <p><code>+=</code> took 6.1 µs and 100 allocations; a <code>Builder</code> with <code>Grow</code> took 0.6 µs and exactly one allocation, <strong>10× faster</strong>. A plain <code>Builder</code> without <code>Grow</code> still needed 8 allocations as its buffer doubled. If you already have a slice, <code>strings.Join</code> computes the final size for you.</p>
+
+  <h3>Preallocate slices and maps</h3>
+  <p>When <code>append</code> runs out of capacity, it allocates a bigger array (roughly double for small slices, about 1.25× for large ones) and copies everything over. If you know the final size, tell Go up front.</p>
+  <div class="live" data-title="Watch append reallocate">
+    <pre><code class="language-go">var s []int
+prevCap := cap(s)
+for i := range 2000 {
+	s = append(s, i)
+	if cap(s) != prevCap {
+		fmt.Printf("len=%-5d cap %4d -&gt; %4d (new array, copied %d elements)\n", len(s), prevCap, cap(s), len(s)-1)
+		prevCap = cap(s)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="len=0; cap=0; array=nil">A nil slice: no array behind it at all.</li>
+      <li data-lines="3-6" data-state="i=0; len=1; cap=4" data-out="len=1     cap    0 -&gt;    4 (new array, copied 0 elements)">First append: there's no room, so the runtime allocates an array. It rounds up to a size class, giving capacity 4.</li>
+      <li data-lines="3-6" data-state="i=4; len=5; cap=8" data-out="len=5     cap    4 -&gt;    8 (new array, copied 4 elements)">Appends 2–4 fit. The 5th doesn't: allocate 8, copy 4 elements, and the old array becomes garbage.</li>
+      <li data-lines="3-6" data-state="i=256; len=257; cap=512" data-out="len=9     cap    8 -&gt;   16 (new array, copied 8 elements)\nlen=17    cap   16 -&gt;   32 (new array, copied 16 elements)\nlen=33    cap   32 -&gt;   64 (new array, copied 32 elements)\nlen=65    cap   64 -&gt;  128 (new array, copied 64 elements)\nlen=129   cap  128 -&gt;  256 (new array, copied 128 elements)\nlen=257   cap  256 -&gt;  512 (new array, copied 256 elements)">Below 256 elements, capacity doubles each time.</li>
+      <li data-lines="3-7" data-state="len=2000; cap=2560; reallocations=12" data-out="len=513   cap  512 -&gt;  848 (new array, copied 512 elements)\nlen=849   cap  848 -&gt; 1280 (new array, copied 848 elements)\nlen=1281  cap 1280 -&gt; 1792 (new array, copied 1280 elements)\nlen=1793  cap 1792 -&gt; 2560 (new array, copied 1792 elements)">Past 256, growth slows down smoothly toward 1.25× so big slices don't waste too much memory. In total: 12 allocations and about 5,000 element copies to build 2,000 elements. <code>make([]int, 0, 2000)</code> would have done it in one allocation and zero copies.</li>
+    </ol>
+  </div>
+  <div class="live" data-title="Watch append and map growth allocate">
+    <pre><code class="language-go">package bench
+
+import "testing"
+
+const N = 10_000
+
+func BenchmarkAppendNoPrealloc(b *testing.B) {
+	for b.Loop() {
+		var s []int
+		for i := range N {
+			s = append(s, i)
+		}
+	}
+}
+
+func BenchmarkAppendPrealloc(b *testing.B) {
+	for b.Loop() {
+		s := make([]int, 0, N) // capacity known: one allocation
+		for i := range N {
+			s = append(s, i)
+		}
+	}
+}
+
+func BenchmarkMapNoHint(b *testing.B) {
+	for b.Loop() {
+		m := map[int]int{}
+		for i := range N {
+			m[i] = i
+		}
+	}
+}
+
+func BenchmarkMapSizeHint(b *testing.B) {
+	for b.Loop() {
+		m := make(map[int]int, N)
+		for i := range N {
+			m[i] = i
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="7-9" data-state="s=nil; len=0; cap=0" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1">A nil slice: no backing array yet, no allocation.</li>
+      <li data-lines="10-11" data-state="i=0; len=1; cap=1; allocs=1">The first <code>append</code> has nowhere to put the element, so the runtime allocates a backing array.</li>
+      <li data-lines="10-11" data-state="i=1000; cap=1024, about to grow; allocs=about 10">Every time <code>len</code> reaches <code>cap</code>, <code>append</code> allocates a bigger array (about 2x while small, about 1.25x past 256 elements), <strong>copies</strong> everything over, and the old array becomes garbage.</li>
+      <li data-lines="10-13" data-state="len=10000; allocs=19; bytes=about 357 KB" data-out="BenchmarkAppendNoPrealloc-8        	   23554	     50894 ns/op	  357626 B/op	      19 allocs/op">Reaching 10,000 took 19 allocations, and about 357 KB was allocated in total for 80 KB of final data. Most of it was thrown away.</li>
+      <li data-lines="18" data-state="len=0; cap=10000; allocs=1; bytes=81920"><code>make([]int, 0, N)</code> asks for the whole capacity at once: 80,000 bytes, rounded to the 81,920 size class. It's too big for the stack, so it goes on the heap.</li>
+      <li data-lines="19-21" data-state="len=10000; cap=10000; allocs=1" data-out="BenchmarkAppendPrealloc-8          	   46480	     25751 ns/op	   81920 B/op	       1 allocs/op">No append ever overflows, so there are no copies. That's half the time and a quarter of the bytes.</li>
+      <li data-lines="27-30" data-state="allocs=79" data-out="BenchmarkMapNoHint-8               	    3487	    346740 ns/op	  591482 B/op	      79 allocs/op">A map without a hint grows as well. Each time it gets too full it allocates bigger tables and <strong>rehashes</strong> every key into them, which is more expensive than a slice copy.</li>
+      <li data-lines="36-39" data-state="allocs=33" data-out="BenchmarkMapSizeHint-8             	   12283	     97585 ns/op	  295553 B/op	      33 allocs/op">With <code>make(map, N)</code> the runtime sizes its tables for 10,000 entries up front: no rehashing, and 3.5x faster. A map still makes several allocations internally (its groups and directory), so the count isn't 1.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=&#x27;Append"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkAppendNoPrealloc-8        	   23554	     50894 ns/op	  357626 B/op	      19 allocs/op
+BenchmarkAppendPrealloc-8          	   46480	     25751 ns/op	   81920 B/op	       1 allocs/op
+BenchmarkMapNoHint-8               	    3487	    346740 ns/op	  591482 B/op	      79 allocs/op
+BenchmarkMapSizeHint-8             	   12283	     97585 ns/op	  295553 B/op	      33 allocs/op</pre></div>
+  <p>Preallocating halved the slice time and cut 19 allocations to 1. For the map, a size hint made it 3.5× faster: without it, the map had to grow and re-insert its entries over and over.</p>
+
+  <h3>Avoid needless []byte ↔ string conversions</h3>
+  <p>A <code>string</code> is immutable, a <code>[]byte</code> is mutable, so converting between them usually <strong>copies</strong> the data (otherwise changing the bytes would change the "immutable" string). The compiler removes the copy in a few safe cases, such as a map lookup <code>m[string(b)]</code>, comparisons, and <code>for range string(b)</code>.</p>
+  <div class="live" data-title="Where conversions and boxing allocate">
+    <pre><code class="language-go">package bench
+
+import (
+	"strings"
+	"testing"
+)
+
+var (
+	key   = []byte("user:12345")
+	cache = map[string]int{"user:12345": 1}
+	sink  string
+)
+
+func BenchmarkMapLookupConverted(b *testing.B) {
+	for b.Loop() {
+		_ = cache[string(key)] // compiler optimizes: no allocation
+	}
+}
+
+func BenchmarkMapLookupViaVar(b *testing.B) {
+	for b.Loop() {
+		k := string(key) // a real conversion: copies the bytes
+		sink = k
+		_ = cache[k]
+	}
+}
+
+func BenchmarkContainsBytesToString(b *testing.B) {
+	data := []byte(strings.Repeat("abc", 100) + "needle")
+	for b.Loop() {
+		sink = string(data) // 306-byte copy every time
+		_ = strings.Contains(sink, "needle")
+	}
+}
+
+var anySink []any
+var intSink []int
+
+func BenchmarkBoxInts(b *testing.B) {
+	for b.Loop() {
+		s := make([]any, 0, 100)
+		for i := range 100 {
+			s = append(s, i+1000) // each int &gt; 255 is boxed: one allocation
+		}
+		anySink = s
+	}
+}
+
+func BenchmarkPlainInts(b *testing.B) {
+	for b.Loop() {
+		s := make([]int, 0, 100)
+		for i := range 100 {
+			s = append(s, i+1000)
+		}
+		intSink = s
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="14-16" data-state="key=[]byte(&quot;user:12345&quot;); allocs=0" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1\nBenchmarkMapLookupConverted-8      	169522701	         7.079 ns/op	       0 B/op	       0 allocs/op"><code>cache[string(key)]</code> looks like a conversion, but the compiler recognizes the pattern and looks up using the bytes directly. The temporary string never exists, so 0 allocs.</li>
+      <li data-lines="22-24" data-state="k=&quot;user:12345&quot; (heap copy); allocs=1" data-out="BenchmarkMapLookupViaVar-8         	69658094	        17.29 ns/op	      16 B/op	       1 allocs/op">Here the string is stored in <code>sink</code>, a global, so it must outlive the iteration. The 10 bytes are copied into a new 16-byte heap block. Same lookup, now 2.4x slower.</li>
+      <li data-lines="29" data-state="data=306 bytes">The <code>[]byte</code> is built once, outside the loop.</li>
+      <li data-lines="31-32" data-state="sink=string(data); allocs=1; bytes=320" data-out="BenchmarkContainsBytesToString-8   	22528723	        54.20 ns/op	     320 B/op	       1 allocs/op">Each iteration copies all 306 bytes into a new string (the 320-byte size class) just to search it. <code>bytes.Contains(data, ...)</code> would search the bytes directly, with no copy.</li>
+      <li data-lines="41" data-state="cap=100; bytes=1792; allocs=1">A <code>[]any</code> of 100 slots: each interface is 2 words (type, data pointer), so 1,600 bytes, rounded to 1,792.</li>
+      <li data-lines="42-43" data-state="i=0; value=1000; allocs=2">Storing <code>1000</code> in an <code>any</code> needs a pointer to the value, so the int is <strong>boxed</strong> into its own 8-byte heap block. Only small values (0-255) use a shared static table.</li>
+      <li data-lines="42-45" data-state="i=99; allocs=101; bytes=1792+800=2592" data-out="BenchmarkBoxInts-8                 	 1298180	       925.1 ns/op	    2592 B/op	     101 allocs/op">100 boxes plus the slice: 101 allocations and 2,592 bytes, exactly matching the benchmark.</li>
+      <li data-lines="51-55" data-state="cap=100; bytes=896; allocs=1" data-out="BenchmarkPlainInts-8               	 4332274	       275.4 ns/op	     896 B/op	       1 allocs/op">With a <code>[]int</code>, the values sit inline in the array: one 800-byte block (896 class), and 3.4x faster. Keep hot data in concrete types, not <code>any</code>.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=&#x27;MapLookup"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkMapLookupConverted-8      	169522701	         7.079 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapLookupViaVar-8         	69658094	        17.29 ns/op	      16 B/op	       1 allocs/op
+BenchmarkContainsBytesToString-8   	22528723	        54.20 ns/op	     320 B/op	       1 allocs/op
+BenchmarkBoxInts-8                 	 1298180	       925.1 ns/op	    2592 B/op	     101 allocs/op
+BenchmarkPlainInts-8               	 4332274	       275.4 ns/op	     896 B/op	       1 allocs/op</pre></div>
+  <p>The same lookup cost 7 ns with zero allocations when written as <code>cache[string(key)]</code>, and 17 ns plus an allocation when the conversion was stored in a variable first. Converting a 306-byte slice just to call <code>strings.Contains</code> costs an allocation every time; <code>bytes.Contains(data, []byte("needle"))</code> avoids it. The <code>bytes</code> package mirrors nearly all of <code>strings</code> for exactly this reason.</p>
+
+  <h3>Interface boxing</h3>
+  <p>An interface value is two words: a type pointer and a data pointer. Putting a non-pointer value into an interface usually means copying it to the heap so the data pointer has something to point at. That's called <strong>boxing</strong>. (Go avoids it for zero-size values, single-byte values and small integers 0–255, which use preallocated static values. That's why the benchmark uses <code>i+1000</code>.) In the results above, 100 ints in a <code>[]any</code> cost 101 allocations and 3.4× the time of a <code>[]int</code>. Generics usually avoid boxing, which is one reason a <code>Max[T cmp.Ordered]</code> beats a <code>Max(a, b any)</code>.</p>
+
+  <h3>Values vs pointers</h3>
+  <p>"Pointers are faster because they avoid copying" is a half-truth. Returning a pointer often forces a heap allocation, and walking a slice of pointers means jumping around memory, which defeats the CPU caches.</p>
+  <div class="live" data-title="Values vs pointers: who pays an allocation?">
+    <pre><code class="language-go">package bench
+
+import "testing"
+
+type Item struct {
+	ID    int
+	Price float64
+	Qty   int
+}
+
+var (
+	itemVals = make([]Item, N)
+	itemPtrs = func() []*Item {
+		p := make([]*Item, N)
+		for i := range p {
+			p[i] = &amp;Item{ID: i, Price: 1.5, Qty: 2}
+		}
+		return p
+	}()
+)
+
+func init() {
+	for i := range itemVals {
+		itemVals[i] = Item{ID: i, Price: 1.5, Qty: 2}
+	}
+}
+
+func BenchmarkSumValues(b *testing.B) {
+	for b.Loop() {
+		total := 0.0
+		for i := range itemVals {
+			total += itemVals[i].Price * float64(itemVals[i].Qty)
+		}
+		_ = total
+	}
+}
+
+func BenchmarkSumPointers(b *testing.B) {
+	for b.Loop() {
+		total := 0.0
+		for _, it := range itemPtrs {
+			total += it.Price * float64(it.Qty)
+		}
+		_ = total
+	}
+}
+
+//go:noinline
+func newItemPtr(i int) *Item { return &amp;Item{ID: i} }
+
+//go:noinline
+func newItemVal(i int) Item { return Item{ID: i} }
+
+func BenchmarkReturnPointer(b *testing.B) {
+	for b.Loop() {
+		_ = newItemPtr(1)
+	}
+}
+
+func BenchmarkReturnValue(b *testing.B) {
+	for b.Loop() {
+		_ = newItemVal(1)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11-19" data-state="itemVals=10000 Items inline; itemPtrs=10000 pointers → 10000 heap Items" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1">Setup, outside the timing. <code>itemVals</code> is one contiguous array of 24-byte structs. <code>itemPtrs</code> is an array of pointers, and each <code>&amp;Item{}</code> is a separate heap allocation.</li>
+      <li data-lines="28-33" data-state="total=30000; allocs=0" data-out="BenchmarkSumValues-8               	   34209	     34926 ns/op	       0 B/op	       0 allocs/op">Summing values walks memory in order. The CPU prefetcher loves this.</li>
+      <li data-lines="38-43" data-state="total=30000; allocs=0" data-out="BenchmarkSumPointers-8             	   34308	     34882 ns/op	       0 B/op	       0 allocs/op">Pointers: the same speed here. The 10,000 items were allocated one after another, so they happen to sit next to each other in memory anyway. (The next example shuffles them to show what a fragmented heap does.)</li>
+      <li data-lines="54-56,48-49" data-state="&amp;Item{ID:1}=escapes; allocs=1; bytes=24"><code>newItemPtr</code> returns the address of a local. The <code>Item</code> must outlive the call, so escape analysis moves it to the heap: 24 bytes, 1 alloc. <code>//go:noinline</code> stops the compiler from inlining it and optimizing that away.</li>
+      <li data-lines="56" data-state="ns/op=7.8; garbage per op=24 B" data-out="BenchmarkReturnPointer-8           	154212482	         7.773 ns/op	      24 B/op	       1 allocs/op">Each call also creates garbage for the GC to scan and free later. That cost doesn't even show in this number.</li>
+      <li data-lines="60-62,51-52" data-state="Item=copied via registers/stack; allocs=0" data-out="BenchmarkReturnValue-8             	576689143	         2.076 ns/op	       0 B/op	       0 allocs/op"><code>newItemVal</code> returns a 24-byte value. It's copied back to the caller, which is cheap, and nothing touches the heap. That's almost 4x faster. Returning small structs by value is usually the right default.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=&#x27;Sum"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkSumValues-8               	   34209	     34926 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSumPointers-8             	   34308	     34882 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReturnPointer-8           	154212482	         7.773 ns/op	      24 B/op	       1 allocs/op
+BenchmarkReturnValue-8             	576689143	         2.076 ns/op	       0 B/op	       0 allocs/op</pre></div>
+  <p>Returning a 24-byte struct by value: 2 ns, no allocation. By pointer: 7.8 ns plus an allocation. Summing 10,000 items was the same either way, but only because these pointers were allocated one after another and happen to sit next to each other in memory. Real heaps are fragmented. Shuffle the pointer order over a million items, too many for the CPU caches, and the picture changes:</p>
+  <div class="code" data-file="cache_test.go"><pre><code class="language-go">package bench
+
+import (
+	"math/rand/v2"
+	"testing"
+)
+
+const Big = 1 &lt;&lt; 20 // ~1M items: far bigger than the CPU caches
+
+var (
+	bigVals = make([]Item, Big)
+	bigPtrs = make([]*Item, Big)
+)
+
+func init() {
+	for i := range bigVals {
+		bigVals[i] = Item{ID: i, Price: 1.5, Qty: 2}
+		bigPtrs[i] = &amp;Item{ID: i, Price: 1.5, Qty: 2}
+	}
+	// Real heaps are fragmented: simulate it by shuffling the pointer order.
+	r := rand.New(rand.NewPCG(1, 2))
+	r.Shuffle(len(bigPtrs), func(i, j int) { bigPtrs[i], bigPtrs[j] = bigPtrs[j], bigPtrs[i] })
+}
+
+func BenchmarkBigSumValues(b *testing.B) {
+	for b.Loop() {
+		total := 0
+		for i := range bigVals {
+			total += bigVals[i].Qty
+		}
+		_ = total
+	}
+}
+
+func BenchmarkBigSumPointersShuffled(b *testing.B) {
+	for b.Loop() {
+		total := 0
+		for _, it := range bigPtrs {
+			total += it.Qty
+		}
+		_ = total
+	}
+}</code></pre></div>
+  <div class="output" data-label="$ go test -run=NONE -bench=Big -benchmem"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkBigSumValues-8             	     540	   2168389 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBigSumPointersShuffled-8   	     218	   5629913 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	example.com/ch18/bench	2.968s</pre></div>
+  <p>Same data, same arithmetic, 2.6× slower, purely because of where the data lives. A contiguous <code>[]Item</code> lets the CPU stream memory in order and prefetch ahead; a <code>[]*Item</code> makes it chase pointers.</p>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid in hot paths"><pre><code class="language-go">var out []string
+for _, u := range users {
+	out = append(out, fmt.Sprintf("%d:%s", u.ID, u.Name))
+}
+result := strings.Join(out, ",")</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">var sb strings.Builder
+sb.Grow(len(users) * 16) // rough estimate is fine
+for i, u := range users {
+	if i > 0 {
+		sb.WriteByte(',')
+	}
+	sb.WriteString(strconv.Itoa(u.ID))
+	sb.WriteByte(':')
+	sb.WriteString(u.Name)
+}
+result := sb.String()</code></pre></div></div>
+  </div>
+  <div class="callout tip"><p>The "prefer" version is uglier. That's the trade. Write the clear version first; switch to the fast version only where a profile shows that code is hot. <code>strconv</code> functions (and <code>strconv.AppendInt</code> into a reused <code>[]byte</code>) are much cheaper than <code>fmt.Sprintf</code>, which uses reflection-like machinery and boxes every argument.</p></div>
+
+  <h2>Profiling with pprof</h2>
+  <p>Benchmarks tell you <em>how long</em>; profiles tell you <em>where</em>. A <strong>CPU profile</strong> samples the call stack about 100 times per second and counts where the program was. A <strong>heap profile</strong> records a sample of allocations and where they came from. <code>go tool pprof</code> reads both.</p>
+  <p>The easiest way to get profiles is from a benchmark:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go test -run=NONE -bench='TopWords$' -benchtime=3s -cpuprofile cpu.out -memprofile mem.out .
+go tool pprof -top -nodecount=14 cpu.out        # text summary
+go tool pprof -http=:8000 cpu.out               # interactive web UI with flame graphs</code></pre></div>
+  <div class="output" data-label="$ go tool pprof -top -nodecount=14 cpu.out"><pre>File: prof.test
+Type: cpu
+Time: 2026-10-16 23:43:49 IST
+Duration: 3.63s, Total samples = 3.61s (99.59%)
+Showing nodes accounting for 3.13s, 86.70% of 3.61s total
+Dropped 51 nodes (cum &lt;= 0.02s)
+Showing top 14 nodes out of 104
+      flat  flat%   sum%        cum   cum%
+     2.19s 60.66% 60.66%      2.19s 60.66%  runtime.kevent
+     0.24s  6.65% 67.31%      0.24s  6.65%  runtime.madvise
+     0.12s  3.32% 70.64%      0.27s  7.48%  regexp.(*Regexp).tryBacktrack
+     0.11s  3.05% 73.68%      0.11s  3.05%  runtime.usleep
+     0.08s  2.22% 75.90%      0.08s  2.22%  runtime.memclrNoHeapPointers
+     0.07s  1.94% 77.84%      0.07s  1.94%  runtime.pthread_cond_wait
+     0.06s  1.66% 79.50%      0.06s  1.66%  regexp/syntax.(*Inst).MatchRunePos
+     0.05s  1.39% 80.89%      0.45s 12.47%  regexp.(*Regexp).backtrack
+     0.05s  1.39% 82.27%      0.05s  1.39%  regexp.(*bitState).shouldVisit (inline)
+     0.04s  1.11% 83.38%      0.08s  2.22%  runtime.mapassign_faststr
+     0.03s  0.83% 84.21%      0.09s  2.49%  regexp.(*bitState).reset
+     0.03s  0.83% 85.04%      0.04s  1.11%  runtime.mallocgcSmallScanNoHeaderSC7
+     0.03s  0.83% 85.87%      0.03s  0.83%  runtime.pthread_cond_signal
+     0.03s  0.83% 86.70%      0.03s  0.83%  runtime.pthread_kill</pre></div>
+  <p>Two columns matter: <strong>flat</strong> is time spent in the function itself; <strong>cum</strong> (cumulative) is time in the function <em>plus everything it calls</em>. Sort by flat to find hot leaf functions, by cum to find which of <em>your</em> functions is responsible.</p>
+  <div class="callout warn"><div class="callout-title">Gotcha: noise from the runtime</div><p>On macOS, a big chunk of samples land in <code>runtime.kevent</code>, <code>runtime.usleep</code> and <code>runtime.madvise</code>: runtime threads that are idle-waiting or returning memory to the OS, not your code. On Linux you'll see much less of that. Don't be distracted; zoom in on your own code with <code>-focus</code> and <code>-cum</code>:</p></div>
+  <div class="output" data-label="$ go tool pprof -top -cum -focus=TopWords -nodecount=14 cpu.out"><pre>File: prof.test
+Type: cpu
+Time: 2026-10-16 23:43:49 IST
+Duration: 3.63s, Total samples = 3.61s (99.59%)
+Active filters:
+   focus=TopWords
+Showing nodes accounting for 0.19s, 5.26% of 3.61s total
+Showing top 14 nodes out of 101
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      0.89s 24.65%  example.com/ch18/prof.BenchmarkTopWords
+         0     0%     0%      0.89s 24.65%  example.com/ch18/prof.TopWords
+         0     0%     0%      0.89s 24.65%  testing.(*B).run1.func1
+         0     0%     0%      0.89s 24.65%  testing.(*B).runN
+         0     0%     0%      0.51s 14.13%  regexp.(*Regexp).FindAllString
+         0     0%     0%      0.51s 14.13%  regexp.(*Regexp).allString.func1 (inline)
+     0.01s  0.28%  0.28%      0.51s 14.13%  regexp.(*Regexp).matches.func1 (inline)
+         0     0%  0.28%      0.51s 14.13%  slices.AppendSeq[go.shape.[]go.shape.string,go.shape.string] (inline)
+         0     0%  0.28%      0.51s 14.13%  slices.Collect[go.shape.string] (inline)
+     0.01s  0.28%  0.55%      0.46s 12.74%  regexp.(*Regexp).find
+     0.05s  1.39%  1.94%      0.45s 12.47%  regexp.(*Regexp).backtrack
+     0.12s  3.32%  5.26%      0.27s  7.48%  regexp.(*Regexp).tryBacktrack
+         0     0%  5.26%      0.21s  5.82%  regexp.Compile (inline)
+         0     0%  5.26%      0.21s  5.82%  regexp.MustCompile</pre></div>
+  <p>Now it's clear: of <code>TopWords</code>' 0.89s, <code>FindAllString</code> takes 0.51s and <code>regexp.MustCompile</code> 0.21s. <code>-list</code> shows the cost line by line:</p>
+  <div class="output" data-label="$ go tool pprof -list=&#x27;prof.TopWords$&#x27; cpu.out"><pre>Total: 3.61s
+ROUTINE ======================== example.com/ch18/prof.TopWords in report.go
+         0      890ms (flat, cum) 24.65% of Total
+         .          .     12:func TopWords(text string, n int) string {
+         .          .     13:	counts := map[string]int{}
+         .       20ms     14:	for _, line := range strings.Split(text, "\n") {
+         .      210ms     15:		re := regexp.MustCompile(`[a-zA-Z]+`) // compiled on EVERY line
+         .      510ms     16:		for _, w := range re.FindAllString(line, -1) {
+         .      140ms     17:			counts[strings.ToLower(w)]++
+         .          .     18:		}
+         .          .     19:	}
+         .          .     20:	keys := make([]string, 0)
+         .          .     21:	for k := range counts {
+         .          .     22:		keys = append(keys, k)
+         .          .     23:	}
+         .          .     24:	slices.SortFunc(keys, func(a, b string) int {
+         .          .     25:		if counts[a] != counts[b] {
+         .          .     26:			return counts[b] - counts[a]
+         .          .     27:		}
+         .          .     28:		return strings.Compare(a, b)
+         .          .     29:	})
+         .          .     30:	out := ""
+         .          .     31:	for _, k := range keys[:min(n, len(keys))] {
+         .       10ms     32:		out += fmt.Sprintf("%s=%d\n", k, counts[k])
+         .          .     33:	}
+         .          .     34:	return out
+         .          .     35:}</pre></div>
+  <p>And the heap profile, by total bytes allocated (<code>alloc_space</code>; use <code>inuse_space</code> to find what's <em>retained</em>, e.g. leaks):</p>
+  <div class="output" data-label="$ go tool pprof -sample_index=alloc_space -top -nodecount=10 mem.out"><pre>File: prof.test
+Type: alloc_space
+Time: 2026-10-16 23:43:53 IST
+Showing nodes accounting for 2.67GB, 97.37% of 2.74GB total
+Dropped 33 nodes (cum &lt;= 0.01GB)
+Showing top 10 nodes out of 38
+      flat  flat%   sum%        cum   cum%
+    0.77GB 28.09% 28.09%     0.77GB 28.09%  slices.AppendSeq[go.shape.[]go.shape.string,go.shape.string]-range1
+    0.58GB 21.21% 49.30%     0.58GB 21.21%  regexp/syntax.(*compiler).inst (inline)
+    0.46GB 16.73% 66.03%     0.46GB 16.73%  regexp/syntax.(*parser).newRegexp (inline)
+    0.35GB 12.60% 78.63%     1.85GB 67.58%  regexp.compile
+    0.28GB 10.13% 88.76%     0.79GB 28.96%  regexp/syntax.parse
+    0.10GB  3.63% 92.39%     0.20GB  7.26%  regexp/syntax.(*compiler).init (inline)
+    0.04GB  1.46% 93.85%     0.04GB  1.46%  regexp/syntax.appendRange
+    0.04GB  1.36% 95.21%     0.04GB  1.36%  strings.genSplit
+    0.03GB  1.17% 96.38%     0.03GB  1.17%  regexp/syntax.(*Regexp).CapNames
+    0.03GB  0.99% 97.37%     0.03GB  0.99%  regexp.(*bitState).reset</pre></div>
+  <p>The diagnosis: compiling the regexp on every line is responsible for two-thirds of all allocated bytes (<code>regexp.compile</code>, cum 67.58%) and a quarter of the function's CPU. Matching with a regexp at all is the next biggest cost, and the <code>+=</code>/<code>Sprintf</code> output barely registers. So the fix is: no regexp (a simple letter test is enough), one pass over the text, a sized map, a struct slice for sorting, and a <code>strings.Builder</code>.</p>
+  <div class="code" data-file="report_fast.go"><pre><code class="language-go">package prof
+
+import (
+	"cmp"
+	"slices"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+type wordCount struct {
+	word  string
+	count int
+}
+
+// TopWordsFast does the same job, guided by the profile.
+func TopWordsFast(text string, n int) string {
+	counts := make(map[string]int, 1024)
+	isNotLetter := func(r rune) bool { return r &gt; unicode.MaxASCII || !unicode.IsLetter(r) }
+	for _, w := range strings.FieldsFunc(text, isNotLetter) { // no regexp at all
+		counts[strings.ToLower(w)]++
+	}
+	list := make([]wordCount, 0, len(counts))
+	for w, c := range counts {
+		list = append(list, wordCount{w, c})
+	}
+	slices.SortFunc(list, func(a, b wordCount) int {
+		return cmp.Or(cmp.Compare(b.count, a.count), strings.Compare(a.word, b.word))
+	})
+	var sb strings.Builder
+	for _, wc := range list[:min(n, len(list))] {
+		sb.WriteString(wc.word)
+		sb.WriteByte('=')
+		sb.WriteString(strconv.Itoa(wc.count))
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}</code></pre></div>
+  <div class="output" data-label="$ go test -bench=. -benchmem   (the test passed: same output)"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/prof
+cpu: Apple M1
+BenchmarkTopWords-8       	     184	   6203031 ns/op	 5236237 B/op	   72049 allocs/op
+BenchmarkTopWordsFast-8   	     969	   1248137 ns/op	 3244985 B/op	    6034 allocs/op
+PASS
+ok  	example.com/ch18/prof	2.586s</pre></div>
+  <p><strong>5× faster and 12× fewer allocations</strong>, guided entirely by the profile. Notice what we didn't bother optimizing: the output string building, which the profile said was 10ms out of 890ms. The remaining 6,034 allocations are mostly <code>strings.ToLower</code> on capitalized words; a profile of the new version would tell you whether that's worth pursuing.</p>
+
+  <h3>Profiling a live service: net/http/pprof</h3>
+  <p>Benchmarks are great for a function, but production problems happen under production load. The <code>net/http/pprof</code> package exposes profiling endpoints over HTTP, so you can profile a running server without restarting it. The common <code>import _ "net/http/pprof"</code> registers them on <code>http.DefaultServeMux</code>; it's safer to mount them explicitly on a separate, private port:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/pprof"
+	"strings"
+)
+
+var cache = map[int]string{}
+
+func work(w http.ResponseWriter, r *http.Request) {
+	// Pretend to do real work: build and keep some strings around.
+	for i := range 1000 {
+		cache[len(cache)] = strings.Repeat("x", 100+i%50)
+	}
+	fmt.Fprintf(w, "cached %d entries\n", len(cache))
+}
+
+func main() {
+	// The public API on :8080.
+	app := http.NewServeMux()
+	app.HandleFunc("GET /work", work)
+	go func() { log.Fatal(http.ListenAndServe(":8080", app)) }()
+
+	// Debug endpoints on a separate, private port (never expose publicly!).
+	debug := http.NewServeMux()
+	debug.HandleFunc("/debug/pprof/", pprof.Index)
+	debug.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	debug.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	debug.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	log.Fatal(http.ListenAndServe("localhost:6060", debug))
+}</code></pre></div>
+  <p>With the server running and some load sent to <code>/work</code>:</p>
+  <div class="output" data-label="Terminal"><pre>$ curl -s localhost:8080/work
+cached 51000 entries
+
+$ curl -s "localhost:6060/debug/pprof/goroutine?debug=1" | head -5
+goroutine profile: total 4
+1 @ 0x1004e7efc 0x100527494 0x1006bf154 0x1006bee00 0x1006bc664 0x1006d0de4 0x1006d1610 0x1006a1218 0x1006a2924 0x1006a8a50 0x10069fc10 0x10052f704
+#	0x1006bf153	runtime/pprof.writeRuntimeProfile+0xb3	$GOROOT/src/runtime/pprof/pprof.go:848
+#	0x1006bedff	runtime/pprof.writeGoroutine+0x4f	$GOROOT/src/runtime/pprof/pprof.go:781
+#	0x1006bc663	runtime/pprof.(*Profile).WriteTo+0x143	$GOROOT/src/runtime/pprof/pprof.go:405</pre></div>
+  <div class="output" data-label="Available profiles (count of entries)"><pre>$ curl -s localhost:6060/debug/pprof/   # (HTML, tags stripped)
+  13  allocs
+   0  block
+   0  cmdline
+   4  goroutine
+   0  goroutineleak
+  13  heap
+   0  mutex
+   0  profile
+   0  symbol
+  10  threadcreate
+   0  trace</pre></div>
+  <div class="output" data-label="$ go tool pprof -top -nodecount=6 http://localhost:6060/debug/pprof/heap"><pre>Fetching profile over HTTP from http://localhost:6060/debug/pprof/heap
+Saved profile in ~/pprof/pprof.bin.alloc_objects.alloc_space.inuse_objects.inuse_space.001.pb.gz
+File: bin
+Type: inuse_space
+Time: 2026-10-16 23:44:22 IST
+Showing nodes accounting for 8735.49kB, 100% of 8735.49kB total
+Showing top 6 nodes out of 40
+      flat  flat%   sum%        cum   cum%
+ 5120.66kB 58.62% 58.62%  5120.66kB 58.62%  internal/bytealg.MakeNoZero
+ 2050.28kB 23.47% 82.09%  2050.28kB 23.47%  runtime.mallocgc
+ 1050.86kB 12.03% 94.12%  6171.52kB 70.65%  main.work
+  513.69kB  5.88%   100%   513.69kB  5.88%  syscall.init.func1
+         0     0%   100%  6171.52kB 70.65%  net/http.(*ServeMux).ServeHTTP
+         0     0%   100%  6171.52kB 70.65%  net/http.(*conn).serve</pre></div>
+  <p>Other useful endpoints: <code>/debug/pprof/profile?seconds=30</code> (a 30-second CPU profile), <code>/debug/pprof/goroutine?debug=2</code> (every goroutine's full stack: the first thing to grab when a service hangs), <code>/debug/pprof/mutex</code> and <code>/block</code> (lock contention, once enabled with <code>runtime.SetMutexProfileFraction</code> / <code>SetBlockProfileRate</code>), and <code>/debug/pprof/trace?seconds=5</code> (an execution trace).</p>
+  <div class="callout danger"><div class="callout-title">Danger</div><p>Never expose pprof on a public port. Profiles leak source paths, function names and memory contents, and a CPU profile request costs CPU. Bind to <code>localhost</code> or an internal network, or put it behind auth. Access it with <code>kubectl port-forward</code> or similar.</p></div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Most mature teams run <em>continuous profiling</em> (Pyroscope, Parca, Datadog, Google Cloud Profiler): low-overhead profiles are collected all the time and stored. When latency regresses after a deploy, you diff the profiles from before and after instead of trying to reproduce the problem. The same profiles also feed PGO, below.</p></div>
+
+  <h2>sync.Pool: reusing temporary objects</h2>
+  <p>Sometimes you can't avoid allocating a temporary object: a buffer to render a response into, a scratch slice for parsing. If that happens thousands of times per second, the allocations and the GC work add up. <code>sync.Pool</code> is a concurrency-safe cache of reusable objects: <code>Get</code> hands you one (or makes a new one with <code>New</code>), and <code>Put</code> returns it for someone else.</p>
+  <div class="live" data-title="Follow the allocations: new buffer vs pooled buffer">
+    <pre><code class="language-go">package bench
+
+import (
+	"bytes"
+	"sync"
+	"testing"
+)
+
+var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func render(buf *bytes.Buffer) {
+	for range 50 {
+		buf.WriteString("&lt;li&gt;an item in a rendered list&lt;/li&gt;\n")
+	}
+}
+
+func BenchmarkBufferNew(b *testing.B) {
+	for b.Loop() {
+		buf := new(bytes.Buffer)
+		render(buf)
+		_ = buf.Len()
+	}
+}
+
+func BenchmarkBufferPool(b *testing.B) {
+	for b.Loop() {
+		buf := bufPool.Get().(*bytes.Buffer)
+		buf.Reset() // pooled objects keep old contents: always reset
+		render(buf)
+		_ = buf.Len()
+		bufPool.Put(buf)
+	}
+}
+
+func BenchmarkBufferPoolParallel(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			buf := bufPool.Get().(*bytes.Buffer)
+			buf.Reset()
+			render(buf)
+			bufPool.Put(buf)
+		}
+	})
+}
+
+func BenchmarkBufferNewParallel(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			buf := new(bytes.Buffer)
+			render(buf)
+			_ = buf.Len()
+		}
+	})
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="19-21" data-state="buf=&amp;Buffer{} (stack); allocs=0" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1"><code>new(bytes.Buffer)</code> doesn't escape here (the compiler can prove it), so the struct itself lives on the stack. That part is free.</li>
+      <li data-lines="22,13-15" data-state="len=36; cap=64; allocs=1">Inside <code>render</code>, the first <code>WriteString</code> finds no backing array. The buffer allocates a small 64-byte slice for the 36-byte line.</li>
+      <li data-lines="14-15" data-state="len=1800; allocs=6">Each time the next line doesn't fit, the buffer allocates a larger slice and copies the old bytes over. Writing 50 × 36 = 1,800 bytes takes <strong>6</strong> heap allocations, all of them byte slices.</li>
+      <li data-lines="23-24" data-state="garbage=4032 B per op" data-out="BenchmarkBufferNew-8               	 1714840	       704.2 ns/op	    4032 B/op	       6 allocs/op">When the iteration ends, every one of those slices is garbage: 4,032 bytes per op for the GC to clean up.</li>
+      <li data-lines="9-10,29" data-state="pool=empty → New(); allocs=1 (first op only)">With the pool, the first <code>Get</code> finds nothing, so it calls <code>New</code>. That one is a heap allocation, because the pool keeps the buffer around.</li>
+      <li data-lines="30" data-state="len=0; cap=kept from last use"><code>Reset</code> sets the length to 0 but <strong>keeps the capacity</strong>. Forget it, and you would render after the previous request's HTML. That's a real data leak bug.</li>
+      <li data-lines="31-33" data-state="len=1800; allocs=0">After the first few ops, the buffer already has room for 1,800 bytes, so <code>render</code> never grows it. <code>Put</code> hands it back for the next <code>Get</code>.</li>
+      <li data-lines="34" data-state="allocs/op=0" data-out="BenchmarkBufferPool-8              	 6799795	       176.9 ns/op	       0 B/op	       0 allocs/op">Averaged over millions of ops: 0 B/op and 4x faster.</li>
+      <li data-lines="38-44" data-state="goroutines=8 (one per P); allocs=0" data-out="BenchmarkBufferPoolParallel-8      	34255168	        35.00 ns/op	       0 B/op	       0 allocs/op"><code>RunParallel</code> runs the body on all 8 cores. <code>sync.Pool</code> keeps a <strong>per-P</strong> (per-processor) cache, so goroutines rarely contend: 35 ns per op overall.</li>
+      <li data-lines="49-54" data-state="allocs=6 on every core" data-out="BenchmarkBufferNewParallel-8       	 1587379	       776.4 ns/op	    4032 B/op	       6 allocs/op">Without the pool, the parallel version is no faster per op. All 8 cores are busy allocating and the GC has to keep up, so allocation, not CPU, is the bottleneck.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=Buffer -benchmem"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkBufferNew-8               	 1714840	       704.2 ns/op	    4032 B/op	       6 allocs/op
+BenchmarkBufferPool-8              	 6799795	       176.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBufferPoolParallel-8      	34255168	        35.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBufferNewParallel-8       	 1587379	       776.4 ns/op	    4032 B/op	       6 allocs/op</pre></div>
+  <p>Pooling removed all 6 allocations and made the serial case 4× faster. Under parallel load it shines even more (35 ns vs 776 ns per op), because the pool keeps a private cache per CPU (per "P" in scheduler terms), so goroutines rarely contend, while 8 goroutines all allocating keep the GC busy.</p>
+
+  <div class="live" data-title="Follow a buffer through the pool">
+    <pre><code class="language-go">var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func handle() {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	render(buf)
+	_ = buf.Len()
+	bufPool.Put(buf)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-3" data-state="pool=empty">A package-level pool. <code>New</code> is only called when the pool has nothing to give.</li>
+      <li data-lines="6" data-state="call=1; pool=empty → New(); buf=#1 (cap 0)">First request: the pool is empty, so <code>Get</code> calls <code>New</code>. We type-assert the <code>any</code> back to <code>*bytes.Buffer</code>.</li>
+      <li data-lines="7-9" data-state="buf=#1; len=1800; cap=2048"><code>render</code> writes 1,800 bytes; the buffer grows its internal array (that's where the 6 allocations of the non-pooled version come from).</li>
+      <li data-lines="10" data-state="pool=[#1 cap 2048]">We give the buffer back. Its grown array comes with it.</li>
+      <li data-lines="6-7" data-state="call=2; buf=#1; len=0; cap=2048">Next request: <code>Get</code> returns buffer #1. <code>Reset</code> sets the length to 0 but keeps the 2 KB array, so <code>render</code> needs no new allocations. This is the whole trick.</li>
+      <li data-lines="6" data-state="after GC: pool may be empty again">The pool is not a permanent cache: objects not used across two GC cycles are dropped. That's fine; <code>Get</code> just falls back to <code>New</code>.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">sync.Pool rules</div><p>1) Always <code>Reset</code> what you <code>Get</code>; it contains the previous user's data. 2) Never use an object after <code>Put</code>ting it back; another goroutine may already have it. 3) Don't pool huge objects without a cap: one 10 MB response would keep a 10 MB buffer alive in the pool, so many projects skip <code>Put</code> when <code>buf.Cap()</code> exceeds a limit. 4) Store pointers (<code>*bytes.Buffer</code>), not values, or <code>Put</code> itself allocates. 5) Only add a pool after a profile shows the allocation matters.</p></div>
+
+  <h2>Struct field ordering</h2>
+  <p>CPUs read memory most efficiently when values sit at addresses that are multiples of their size: an 8-byte <code>float64</code> at an address divisible by 8. This is called <strong>alignment</strong>. To keep fields aligned, the compiler inserts invisible <strong>padding</strong> bytes between them. Go never reorders struct fields for you, so the order you write is the layout you get.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unsafe"
+)
+
+type Bad struct {
+	Active bool    // 1 byte  + 7 padding
+	Score  float64 // 8 bytes
+	Admin  bool    // 1 byte  + 3 padding
+	Count  int32   // 4 bytes
+	Flag   bool    // 1 byte  + 7 padding
+}
+
+type Good struct {
+	Score  float64 // 8 bytes
+	Count  int32   // 4 bytes
+	Active bool    // 1 byte
+	Admin  bool    // 1 byte
+	Flag   bool    // 1 byte + 1 padding
+}
+
+func main() {
+	var b Bad
+	var g Good
+	fmt.Println("Bad  size:", unsafe.Sizeof(b), "align:", unsafe.Alignof(b))
+	fmt.Println("  Active @", unsafe.Offsetof(b.Active), " Score @", unsafe.Offsetof(b.Score),
+		" Admin @", unsafe.Offsetof(b.Admin), " Count @", unsafe.Offsetof(b.Count), " Flag @", unsafe.Offsetof(b.Flag))
+	fmt.Println("Good size:", unsafe.Sizeof(g), "align:", unsafe.Alignof(g))
+	fmt.Println("  Score @", unsafe.Offsetof(g.Score), " Count @", unsafe.Offsetof(g.Count),
+		" Active @", unsafe.Offsetof(g.Active), " Admin @", unsafe.Offsetof(g.Admin), " Flag @", unsafe.Offsetof(g.Flag))
+	fmt.Printf("1M of them: Bad=%d MB, Good=%d MB\n", unsafe.Sizeof(b)*1_000_000&gt;&gt;20, unsafe.Sizeof(g)*1_000_000&gt;&gt;20)
+}</code></pre></div>
+  <div class="output"><pre>Bad  size: 32 align: 8
+  Active @ 0  Score @ 8  Admin @ 16  Count @ 20  Flag @ 24
+Good size: 16 align: 8
+  Score @ 0  Count @ 8  Active @ 12  Admin @ 13  Flag @ 14
+1M of them: Bad=30 MB, Good=15 MB</pre></div>
+
+  <div class="live" data-title="Lay out the Bad struct byte by byte">
+    <pre><code class="language-go">type Bad struct {
+	Active bool    // 1 byte  + 7 padding
+	Score  float64 // 8 bytes
+	Admin  bool    // 1 byte  + 3 padding
+	Count  int32   // 4 bytes
+	Flag   bool    // 1 byte  + 7 padding
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="offset=0; Active@0; used=1">Start at byte 0. <code>Active</code> takes 1 byte.</li>
+      <li data-lines="3" data-state="padding=7; Score@8; used=16"><code>Score</code> needs an address divisible by 8. The next free byte is 1, so the compiler skips 7 bytes of padding and puts <code>Score</code> at 8. It ends at 16.</li>
+      <li data-lines="4" data-state="Admin@16; used=17"><code>Admin</code> needs no alignment beyond 1, so it sits at 16.</li>
+      <li data-lines="5" data-state="padding=3; Count@20; used=24"><code>Count</code> (int32) needs a multiple of 4. Next free is 17, so 3 bytes of padding, and it lands at 20.</li>
+      <li data-lines="6" data-state="Flag@24; used=25"><code>Flag</code> goes at 24.</li>
+      <li data-lines="1-7" data-state="tail padding=7; size=32">The struct's total size must be a multiple of its largest alignment (8), so that in an array every element's <code>Score</code> is aligned too. 25 rounds up to 32. That's 14 bytes of padding for 15 bytes of data. Sorting fields from largest to smallest (<code>Good</code>) gives 16 bytes: half the memory, and twice as many structs per cache line.</li>
+    </ol>
+  </div>
+
+  <div class="callout tip"><p>Rule of thumb: order fields from largest alignment to smallest (pointers, <code>int64</code>/<code>float64</code>/strings/slices first, then <code>int32</code>, then <code>bool</code>/<code>byte</code>). The <code>fieldalignment</code> analyzer (from <code>golang.org/x/tools</code>) can find and fix this automatically. It only matters for types you keep millions of, or that sit in hot arrays; for a config struct, ordering by meaning is more valuable than saving 8 bytes.</p></div>
+
+  <h2>PGO and the execution tracer</h2>
+  <h3>Profile-guided optimization (PGO)</h3>
+  <p>The compiler has to guess which code is hot when deciding what to inline. With PGO (Go 1.21+), you give it a real CPU profile and it uses that knowledge: it inlines hot functions more aggressively and turns hot interface calls into direct calls ("devirtualization"). Typical gains are 2–14% with no code changes.</p>
+  <div class="code" data-file="the PGO workflow"><pre><code class="language-bash"># 1. Collect a CPU profile from production (or a representative benchmark).
+curl -o default.pgo "http://localhost:6060/debug/pprof/profile?seconds=30"
+
+# 2. Put it in the main package's directory as default.pgo and commit it.
+#    `go build` uses ./default.pgo automatically (-pgo=auto is the default).
+go build -o server .
+
+# Or point to a profile explicitly:
+go build -pgo=/path/to/cpu.pprof .</code></pre></div>
+  <p>On our <code>TopWordsFast</code> benchmark, using its own CPU profile, six runs each:</p>
+  <div class="output" data-label="$ go test -bench=&#x27;TopWordsFast$&#x27; -count=6 -pgo=off"><pre>BenchmarkTopWordsFast-8   	     945	   1253322 ns/op
+BenchmarkTopWordsFast-8   	    1004	   1205121 ns/op
+BenchmarkTopWordsFast-8   	    1000	   1226575 ns/op
+BenchmarkTopWordsFast-8   	     992	   1204926 ns/op
+BenchmarkTopWordsFast-8   	     955	   1233457 ns/op
+BenchmarkTopWordsFast-8   	     991	   1211729 ns/op</pre></div>
+  <div class="output" data-label="$ go test -bench=&#x27;TopWordsFast$&#x27; -count=6 -pgo=fast.pprof"><pre>BenchmarkTopWordsFast-8   	    1147	   1038241 ns/op
+BenchmarkTopWordsFast-8   	    1179	   1060430 ns/op
+BenchmarkTopWordsFast-8   	    1186	   1016895 ns/op
+BenchmarkTopWordsFast-8   	    1162	   1070667 ns/op
+BenchmarkTopWordsFast-8   	    1093	   1139228 ns/op
+BenchmarkTopWordsFast-8   	    1060	   1127050 ns/op</pre></div>
+  <p>About 1.22 ms down to about 1.08 ms: roughly 12% for free. Profiles don't need to be perfectly fresh; the compiler tolerates code drift. Refresh the profile every few releases.</p>
+
+  <h3>The execution tracer</h3>
+  <p>pprof answers "where is CPU time spent?". But some problems are about time when the CPU <em>isn't</em> busy: goroutines waiting for a lock, a channel, the network, the scheduler or the GC. The <strong>execution tracer</strong> records every scheduling event with nanosecond timestamps, and <code>go tool trace</code> shows them on a timeline: each P (processor), which goroutine ran when, GC phases, syscalls, and your own annotated tasks and regions.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"runtime/trace"
+	"sync"
+	"time"
+)
+
+func main() {
+	f, err := os.Create("trace.out")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	if err := trace.Start(f); err != nil {
+		panic(err)
+	}
+	defer trace.Stop()
+
+	ctx, task := trace.NewTask(context.Background(), "processBatch")
+	defer task.End()
+
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() { // Go 1.25+: Add(1) + go + Done in one call
+			trace.WithRegion(ctx, fmt.Sprintf("worker-%d", i), func() {
+				time.Sleep(time.Duration(i+1) * 5 * time.Millisecond) // blocked
+				sum := 0
+				for j := range 3_000_000 { // on CPU
+					sum += j
+				}
+				_ = sum
+			})
+		})
+	}
+	wg.Wait()
+	trace.Log(ctx, "status", "batch done")
+	fmt.Println("wrote trace.out; open it with: go tool trace trace.out")
+}</code></pre></div>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">go run .                       # writes trace.out
+go tool trace trace.out        # opens a web UI in your browser
+go test -trace=trace.out ./... # or trace a test/benchmark</code></pre></div>
+  <p>The UI is interactive, but you can peek at the parsed events to see that the task and regions were recorded:</p>
+  <div class="output" data-label="$ go tool trace -d=parsed trace.out"><pre>M=8222965632 P=6 G=1 TaskBegin ID=1 Type="processBatch"
+M=8222965632 P=6 G=40 RegionBegin Task=1 Type="worker-3"
+M=6097924096 P=4 G=39 RegionBegin Task=1 Type="worker-2"
+M=6096203776 P=5 G=37 RegionBegin Task=1 Type="worker-0"
+M=6097924096 P=4 G=38 RegionBegin Task=1 Type="worker-1"
+M=6097924096 P=6 G=37 RegionEnd Task=1 Type="worker-0"
+M=8222965632 P=6 G=38 RegionEnd Task=1 Type="worker-1"
+M=6097924096 P=6 G=39 RegionEnd Task=1 Type="worker-2"
+M=8222965632 P=6 G=40 RegionEnd Task=1 Type="worker-3"
+M=8222965632 P=6 G=1 Log Task=1 Category="status" Message="batch done"</pre></div>
+  <div class="callout tip"><p>Reach for the tracer when CPU profiles look "fine" but latency is bad: it shows goroutines that are runnable but waiting for a CPU, long GC assists, or one slow goroutine holding up a <code>WaitGroup</code>. Since Go 1.25, <code>trace.FlightRecorder</code> keeps the last few seconds of trace in memory so a service can dump it right after something goes wrong.</p></div>
+
+  <h2>Common pitfalls and myths</h2>
+  <table>
+    <thead><tr><th>Belief / pitfall</th><th>Reality</th></tr></thead>
+    <tbody>
+      <tr><td>"Avoid <code>defer</code>, it's slow"</td><td>Not since Go 1.14 (open-coded defers). Measured below: 13.57 ns vs 13.65 ns. Use defer for unlocks and closes.</td></tr>
+      <tr><td>"Pointers are always faster than values"</td><td>Small structs are often faster by value: no allocation, better cache locality.</td></tr>
+      <tr><td>Maps shrink when you delete</td><td>They don't. Deleting every entry keeps the memory (see below).</td></tr>
+      <tr><td><code>[]any</code> / <code>map[string]any</code> everywhere</td><td>Every non-pointer value is boxed: an allocation each. Use concrete types or generics.</td></tr>
+      <tr><td>Small slice of a huge array</td><td><code>big[:10]</code> keeps the whole array alive. Copy it out with <code>slices.Clone</code> if you keep it long.</td></tr>
+      <tr><td><code>fmt.Sprintf</code> in hot loops</td><td><code>strconv</code> and <code>Builder</code> are several times cheaper.</td></tr>
+      <tr><td><code>regexp.MustCompile</code> inside a function</td><td>Compile once at package level: <code>var wordRE = regexp.MustCompile(...)</code>.</td></tr>
+      <tr><td>Goroutine leaks</td><td>Each leaked goroutine holds its stack and everything it references. Watch the goroutine count in <code>/debug/pprof/goroutine</code>.</td></tr>
+      <tr><td><code>time.After</code> in a loop</td><td>Fine since Go 1.23 (unreferenced timers are collected), but a reused <code>time.Timer</code> is still cheaper in very hot loops.</td></tr>
+    </tbody>
+  </table>
+  <div class="live" data-title="defer, then a small vs large make">
+    <pre><code class="language-go">package bench
+
+import (
+	"sync"
+	"testing"
+)
+
+var mu sync.Mutex
+var counter int
+
+func incDefer() {
+	mu.Lock()
+	defer mu.Unlock()
+	counter++
+}
+
+func incNoDefer() {
+	mu.Lock()
+	counter++
+	mu.Unlock()
+}
+
+func BenchmarkDefer(b *testing.B) {
+	for b.Loop() {
+		incDefer()
+	}
+}
+
+func BenchmarkNoDefer(b *testing.B) {
+	for b.Loop() {
+		incNoDefer()
+	}
+}
+
+//go:noinline
+func makeBuf(n int) int {
+	buf := make([]byte, n)
+	return len(buf)
+}
+
+func BenchmarkMakeSmallDynamic(b *testing.B) {
+	for b.Loop() {
+		_ = makeBuf(16)
+	}
+}
+
+func BenchmarkMakeLargeDynamic(b *testing.B) {
+	for b.Loop() {
+		_ = makeBuf(1024)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="23-25,11-13" data-state="mu=locked; deferred=[mu.Unlock]" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/bench\ncpu: Apple M1"><code>incDefer</code> locks and registers the unlock. Since Go 1.14, a simple <code>defer</code> like this is <strong>open-coded</strong>: the compiler inlines the call at each return, with no heap record.</li>
+      <li data-lines="14-15" data-state="counter=+1; mu=unlocked" data-out="BenchmarkDefer-8                   	88945167	        13.57 ns/op	       0 B/op	       0 allocs/op">The function returns and the inlined <code>Unlock</code> runs. That's about 13.6 ns for a full lock and unlock, with 0 allocs. Defer is not a performance concern here, so keep using it for safety.</li>
+      <li data-lines="41-43,35-37" data-state="n=16; buf=on stack; allocs=0"><code>makeBuf</code> is <code>noinline</code>, so the compiler doesn't know <code>n</code>. In older Go, a non-constant size always meant the heap. Since Go 1.25, the compiler reserves a small stack buffer and uses it when <code>n</code> fits.</li>
+      <li data-lines="38,43" data-state="n=16; allocs=0" data-out="BenchmarkMakeSmallDynamic-8        	579697074	         2.065 ns/op	       0 B/op	       0 allocs/op">16 bytes fit, so there's no allocation and the call takes about 2 ns.</li>
+      <li data-lines="47-49,37" data-state="n=1024; buf=on heap; allocs=1">The same code with <code>n=1024</code> doesn't fit the stack buffer, so the runtime falls back to a heap allocation.</li>
+      <li data-lines="38,49" data-state="bytes=1024; allocs=1" data-out="BenchmarkMakeLargeDynamic-8        	 8234659	       145.4 ns/op	    1024 B/op	       1 allocs/op">That's 70x slower than the small case. The cost is mostly the allocator plus zeroing a full KB. If a hot path always needs about 1 KB, reuse a buffer.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -run=NONE -bench=&#x27;Defer"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/bench
+cpu: Apple M1
+BenchmarkDefer-8                   	88945167	        13.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMakeSmallDynamic-8        	579697074	         2.065 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMakeLargeDynamic-8        	 8234659	       145.4 ns/op	    1024 B/op	       1 allocs/op</pre></div>
+  <p>Defer: no measurable cost. And the second pair confirms the Go 1.25+ stack optimization from the escape analysis section: a small <code>make([]byte, n)</code> stayed on the stack (0 allocs), a 1 KB one went to the heap.</p>
+
+  <h3>Maps never shrink</h3>
+  <div class="live" data-title="Watch a map keep its memory after delete">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+func heapMB() uint64 {
+	runtime.GC() // collect first so we measure what is really retained
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&amp;ms)
+	return ms.HeapAlloc &gt;&gt; 20
+}
+
+func main() {
+	m := make(map[int][64]byte)
+	fmt.Println("empty map:        ", heapMB(), "MB")
+
+	for i := range 1_000_000 {
+		m[i] = [64]byte{}
+	}
+	fmt.Println("1M entries:       ", heapMB(), "MB")
+
+	for i := range 1_000_000 {
+		delete(m, i)
+	}
+	fmt.Println("all deleted:      ", heapMB(), "MB  len =", len(m))
+
+	clear(m) // resets the whole map at once (see the text below)
+	fmt.Println("after clear(m):   ", heapMB(), "MB")
+
+	m = make(map[int][64]byte) // drop the old map entirely
+	fmt.Println("new map:          ", heapMB(), "MB")
+	runtime.KeepAlive(m)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="16-17,8-12" data-state="len(m)=0; heap=0 MB" data-out="empty map:         0 MB"><code>heapMB</code> forces a GC first, so we measure what is really <em>retained</em>, not garbage waiting to be collected. An empty map costs almost nothing.</li>
+      <li data-lines="19-21" data-state="len(m)=1000000; tables=grown many times">Inserting a million 64-byte values: the map grows its tables over and over as it fills. Each value is stored <strong>inline</strong> in the table slots, together with the 8-byte key.</li>
+      <li data-lines="22" data-state="len(m)=1000000; heap=160 MB" data-out="1M entries:        160 MB">That's about 160 MB, more than the 72 MB of raw keys and values, because of load-factor slack and control bytes.</li>
+      <li data-lines="24-26" data-state="len(m)=0; slots=marked deleted"><code>delete</code> only marks each slot as free (a tombstone). The table keeps its size, ready for refills.</li>
+      <li data-lines="27" data-state="len(m)=0; heap=160 MB" data-out="all deleted:       160 MB  len = 0"><strong>The gotcha:</strong> the map is empty but still holds 160 MB. A cache that once peaked keeps its peak memory forever.</li>
+      <li data-lines="29-30" data-state="heap=0 MB" data-out="after clear(m):    0 MB">On this Go version (Swiss-table maps, 1.24+), <code>clear(m)</code> drops the big tables, and the next GC frees them.</li>
+      <li data-lines="32-34" data-state="m=new map; heap=0 MB" data-out="new map:           0 MB">Replacing the map works on <em>every</em> Go version: the old map is unreachable, so the GC frees it all. <code>KeepAlive</code> keeps <code>m</code> alive until here so the measurement is honest.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>empty map:         0 MB
+1M entries:        160 MB
+all deleted:       160 MB  len = 0
+after clear(m):    0 MB
+new map:           0 MB</pre></div>
+  <p><code>delete</code> marks slots as free but keeps the table: the map stays sized for its peak. A cache that once held a million entries and now holds ten still costs the memory of a million. On this Go version (with the "Swiss table" maps introduced in Go 1.24), <code>clear(m)</code> released the large tables; replacing the map with a fresh one always works on any version. For long-lived maps with churn, periodically copy the live entries into a new map.</p>
+
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">A profile shows 40% of CPU in <code>runtime.mallocgc</code> and GC functions. What is the best first move?</div>
+    <div class="quiz-opts"><button>Set <code>GOGC=off</code></button><button>Rewrite the hot function in assembly</button><button>Remove every <code>defer</code></button><button>Look at the heap profile (<code>alloc_space</code>/<code>alloc_objects</code>) to find who allocates most, and reduce those allocations</button></div>
+    <div class="quiz-explain">High malloc/GC time means "too many allocations". The heap profile tells you exactly which call sites allocate, so you can preallocate, reuse, or avoid them. Turning GC off just trades CPU for unbounded memory, and defers aren't the cause.</div>
+  </div>
+
+  <h3>Practice</h3>
+  <details class="exercise">
+    <summary>Exercise 1: speed up a hot ID formatter</summary>
+    <p>This function is called millions of times: <code>func FormatID(prefix string, n int) string { return fmt.Sprintf("%s-%06d", prefix, n) }</code>. Write a benchmark, then a faster version that returns exactly the same strings (zero-padded to 6 digits), plus a test proving they match. Hint: build the bytes with <code>append</code> and <code>strconv.AppendInt</code> into a stack buffer like <code>var buf [32]byte</code>. Converting the final <code>[]byte</code> to a string is the one allocation you'll keep.</p>
+    <div class="solution-label">Solution</div>
+  <div class="live" data-title="Build an ID with one allocation">
+    <pre><code class="language-go">package id
+
+import (
+	"fmt"
+	"strconv"
+	"testing"
+)
+
+func FormatID(prefix string, n int) string {
+	return fmt.Sprintf("%s-%06d", prefix, n)
+}
+
+func FormatIDFast(prefix string, n int) string {
+	var buf [32]byte // stays on the stack
+	b := append(buf[:0], prefix...)
+	b = append(b, '-')
+	if n &gt;= 0 { // zero-pad non-negative numbers to 6 digits
+		for d := digits(n); d &lt; 6; d++ {
+			b = append(b, '0')
+		}
+	}
+	b = strconv.AppendInt(b, int64(n), 10)
+	return string(b) // the single allocation
+}
+
+func digits(n int) int {
+	d := 1
+	for n &gt;= 10 {
+		n /= 10
+		d++
+	}
+	return d
+}
+
+func TestSame(t *testing.T) {
+	for _, n := range []int{0, 7, 42, 999999, 1234567} {
+		if a, b := FormatID("ord", n), FormatIDFast("ord", n); a != b {
+			t.Errorf("n=%d: %q vs %q", n, a, b)
+		}
+	}
+}
+
+func BenchmarkSprintf(b *testing.B) {
+	for b.Loop() {
+		_ = FormatID("ord", 4242)
+	}
+}
+
+func BenchmarkFast(b *testing.B) {
+	for b.Loop() {
+		_ = FormatIDFast("ord", 4242)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="35-39" data-state="n=0; FormatID=&quot;ord-000000&quot;" data-out="goos: darwin\ngoarch: arm64\npkg: example.com/ch18/ex1\ncpu: Apple M1"><code>go test -bench=.</code> runs the tests first. <code>TestSame</code> checks that the fast version matches <code>Sprintf</code> for edge cases: 0, short numbers, exactly 6 digits, and more than 6.</li>
+      <li data-lines="37,13-14" data-state="prefix=&quot;ord&quot;; n=42; buf=[32]byte (stack)">Step into <code>FormatIDFast("ord", 42)</code>. <code>buf</code> is a fixed-size array that doesn't escape, so it lives on the <strong>stack</strong>: a free scratch space.</li>
+      <li data-lines="15-16" data-state="b=&quot;ord-&quot;; len(b)=4; cap(b)=32"><code>buf[:0]</code> is a zero-length slice over that array, so the appends write into the stack array. No heap yet.</li>
+      <li data-lines="17-18,26-32" data-state="digits(42)=2">Count the digits: 42 → 4 → stop, so <code>d=2</code>.</li>
+      <li data-lines="18-20" data-state="b=&quot;ord-0000&quot;">Pad with 6 − 2 = 4 zeros.</li>
+      <li data-lines="22" data-state="b=&quot;ord-000042&quot;; len(b)=10"><code>strconv.AppendInt</code> writes digits straight into <code>b</code> instead of returning a new string, the same idea as <code>append</code>.</li>
+      <li data-lines="23" data-state="result=&quot;ord-000042&quot;; heap allocs=1 (16 B)"><code>string(b)</code> must copy, because the string outlives the stack array. That's the <strong>only</strong> allocation: 10 bytes rounded up to 16.</li>
+      <li data-lines="36-40" data-state="cases=all 5 equal; failures=0">The loop also checks 7, 999999 and 1234567 (7 digits, so no padding). All match, and the test passes silently because there's no <code>-v</code>.</li>
+      <li data-lines="43-47,9-10" data-state="allocs=1; ns=73" data-out="BenchmarkSprintf-8   	16228028	        73.05 ns/op	      16 B/op	       1 allocs/op"><code>Sprintf</code> also makes just 1 allocation (the result), but it parses the format string and goes through its interface-based formatting machinery every call.</li>
+      <li data-lines="49-53" data-state="allocs=1; ns=25.6" data-out="BenchmarkFast-8      	46480249	        25.57 ns/op	      16 B/op	       1 allocs/op\nPASS\nok  	example.com/ch18/ex1	3.004s">Same bytes, same single allocation, 3x faster. The win here is CPU, not memory. Do this only in code the profiler points to.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go test -bench=. -benchmem"><pre>goos: darwin
+goarch: arm64
+pkg: example.com/ch18/ex1
+cpu: Apple M1
+BenchmarkSprintf-8   	16228028	        73.05 ns/op	      16 B/op	       1 allocs/op
+BenchmarkFast-8      	46480249	        25.57 ns/op	      16 B/op	       1 allocs/op
+PASS
+ok  	example.com/ch18/ex1	3.004s</pre></div>
+    <p>Almost 3× faster. Interestingly, modern <code>fmt.Sprintf</code> already gets this down to a single allocation (the result string), so the win here is all CPU: no format-string parsing and no boxing of arguments into <code>any</code>. Always benchmark; don't assume where the cost is.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: find the escape</summary>
+    <p>Run <code>go build -gcflags='-m -l'</code> on the program below. Which values escape, and why? Then change <code>sum</code> so that <code>nums</code> doesn't escape.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+var lastInput []int // remembered for debugging
+
+func sum(nums []int) int {
+	lastInput = nums
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+func main() {
+	nums := []int{1, 2, 3, 4}
+	fmt.Println(sum(nums))
+}</code></pre></div>
+    <div class="solution-label">Solution</div>
+  <div class="output" data-label="$ go build -gcflags=&#x27;-m -l&#x27; .  (before)"><pre>./main.go:7:10: leaking param: nums
+./main.go:17:15: []int{...} escapes to heap
+./main.go:18:13: ... argument does not escape
+./main.go:18:17: sum(nums) escapes to heap</pre></div>
+    <p>"leaking param: nums" means <code>sum</code> lets its parameter flow somewhere that outlives the call: the package-level <code>lastInput</code>. Anything reachable from a global must live on the heap, so the caller's slice literal (<code>[]int{...}</code>) escapes. The <code>sum(nums) escapes to heap</code> line is the interface conversion for <code>fmt.Println</code>. Drop the global assignment (or store a copy with <code>slices.Clone</code> only when you really need it) and the slice can stay on the stack:</p>
+  <div class="code" data-file="main.go (fixed)"><pre><code class="language-go">package main
+
+import "fmt"
+
+func sum(nums []int) int {
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+func main() {
+	nums := []int{1, 2, 3, 4}
+	fmt.Println(sum(nums))
+}</code></pre></div>
+  <div class="output" data-label="$ go build -gcflags=&#x27;-m -l&#x27; .  (after)"><pre>./main.go:5:10: nums does not escape
+./main.go:14:15: []int{...} does not escape
+./main.go:15:13: ... argument does not escape
+./main.go:15:17: sum(nums) escapes to heap</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Measure first, with a goal. Change one thing, measure again, keep tests green.</li>
+      <li>The compiler decides stack vs heap through escape analysis; read it with <code>-gcflags=-m</code> (<code>-m=2</code> for reasons). Returning pointers, globals, closures and interfaces are the usual causes.</li>
+      <li>Go's GC is concurrent tri-color mark-and-sweep with sub-millisecond pauses. Its cost scales with allocation rate. <code>GOGC</code> trades memory for CPU; <code>GOMEMLIMIT</code> sets a soft ceiling. Set it in containers.</li>
+      <li>Cut allocations: preallocate slices and maps, use <code>strings.Builder</code> with <code>Grow</code>, avoid needless <code>[]byte</code>/<code>string</code> conversions and interface boxing, prefer values for small structs and contiguous slices for data you scan.</li>
+      <li>Benchmark with <code>b.Loop</code>, <code>-benchmem</code>, <code>-count</code> and <code>benchstat</code>; watch <code>allocs/op</code>.</li>
+      <li>pprof: <code>-cpuprofile</code>/<code>-memprofile</code> from tests, <code>net/http/pprof</code> on a private port for live services; read flat vs cum, use <code>-focus</code> and <code>-list</code>.</li>
+      <li><code>sync.Pool</code> reuses temporary objects: always Reset, never use after Put, cap the size.</li>
+      <li>Order struct fields large to small to avoid padding in types you have millions of.</li>
+      <li>PGO gives a few to ~15% for free from a production profile; the tracer explains latency that CPU profiles can't.</li>
+      <li><code>defer</code> is cheap now; maps don't shrink on delete; sub-slices keep big arrays alive; compile regexps once.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

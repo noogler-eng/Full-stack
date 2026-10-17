@@ -1,0 +1,1249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 11 · Packages &amp; Modules — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="11">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part III · Chapter 11</div>
+  <h1>Packages &amp; Modules</h1>
+  <p class="lead">So far you have mostly written one <code>main.go</code>. Real programs are split into many files and folders, and they use code written by other people. This chapter explains how Go organizes code (packages), how it versions and downloads code (modules), and how to lay out a project that stays pleasant as it grows. We will build a real multi-package bookstore project and run every command on it.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 12 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What a package is, how it maps to a directory, and how capitalization controls visibility</li>
+      <li>Package naming rules, import aliases, blank imports, dot imports, and import cycles</li>
+      <li>The exact order in which package variables and <code>init()</code> functions run</li>
+      <li><code>go.mod</code> and <code>go.sum</code> line by line, and how Go picks dependency versions</li>
+      <li>The everyday commands: <code>go get</code>, <code>go mod tidy</code>, <code>go list -m all</code>, <code>replace</code>, vendoring, <code>GOPROXY</code>, <code>GOPRIVATE</code></li>
+      <li><code>internal/</code>, <code>cmd/</code>, sensible project layout, and workspaces with <code>go.work</code></li>
+      <li>The <code>tool</code> directive, publishing and tagging, build tags and file suffixes, and <code>//go:embed</code></li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Packages: the unit of code in Go</h2>
+  <p>A <strong>package</strong> is a group of <code>.go</code> files that live in the <strong>same directory</strong> and start with the same <code>package name</code> line. Everything declared at the top level of any of those files (functions, types, variables, constants) is visible to every other file in that package. You do not import files; you import packages.</p>
+  <p>A <strong>module</strong> is one level up: a tree of packages that are versioned and released together. It is defined by a <code>go.mod</code> file at its root. A <strong>repository</strong> (a git repo) usually holds exactly one module.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Think of a <strong>module</strong> as a book, each <strong>package</strong> as a chapter, and each <code>.go</code> file as a page. You can split a chapter over as many pages as you like; readers still cite "chapter 3", never "page 47". Readers of the book (other modules) cite chapters by their full path: <code>github.com/sharad/bookstore/internal/catalog</code>.</p></div>
+
+  <p>The rules are simple:</p>
+  <ul>
+    <li><strong>One directory = one package.</strong> All non-test files in a folder must have the same package name. (Test files may also use <code>package name_test</code>, see Chapter 15.)</li>
+    <li><strong>The import path</strong> is the module path plus the directory: module <code>github.com/sharad/bookstore</code> + folder <code>internal/catalog</code> = <code>github.com/sharad/bookstore/internal/catalog</code>.</li>
+    <li><strong>The package name</strong> is what you type in code: <code>catalog.New()</code>. By convention it equals the last element of the import path.</li>
+    <li><strong>Package <code>main</code></strong> is special: it builds an executable, and must have a <code>func main()</code>. Any other name builds a library.</li>
+  </ul>
+
+  <h3>Our example project</h3>
+  <p>Throughout this chapter we use a real project, built and run with go1.27.1. Here is its tree:</p>
+  <div class="output" data-label="bookstore/ tree"><pre>bookstore/
+├── assets/
+│   ├── assets.go
+│   ├── banner.txt
+│   └── templates/
+│       └── receipt.tmpl
+├── cmd/
+│   ├── bookstore/
+│   │   └── main.go
+│   └── report/
+│       └── main.go
+├── go.mod
+├── go.sum
+└── internal/
+    ├── catalog/
+    │   ├── catalog.go
+    │   ├── catalog_test.go
+    │   ├── doc.go
+    │   ├── genre.go
+    │   └── genre_string.go
+    ├── money/
+    │   └── money.go
+    └── platform/
+        ├── debug_off.go
+        ├── debug_on.go
+        ├── platform_darwin.go
+        ├── platform_linux.go
+        └── platform_other.go</pre></div>
+  <p>And here is what it does when you build, vet, run and test it:</p>
+  <div class="output" data-label="terminal"><pre>$ go build ./...
+$ go vet ./...
+$ go run ./cmd/bookstore
+ ____              _        _
+| __ )  ___   ___ | | _____| |_ ___  _ __ ___
+|  _ \ / _ \ / _ \| |/ / __| __/ _ \| '__/ _ \
+| |_) | (_) | (_) |   &lt;\__ \ || (_) | | |  __/
+|____/ \___/ \___/|_|\_\___/\__\___/|_|  \___|
+running on macOS (debug=false)
+
+genre: Programming
+first book in stock: true
+lookup error: catalog: "missing": book not found
+Receipt
+- The Go Programming Language ... ₹899.00
+- Concurrency in Go ... ₹767.00
+
+$ go run -tags debug ./cmd/bookstore | grep running
+running on macOS (debug=true)
+$ go run ./cmd/report
+Good day, Sharad.
+$ go test ./...
+?   	github.com/sharad/bookstore/assets	[no test files]
+?   	github.com/sharad/bookstore/cmd/bookstore	[no test files]
+?   	github.com/sharad/bookstore/cmd/report	[no test files]
+ok  	github.com/sharad/bookstore/internal/catalog	0.460s
+?   	github.com/sharad/bookstore/internal/money	[no test files]
+?   	github.com/sharad/bookstore/internal/platform	[no test files]</pre></div>
+  <p>We will now go through every piece: why it is in that folder, why some names are capitalized, what <code>go.mod</code> says, how <code>banner.txt</code> got inside the binary, and why there are five files in <code>platform/</code>.</p>
+
+  <!-- ============================================================ -->
+  <h2>Exported vs unexported: capitalization is the access modifier</h2>
+  <p>Go has no <code>public</code>, <code>private</code> or <code>protected</code> keywords. Instead:</p>
+  <ul>
+    <li>A name that starts with an <strong>uppercase letter</strong> is <strong>exported</strong>: other packages can use it. (<code>Book</code>, <code>New</code>, <code>ErrNotFound</code>, <code>FromRupees</code>.)</li>
+    <li>A name that starts with a <strong>lowercase letter</strong> (or <code>_</code>) is <strong>unexported</strong>: only code in the same package can use it. (<code>round</code>, <code>stock</code>, <code>books</code>.)</li>
+  </ul>
+  <p>This applies to everything: functions, types, variables, constants, struct fields and methods. Look at the money package:</p>
+  <div class="code" data-file="internal/money/money.go"><pre><code class="language-go">// Package money represents prices without floating-point surprises.
+package money
+
+import "fmt"
+
+// Cents is an amount of money in the smallest unit (paise, cents).
+type Cents int64
+
+// String formats 129900 as "₹1299.00". Exported: starts with a capital.
+func (c Cents) String() string {
+	return fmt.Sprintf("₹%d.%02d", c/100, c%100)
+}
+
+// FromRupees is exported, so other packages can call money.FromRupees.
+func FromRupees(r int64) Cents { return Cents(r * 100) }
+
+// round is unexported: only code inside package money can use it.
+func round(c Cents) Cents { return (c + 50) / 100 * 100 }
+
+// WithTax adds GST and rounds to the nearest rupee.
+func WithTax(c Cents, percent int64) Cents {
+	return round(c + c*Cents(percent)/100)
+}</code></pre></div>
+  <p>And the catalog package. Note the <code>stock</code> field is lowercase, so other packages can see a <code>Book</code> but cannot read or change its stock directly. They must go through methods like <code>InStock</code>. That is <strong>encapsulation</strong>, done with one letter.</p>
+  <div class="live" data-title="How the go command resolves each import path">
+    <pre><code class="language-go">package catalog
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/google/uuid"
+	"github.com/sharad/bookstore/internal/money"
+)
+
+// ErrNotFound is exported: callers check it with errors.Is.
+var ErrNotFound = errors.New("book not found")
+
+// Book is exported, and so are its capitalised fields.
+type Book struct {
+	ID    string
+	Title string
+	Price money.Cents
+	stock int // unexported field: invisible outside package catalog
+}
+
+// Catalog is an in-memory store.
+type Catalog struct {
+	books []Book
+}
+
+// New is the conventional constructor name: catalog.New().
+func New() *Catalog { return &amp;Catalog{} }
+
+// Add registers a book and returns its generated ID.
+func (c *Catalog) Add(title string, price money.Cents, stock int) string {
+	id := uuid.NewString()[:8]
+	c.books = append(c.books, Book{ID: id, Title: title, Price: price, stock: stock})
+	return id
+}
+
+// InStock reports whether a book can be sold.
+func (c *Catalog) InStock(id string) (bool, error) {
+	i := slices.IndexFunc(c.books, func(b Book) bool { return b.ID == id })
+	if i &lt; 0 {
+		return false, fmt.Errorf("catalog: %q: %w", id, ErrNotFound)
+	}
+	return c.books[i].stock &gt; 0, nil
+}
+
+// All returns a copy so callers can't modify our slice.
+func (c *Catalog) All() []Book { return slices.Clone(c.books) }</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="dir=internal/catalog; package=catalog">The file lives in <code>internal/catalog/</code> and says <code>package catalog</code>. Its full import path is the module path plus the folder: <code>github.com/sharad/bookstore/internal/catalog</code>.</li>
+      <li data-lines="4-6" data-state="&quot;errors&quot; → $GOROOT/src/errors">No dot in the first path element means <strong>standard library</strong>. The go command looks in <code>$GOROOT/src</code>, no go.mod lookup needed.</li>
+      <li data-lines="8" data-state="&quot;github.com/google/uuid&quot; → go.mod require v1.6.0">This path is not in the standard library and not under our module path, so the go command finds the module that provides it in <code>go.mod</code>: <code>github.com/google/uuid v1.6.0</code>.</li>
+      <li data-lines="8" data-state="uuid → $GOMODCACHE/github.com/google/uuid@v1.6.0">It checks the hash in <code>go.sum</code>, then reads the source from the module cache, downloading it via <code>GOPROXY</code> the first time.</li>
+      <li data-lines="9" data-state="&quot;.../internal/money&quot; → ./internal/money">This path starts with <strong>our own</strong> module path, so it maps straight to a folder in this repo. No download, no version.</li>
+      <li data-lines="9" data-state="importer=.../internal/catalog; allowed root=github.com/sharad/bookstore">It contains <code>internal</code>, so the go command checks the importer: is it under <code>github.com/sharad/bookstore/</code>? Yes, so it is allowed.</li>
+      <li data-lines="13,16-20" data-state="exported: ErrNotFound Book ID Title Price; unexported: stock">Inside, capitalization decides visibility: <code>ErrNotFound</code>, <code>Book</code> and its capital fields are exported; <code>stock</code> is visible only inside <code>catalog</code>.</li>
+      <li data-lines="19,9" data-state="Price money.Cents">Using an imported name always needs the package name as a prefix: <code>money.Cents</code>. The prefix comes from the <code>package</code> clause, which here matches the last path element.</li>
+    </ol>
+  </div>
+  <p>What happens if <code>main</code> tries to reach inside?</p>
+  <div class="code" data-file="cmd/oops/main.go"><pre><code class="language-go">b := catalog.Book{Title: "Go"}
+fmt.Println(b.stock)
+fmt.Println(money.round(150))</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># github.com/sharad/bookstore/cmd/oops
+cmd/oops/main.go:12:16: b.stock undefined (cannot refer to unexported field stock)
+cmd/oops/main.go:13:20: name round not exported by package money</pre></div>
+  <p><code>go doc</code> shows exactly the exported API, which is a great way to review what you are promising to users:</p>
+  <div class="output" data-label="$ go doc ./internal/money"><pre>package money // import "github.com/sharad/bookstore/internal/money"
+
+Package money represents prices without floating-point surprises.
+
+type Cents int64
+    func FromRupees(r int64) Cents
+    func WithTax(c Cents, percent int64) Cents</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Start everything unexported. Export a name only when another package actually needs it. Every exported identifier is a public promise: once someone depends on it, renaming or removing it is a breaking change. A small exported surface is the single best predictor of a package that is easy to maintain.</p></div>
+
+  <div class="callout tip"><p>Package-level doc comments go right above <code>package x</code> in one file (often a dedicated <code>doc.go</code>, as in <code>internal/catalog/doc.go</code>) and start with "Package x ...". Every exported name should have a comment that starts with the name itself: "<code>// New returns ...</code>".</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Naming packages and importing them</h2>
+  <h3>Good package names</h3>
+  <ul>
+    <li><strong>Short, lowercase, one word</strong>, no underscores or mixedCaps: <code>catalog</code>, <code>money</code>, <code>httputil</code>, <code>strconv</code>.</li>
+    <li><strong>Name it for what it provides</strong>, not what it contains. Avoid <code>util</code>, <code>common</code>, <code>helpers</code>, <code>misc</code>, <code>models</code>: they grow forever and tell the reader nothing.</li>
+    <li><strong>Avoid stutter.</strong> The package name is part of every call, so <code>catalog.New</code> and <code>catalog.Book</code>, not <code>catalog.NewCatalog</code> or <code>catalog.CatalogBook</code>. <code>http.Server</code>, not <code>http.HTTPServer</code>.</li>
+    <li><strong>Directory name = package name.</strong> The one common exception is a major-version folder like <code>/v2</code>, whose package name is still the base name (<code>greet</code>).</li>
+  </ul>
+
+  <table><thead><tr><th>Import form</th><th>Example</th><th>When to use it</th></tr></thead><tbody>
+    <tr><td>Normal</td><td><code>import "strings"</code></td><td>Almost always.</td></tr>
+    <tr><td>Alias</td><td><code>import crand "crypto/rand"</code></td><td>Two packages with the same name (<code>crypto/rand</code> vs <code>math/rand/v2</code>), or a very long/unclear name. Use sparingly.</td></tr>
+    <tr><td>Blank <code>_</code></td><td><code>import _ "image/png"</code></td><td>You need only the package's side effects (its <code>init()</code>), e.g. registering an image decoder or a database driver.</td></tr>
+    <tr><td>Dot <code>.</code></td><td><code>import . "strings"</code></td><td>Practically never. Names appear without a prefix, so readers cannot tell where <code>ToUpper</code> came from.</td></tr>
+  </tbody></table>
+  <div class="live" data-title="Four import forms, and what each one buys you">
+    <pre><code class="language-go">package main
+
+import (
+	"bytes"
+	crand "crypto/rand" // alias: avoids a clash with math/rand
+	"encoding/base64"
+	"fmt"
+	"image"
+	_ "image/png" // blank import: registers the PNG decoder in init()
+	"math/rand/v2"
+	. "strings" // dot import: ToUpper instead of strings.ToUpper (avoid!)
+)
+
+// A 1x1 transparent PNG.
+const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+
+func main() {
+	b := make([]byte, 4)
+	crand.Read(b)
+	fmt.Println("crypto bytes:", len(b), "| math/rand/v2 in [0,10):", rand.IntN(10) &lt; 10)
+
+	raw, _ := base64.StdEncoding.DecodeString(pixel)
+	_, format, err := image.Decode(bytes.NewReader(raw))
+	fmt.Println("decoded format:", format, "err:", err)
+
+	fmt.Println(ToUpper("dot imports hide where names come from"))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5,9-11" data-state="crand=crypto/rand; rand=math/rand/v2; png=init only; .=strings">Before <code>main</code> runs, every imported package is initialized. <code>image/png</code>'s <code>init()</code> calls <code>image.RegisterFormat("png", ...)</code>. That side effect is the only reason we import it with <code>_</code>.</li>
+      <li data-lines="18-19" data-state="b=[4 random bytes]">Both <code>crypto/rand</code> and <code>math/rand/v2</code> are named <code>rand</code>. The alias <code>crand</code> lets us use both in one file.</li>
+      <li data-lines="20" data-state="len(b)=4; rand.IntN(10)&lt;10=true" data-out="crypto bytes: 4 | math/rand/v2 in [0,10): true">Plain <code>rand</code> now means <code>math/rand/v2</code>. We print only facts that are always true, because the random values change on every run.</li>
+      <li data-lines="22" data-state="raw=68 bytes of PNG">The base64 constant decodes to the bytes of a tiny PNG file.</li>
+      <li data-lines="23" data-state="format=&quot;png&quot;; err=nil"><code>image.Decode</code> looks at the first bytes and searches its list of registered formats. PNG is there only because of the blank import.</li>
+      <li data-lines="24" data-state="format=&quot;png&quot;; err=nil" data-out="decoded format: png err: &lt;nil&gt;">Decoding works. Remove line 9 and this prints <code>image: unknown format</code> instead.</li>
+      <li data-lines="11,26" data-state="ToUpper=strings.ToUpper" data-out="DOT IMPORTS HIDE WHERE NAMES COME FROM">The dot import put <code>strings.ToUpper</code> into our file's scope with no prefix. It works, but a reader cannot tell where <code>ToUpper</code> lives.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>crypto bytes: 4 | math/rand/v2 in [0,10): true
+decoded format: png err: &lt;nil&gt;
+DOT IMPORTS HIDE WHERE NAMES COME FROM</pre></div>
+  <p>The blank import really matters. Comment out <code>_ "image/png"</code>, run it again, and decoding stops working, because nothing registered the PNG format:</p>
+  <div class="output" data-label="without the blank import"><pre>decoded format:  err: image: unknown format</pre></div>
+  <p>Imports are grouped by convention: standard library first, a blank line, then everything else. <code>goimports</code> (and most editors) does this for you, and also adds and removes imports automatically.</p>
+
+  <h3>No import cycles</h3>
+  <p>If package <code>a</code> imports <code>b</code>, then <code>b</code> may not import <code>a</code>, directly or through others. The compiler refuses:</p>
+  <div class="output error" data-label="$ go build ./..."><pre>package example.com/cycle/a
+	imports example.com/cycle/b from a.go
+	imports example.com/cycle/a from b.go: import cycle not allowed</pre></div>
+  <p>This is a feature. It forces a clean, layered dependency graph, and it is one reason Go compiles so fast. When you hit a cycle, the fix is usually one of: move the shared type into a third, lower package; or have the lower package define a small interface that the higher package satisfies (Chapter 8).</p>
+
+  <!-- ============================================================ -->
+  <h2>Initialization order: package variables and init()</h2>
+  <p>Before <code>main()</code> runs, Go initializes every package in the program. Each package goes through two steps:</p>
+  <ol>
+    <li><strong>Package-level variables</strong> are initialized, in <em>dependency order</em> (if <code>A</code> uses <code>B</code>, <code>B</code> is computed first, even if declared later).</li>
+    <li>Every <strong><code>func init()</code></strong> runs, in the order they appear (files are processed in the order given to the compiler, which the go command sorts by filename). A package may have many <code>init</code> functions, even several per file. You cannot call <code>init</code> yourself.</li>
+  </ol>
+  <p>And across packages: <strong>a package is initialized only after all the packages it imports</strong>. Each package is initialized exactly once, no matter how many importers it has. Since Go 1.21 the order between unrelated packages is also fully defined: among packages that are ready, the one with the smallest import path goes first.</p>
+  <p>Here is a small program with three packages. <code>main</code> imports <code>cache</code> (blank import) and <code>db</code>; both of those import <code>config</code>.</p>
+  <div class="code" data-file="config/config.go"><pre><code class="language-go">package config
+
+import "fmt"
+
+// Package-level variables are initialised first, in dependency
+// order: Port depends on defaultPort, so defaultPort goes first
+// even though it is declared later.
+var Port = trace("config.Port", defaultPort+1)
+var defaultPort = trace("config.defaultPort", 8079)
+
+func init() { fmt.Println("config: init()") }
+
+func trace(name string, v int) int {
+	fmt.Println("config: var", name, "=", v)
+	return v
+}</code></pre></div>
+  <div class="code" data-file="db/db.go"><pre><code class="language-go">package db
+
+import (
+	"fmt"
+
+	"example.com/initorder/config"
+)
+
+var DSN = fmt.Sprintf("postgres://localhost:%d", config.Port)
+
+func init() { fmt.Println("db: init() #1, DSN =", DSN) }
+func init() { fmt.Println("db: init() #2 (a file may have many)") }</code></pre></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	_ "example.com/initorder/cache" // blank import: run init() only
+	"example.com/initorder/db"
+)
+
+var greeting = say("main: var greeting")
+
+func say(s string) string { fmt.Println(s); return s }
+
+func init() { fmt.Println("main: init()") }
+
+func main() {
+	fmt.Println("main: main() starts, DSN =", db.DSN)
+}</code></pre></div>
+
+  <div class="live" data-title="Who initializes first?">
+    <pre><code class="language-go">// ---- config/config.go ----
+var Port = trace("config.Port", defaultPort+1)
+var defaultPort = trace("config.defaultPort", 8079)
+func init() { fmt.Println("config: init()") }
+
+// ---- cache/cache.go (imports config) ----
+func init() { fmt.Println("cache: init(), sees port", config.Port) }
+
+// ---- db/db.go (imports config) ----
+var DSN = fmt.Sprintf("postgres://localhost:%d", config.Port)
+func init() { fmt.Println("db: init() #1, DSN =", DSN) }
+func init() { fmt.Println("db: init() #2 (a file may have many)") }
+
+// ---- main.go (imports cache, db) ----
+var greeting = say("main: var greeting")
+func init() { fmt.Println("main: init()") }
+func main() {
+	fmt.Println("main: main() starts, DSN =", db.DSN)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-3" data-state="ready=[config]; waiting=[cache db main]"><code>config</code> imports nothing of ours, so it goes first. <code>Port</code> depends on <code>defaultPort</code>, so Go computes <code>defaultPort</code> first, even though it is declared second.</li>
+      <li data-lines="3" data-state="defaultPort=8079" data-out="config: var config.defaultPort = 8079">Dependency first.</li>
+      <li data-lines="2" data-state="defaultPort=8079; Port=8080" data-out="config: var config.Port = 8080">Now <code>Port</code> can be computed.</li>
+      <li data-lines="4" data-state="config=done" data-out="config: init()">All variables done, so <code>config</code>'s <code>init</code> runs. <code>config</code> is complete.</li>
+      <li data-lines="7" data-state="ready=[cache db]; picks &quot;cache&quot; (smaller path)" data-out="cache: init(), sees port 8080">Both <code>cache</code> and <code>db</code> are ready. Go picks the smaller import path, <code>.../cache</code>. It has no variables, just an <code>init</code>.</li>
+      <li data-lines="10" data-state="DSN=&quot;postgres://localhost:8080&quot;"><code>db</code>'s variable uses <code>config.Port</code>, which is already set.</li>
+      <li data-lines="11-12" data-state="db=done" data-out="db: init() #1, DSN = postgres://localhost:8080\ndb: init() #2 (a file may have many)">Both <code>init</code>s run, top to bottom.</li>
+      <li data-lines="15-16" data-state="main vars + init" data-out="main: var greeting\nmain: init()">Last, package <code>main</code>: its variables, then its <code>init</code>.</li>
+      <li data-lines="17-18" data-out="main: main() starts, DSN = postgres://localhost:8080">Only now does <code>main()</code> start.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go run ."><pre>config: var config.defaultPort = 8079
+config: var config.Port = 8080
+config: init()
+cache: init(), sees port 8080
+db: init() #1, DSN = postgres://localhost:8080
+db: init() #2 (a file may have many)
+main: var greeting
+main: init()
+main: main() starts, DSN = postgres://localhost:8080</pre></div>
+
+  <div class="live" data-title="Inside one package: two files, dependency order">
+    <pre><code class="language-go">// ---- a.go (package main, import "fmt") ----
+var total = add("total", price+tax)
+var price = add("price", 100)
+
+func init() { fmt.Println("a.go: init, total =", total) }
+
+func add(name string, v int) int {
+	fmt.Println("var", name, "=", v)
+	return v
+}
+
+func main() { fmt.Println("main: total =", total, "rate =", rate) }
+
+// ---- b.go (package main, import "fmt") ----
+var tax = add("tax", price*rate/100)
+var rate = add("rate", 18)
+
+func init() { fmt.Println("b.go: init #1") }
+func init() { rate = 0; fmt.Println("b.go: init #2 sets rate = 0") }</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-3,15-16" data-state="order=[total price tax rate]; done=[]">The go command passes files to the compiler sorted by name, so declaration order is <code>total</code>, <code>price</code> (a.go), then <code>tax</code>, <code>rate</code> (b.go). Go repeatedly picks the <strong>earliest</strong> variable whose dependencies are all ready.</li>
+      <li data-lines="2" data-state="total waits on: price, tax"><code>total</code> comes first but needs <code>price</code> and <code>tax</code>, which are not set yet. Skip it.</li>
+      <li data-lines="3,7-9" data-state="price=100; done=[price]" data-out="var price = 100"><code>price</code> depends on nothing, so it is initialized first, by calling <code>add</code>.</li>
+      <li data-lines="2,15" data-state="total waits on: tax; tax waits on: rate">Back to the top: <code>total</code> still needs <code>tax</code>, and <code>tax</code> needs <code>rate</code>. Both skipped.</li>
+      <li data-lines="16" data-state="price=100; rate=18" data-out="var rate = 18"><code>rate</code> is ready, so it goes next, even though it is the <strong>last</strong> declaration.</li>
+      <li data-lines="15" data-state="price=100; rate=18; tax=18" data-out="var tax = 18">Now <code>tax</code> can be computed: 100 × 18 / 100 = 18.</li>
+      <li data-lines="2" data-state="price=100; rate=18; tax=18; total=118" data-out="var total = 118">Finally <code>total</code> = 100 + 18. All package variables are done.</li>
+      <li data-lines="5" data-state="total=118" data-out="a.go: init, total = 118">Only then do the <code>init</code> functions run, in file order: a.go's first.</li>
+      <li data-lines="18-19" data-state="rate=0" data-out="b.go: init #1\nb.go: init #2 sets rate = 0">Then b.go's two <code>init</code>s, top to bottom. The second one changes <code>rate</code>, but <code>tax</code> and <code>total</code> were already computed, so they keep their values.</li>
+      <li data-lines="12" data-state="total=118; rate=0" data-out="main: total = 118 rate = 0"><code>main</code> runs last. Lesson: relying on <code>init</code> to tweak variables other variables depend on is fragile. Rename a file and the order changes.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go run ."><pre>var price = 100
+var rate = 18
+var tax = 18
+var total = 118
+a.go: init, total = 118
+b.go: init #1
+b.go: init #2 sets rate = 0
+main: total = 118 rate = 0</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha: keep init() boring</div><p><code>init</code> runs on every program start, including every test binary, before you can parse flags or set up logging. Never do network calls, read files that may be missing, or start goroutines in <code>init</code>. Registering a driver or building a lookup table is fine. Prefer explicit setup functions called from <code>main</code>: they are visible, testable and can return errors.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>go.mod and go.sum, line by line</h2>
+  <p>You create a module with <code>go mod init &lt;module path&gt;</code>. The module path is the import prefix of all its packages, and, if you publish it, the place people download it from (so it is usually a repository URL like <code>github.com/you/project</code>). For private experiments, any name works: <code>example.com/x</code>.</p>
+  <p>Here is our project's final <code>go.mod</code>:</p>
+  <div class="code" data-file="go.mod"><pre><code class="language-go">module github.com/sharad/bookstore
+
+go 1.27.1
+
+require (
+	example.com/greet/v2 v2.0.0
+	github.com/google/uuid v1.6.0
+)
+
+require (
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
+)
+
+replace example.com/greet/v2 =&gt; ../greet
+
+tool golang.org/x/tools/cmd/stringer</code></pre></div>
+
+  <div class="live" data-title="Reading go.mod like the go command does">
+    <pre><code class="language-go">module github.com/sharad/bookstore
+
+go 1.27.1
+
+require (
+	example.com/greet/v2 v2.0.0
+	github.com/google/uuid v1.6.0
+)
+
+require (
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
+)
+
+replace example.com/greet/v2 =&gt; ../greet
+
+tool golang.org/x/tools/cmd/stringer</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="module=github.com/sharad/bookstore"><code>module</code>: this module's path. Every package inside is imported as this path + its folder, e.g. <code>github.com/sharad/bookstore/internal/catalog</code>.</li>
+      <li data-lines="3" data-state="language=go1.27.1"><code>go</code>: the minimum Go version needed, and which language semantics apply (for example, per-iteration loop variables need 1.22+). Since Go 1.21 it is a hard minimum: an older toolchain refuses to build, or downloads a newer one if allowed (the <code>toolchain</code> line / <code>GOTOOLCHAIN</code> setting).</li>
+      <li data-lines="5-8" data-state="direct deps=2">The first <code>require</code> block lists <strong>direct</strong> dependencies: modules our own code imports. <code>go mod tidy</code> writes it.</li>
+      <li data-lines="7" data-state="import &quot;github.com/google/uuid&quot; → v1.6.0">When the compiler sees <code>import "github.com/google/uuid"</code> in <code>catalog.go</code>, it finds this line, picks <code>v1.6.0</code>, checks the hash in <code>go.sum</code>, and loads it from the module cache (<code>$GOPATH/pkg/mod</code>), downloading if needed.</li>
+      <li data-lines="10-14" data-state="indirect deps=3">The second block holds <strong>indirect</strong> deps: needed by something we use, but not imported by our code. Here they come from the stringer tool. <code>// indirect</code> marks them.</li>
+      <li data-lines="6,16" data-state="greet/v2 → ../greet (local folder)"><code>replace</code> says: whenever you need <code>example.com/greet/v2</code>, use the local folder <code>../greet</code> instead of downloading it. Great for local development and forks.</li>
+      <li data-lines="18" data-state="go tool stringer → x/tools v0.52.0"><code>tool</code> (Go 1.24+): records a developer tool used by the project. <code>go tool stringer</code> now runs the exact version pinned here.</li>
+    </ol>
+  </div>
+
+  <h3>go.sum: the lock box</h3>
+  <div class="code" data-file="go.sum"><pre><code class="language-go">github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+golang.org/x/mod v0.42.0 h1:ICeL3t2L30ljSPHHxDnR4fqVcBt/zR2zJAb9juavmQg=
+golang.org/x/mod v0.42.0/go.mod h1:u5fzIrRInkL8MaO1cbRkUHT64v303YIT5KEqpNr7jRs=
+golang.org/x/sync v0.24.0 h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA=
+golang.org/x/sync v0.24.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
+golang.org/x/tools v0.52.0 h1:ryxg4U63oaUYk7uOLTF37n43f4qgtGvqV4Ioit1BaEs=
+golang.org/x/tools v0.52.0/go.mod h1:ItcP5UNaVGG+Yc4eIYmaFLNJ4soEopkx5Y2d4lcEurs=</code></pre></div>
+  <p>Each dependency version has two lines:</p>
+  <ul>
+    <li><code>github.com/google/uuid v1.6.0 h1:NIva...</code> is a cryptographic hash (<code>h1:</code> = SHA-256 based) of the module's <strong>entire source tree</strong>.</li>
+    <li><code>github.com/google/uuid v1.6.0/go.mod h1:TIyP...</code> is the hash of just its <code>go.mod</code>. Go needs this one even for modules it never compiles, to work out the dependency graph. That is why <code>go-cmp</code> appears here but not in <code>go.mod</code>.</li>
+  </ul>
+  <p>Every time Go downloads a module, it checks the hash against <code>go.sum</code>. The first time it sees a version, it also checks the public <strong>checksum database</strong> (<code>sum.golang.org</code>), a tamper-proof log that guarantees everybody in the world gets the same bytes for <code>uuid v1.6.0</code>. If someone changes a published tag, the build fails loudly instead of silently running different code. Always commit <code>go.sum</code> next to <code>go.mod</code>. It is <em>not</em> a lock file in the npm sense (versions are already exact in <code>go.mod</code>); it is a list of trusted hashes.</p>
+
+  <h3>How Go chooses versions: Minimal Version Selection</h3>
+  <p>Suppose your module needs <code>uuid v1.4.0</code> and a library you use needs <code>uuid v1.6.0</code>. Go picks <strong>the highest of the minimums</strong>: <code>v1.6.0</code>. Not the newest version on the internet, just the lowest version that satisfies everyone's stated minimum. This is called <strong>Minimal Version Selection (MVS)</strong>. Because it never looks at "latest", the same <code>go.mod</code> gives the same build today and in five years, with no lock file and no solver.</p>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">Your <code>go.mod</code> requires <code>foo v1.2.0</code>. A dependency requires <code>foo v1.5.0</code>. <code>foo v1.9.0</code> was released yesterday. Which version builds?</div>
+    <div class="quiz-opts"><button>v1.2.0, your module wins</button><button>v1.9.0, the latest</button><button>v1.5.0, the highest minimum</button><button>Build error: conflicting versions</button></div>
+    <div class="quiz-explain">MVS takes the maximum of all required minimums, which is v1.5.0. It never upgrades to v1.9.0 on its own; you must ask with <code>go get foo@latest</code>. Within one major version there is never a conflict, because semver promises v1.5.0 is compatible with code written for v1.2.0.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Everyday module commands</h2>
+  <table><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+    <tr><td><code>go mod init path</code></td><td>Create <code>go.mod</code> in the current directory.</td></tr>
+    <tr><td><code>go get pkg@version</code></td><td>Add, upgrade or downgrade a dependency (<code>@v1.5.0</code>, <code>@latest</code>, <code>@none</code> to remove, <code>@commit-hash</code>).</td></tr>
+    <tr><td><code>go get -u ./...</code></td><td>Upgrade all direct and indirect deps to latest minor/patch. Review the diff!</td></tr>
+    <tr><td><code>go mod tidy</code></td><td>Make <code>go.mod</code>/<code>go.sum</code> match the imports in your code: add missing, remove unused. Run before every commit.</td></tr>
+    <tr><td><code>go list -m all</code></td><td>Show the full list of modules in the build, with chosen versions. <code>-u</code> also shows available upgrades.</td></tr>
+    <tr><td><code>go mod why pkg</code></td><td>Explain why a package is needed (the import chain).</td></tr>
+    <tr><td><code>go mod graph</code></td><td>Print every "A requires B" edge.</td></tr>
+    <tr><td><code>go mod verify</code></td><td>Check that the module cache was not modified since download.</td></tr>
+    <tr><td><code>go mod vendor</code></td><td>Copy all deps into <code>./vendor</code>.</td></tr>
+    <tr><td><code>go mod edit -replace=a=../a</code></td><td>Edit <code>go.mod</code> from scripts (replace, require, go version, ...).</td></tr>
+  </tbody></table>
+
+  <p>Here they are on a copy of the project. We downgrade <code>uuid</code>, upgrade it back, look for available updates (shown in brackets), and inspect the graph:</p>
+  <div class="output" data-label="terminal"><pre>$ go list -m -versions github.com/google/uuid
+github.com/google/uuid v1.0.0 v1.1.0 v1.1.1 v1.1.2 v1.1.3 v1.1.4 v1.1.5 v1.2.0 v1.3.0 v1.3.1 v1.4.0 v1.5.0 v1.6.0
+$ go get github.com/google/uuid@v1.5.0
+go: downloading github.com/google/uuid v1.5.0
+go: downgraded github.com/google/uuid v1.6.0 =&gt; v1.5.0
+$ grep uuid go.mod
+	github.com/google/uuid v1.5.0
+$ go get github.com/google/uuid@latest
+go: upgraded github.com/google/uuid v1.5.0 =&gt; v1.6.0
+$ go list -m -u all | grep -v "^golang.org/x/tele"
+github.com/sharad/bookstore
+example.com/greet/v2 v2.0.0 =&gt; ../greet
+github.com/google/go-cmp v0.6.0 [v0.7.0]
+github.com/google/uuid v1.6.0
+github.com/yuin/goldmark v1.4.13 [v1.8.6]
+golang.org/x/mod v0.42.0
+golang.org/x/net v0.61.0
+golang.org/x/sync v0.24.0
+golang.org/x/sys v0.49.0
+golang.org/x/tools v0.52.0
+$ go mod graph | head -5
+github.com/sharad/bookstore example.com/greet/v2@v2.0.0
+github.com/sharad/bookstore github.com/google/uuid@v1.6.0
+github.com/sharad/bookstore go@1.27.1
+github.com/sharad/bookstore golang.org/x/mod@v0.42.0
+github.com/sharad/bookstore golang.org/x/sync@v0.24.0
+$ go mod verify
+all modules verified</pre></div>
+  <div class="output" data-label="$ go list -m all"><pre>github.com/sharad/bookstore
+example.com/greet/v2 v2.0.0 =&gt; ../greet
+github.com/google/go-cmp v0.6.0
+github.com/google/uuid v1.6.0
+github.com/yuin/goldmark v1.4.13
+golang.org/x/mod v0.42.0
+golang.org/x/net v0.61.0
+golang.org/x/sync v0.24.0
+golang.org/x/sys v0.49.0
+golang.org/x/telemetry v0.0.0-20261009151841-97e8ea77aa2a
+golang.org/x/tools v0.52.0</pre></div>
+  <div class="output" data-label="$ go mod why github.com/google/uuid"><pre># github.com/google/uuid
+github.com/sharad/bookstore/internal/catalog
+github.com/google/uuid</pre></div>
+  <p>Wondering where <code>goldmark</code> and <code>x/net</code> came from? They are in the dependency graph of <code>golang.org/x/tools</code> (our stringer tool), so they are listed, even though they are never compiled into our binary. <code>go version -m</code> on the binary proves it:</p>
+  <div class="output" data-label="$ go version -m ./bookstore"><pre>/tmp/bookstore: go1.27.1
+	path	github.com/sharad/bookstore/cmd/bookstore
+	mod	github.com/sharad/bookstore	(devel)	
+	dep	github.com/google/uuid	v1.6.0	h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	CGO_ENABLED=1
+	build	CGO_CFLAGS=
+	build	CGO_CPPFLAGS=
+	build	CGO_CXXFLAGS=
+	build	CGO_LDFLAGS=
+	build	GOARCH=arm64
+	build	GOOS=darwin
+	build	GOARM64=v8.0</pre></div>
+
+  <h3>replace directives</h3>
+  <p><code>replace old => new</code> swaps a module for another version, a fork, or a local directory. Our project uses one to point at the local <code>greet</code> module. Two rules to remember:</p>
+  <ul>
+    <li><code>replace</code> only applies in the <strong>main module</strong> (the one you are building). If you publish a library with a <code>replace</code>, your users ignore it.</li>
+    <li>Local-path replaces are handy, but committing <code>replace ../something</code> breaks the build for everyone who does not have that folder. For local multi-module work, prefer <code>go.work</code> (below).</li>
+  </ul>
+
+  <h3>Vendoring</h3>
+  <p><code>go mod vendor</code> copies every dependency's source into a <code>vendor/</code> folder, along with <code>vendor/modules.txt</code>. When <code>vendor/</code> exists and the <code>go</code> version is 1.14+, builds use it automatically, with no network needed.</p>
+  <div class="output" data-label="$ go mod vendor &amp;&amp; head -12 vendor/modules.txt"><pre># example.com/greet/v2 v2.0.0 =&gt; ../greet
+## explicit; go 1.27.1
+example.com/greet/v2
+# github.com/google/uuid v1.6.0
+## explicit
+github.com/google/uuid
+# golang.org/x/mod v0.42.0
+## explicit; go 1.26.0
+golang.org/x/mod/semver
+# golang.org/x/sync v0.24.0
+## explicit; go 1.26.0
+golang.org/x/sync/errgroup</pre></div>
+  <p>Today most teams do <strong>not</strong> vendor: the module proxy and checksum database already give reproducible, tamper-proof downloads. Vendor when you need hermetic builds with no network (some corporate CI), or want dependency source changes to show up in code review.</p>
+
+  <h3>GOPROXY, GOSUMDB and GOPRIVATE</h3>
+  <div class="output" data-label="$ go env GOPROXY GOPRIVATE GONOSUMDB GOSUMDB GOFLAGS"><pre>https://proxy.golang.org,direct
+
+
+sum.golang.org</pre></div>
+  <figure class="diagram"><svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect width="760" height="250" fill="#262624"/>
+    <rect x="20" y="90" width="150" height="70" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+    <text x="95" y="120" fill="#ece9e1" font-size="14" text-anchor="middle" font-family="JetBrains Mono, monospace">go build</text>
+    <text x="95" y="142" fill="#a8a49a" font-size="11" text-anchor="middle">needs uuid v1.6.0</text>
+    <rect x="220" y="20" width="180" height="62" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="2"/>
+    <text x="310" y="46" fill="#8fbf7f" font-size="13" text-anchor="middle">1. module cache</text>
+    <text x="310" y="66" fill="#a8a49a" font-size="11" text-anchor="middle">$GOPATH/pkg/mod (hit? done)</text>
+    <rect x="220" y="100" width="180" height="62" rx="8" fill="#2e2d2a" stroke="#7fa6d9" stroke-width="2"/>
+    <text x="310" y="126" fill="#7fa6d9" font-size="13" text-anchor="middle">2. GOPROXY</text>
+    <text x="310" y="146" fill="#a8a49a" font-size="11" text-anchor="middle">proxy.golang.org (zip + go.mod)</text>
+    <rect x="220" y="180" width="180" height="56" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="310" y="204" fill="#ece9e1" font-size="13" text-anchor="middle">3. direct (git)</text>
+    <text x="310" y="222" fill="#a8a49a" font-size="11" text-anchor="middle">if proxy says "not found"</text>
+    <rect x="450" y="100" width="150" height="62" rx="8" fill="#2e2d2a" stroke="#e0b45c" stroke-width="2"/>
+    <text x="525" y="126" fill="#e0b45c" font-size="13" text-anchor="middle">GOSUMDB</text>
+    <text x="525" y="146" fill="#a8a49a" font-size="11" text-anchor="middle">sum.golang.org</text>
+    <rect x="630" y="100" width="115" height="62" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="687" y="126" fill="#ece9e1" font-size="13" text-anchor="middle">go.sum</text>
+    <text x="687" y="146" fill="#a8a49a" font-size="11" text-anchor="middle">hash recorded</text>
+    <line x1="170" y1="110" x2="218" y2="55" stroke="#a8a49a" stroke-width="1.5"/>
+    <line x1="170" y1="125" x2="218" y2="130" stroke="#a8a49a" stroke-width="1.5"/>
+    <line x1="170" y1="140" x2="218" y2="205" stroke="#a8a49a" stroke-width="1.5"/>
+    <line x1="400" y1="131" x2="448" y2="131" stroke="#e0b45c" stroke-width="1.5" stroke-dasharray="5 3"/>
+    <line x1="600" y1="131" x2="628" y2="131" stroke="#e0b45c" stroke-width="1.5" stroke-dasharray="5 3"/>
+    <text x="424" y="122" fill="#a8a49a" font-size="10" text-anchor="middle">verify</text>
+    <text x="560" y="190" fill="#a8a49a" font-size="11" text-anchor="middle">GOPRIVATE modules skip</text>
+    <text x="560" y="206" fill="#a8a49a" font-size="11" text-anchor="middle">the proxy AND the sumdb</text>
+  </svg><figcaption>Where a dependency comes from. The default <code>GOPROXY=https://proxy.golang.org,direct</code> means "try the public proxy, fall back to git".</figcaption></figure>
+  <ul>
+    <li><code>GOPROXY</code>: a comma-separated list of module mirrors. The public proxy caches every public module forever, so a deleted GitHub repo does not break your build.</li>
+    <li><code>GOSUMDB</code>: the checksum database used to verify first-time downloads.</li>
+    <li><code>GOPRIVATE</code>: glob patterns of <strong>private</strong> modules, e.g. <code>go env -w GOPRIVATE='github.com/yourcompany/*'</code>. Matching modules are fetched directly from git (not the public proxy, which cannot see them anyway) and are not sent to the public checksum database (which would leak their names). Authentication then uses your normal git credentials (SSH keys, <code>.netrc</code>, or <code>GOAUTH</code> since Go 1.24).</li>
+  </ul>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>In a company, set <code>GOPRIVATE</code> once in your shell profile or dev container, and in CI. Many large teams also run their own proxy (Athens, JFrog Artifactory, or a cloud provider's) and set <code>GOPROXY=https://goproxy.corp,https://proxy.golang.org,direct</code>. Then builds survive GitHub outages and you get an audit log of every dependency your org uses.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Semantic import versioning (v2 and beyond)</h2>
+  <p>Go modules use <strong>semantic versioning</strong>: <code>vMAJOR.MINOR.PATCH</code>. Bump PATCH for bug fixes, MINOR for new backwards-compatible features, MAJOR for breaking changes. <code>v0.x.y</code> means "unstable, anything may change".</p>
+  <p>Go adds one rule that surprises newcomers: <strong>if the major version is 2 or more, it must be part of the module path</strong>. Version 2 of <code>example.com/greet</code> is the module <code>example.com/greet/v2</code>:</p>
+  <div class="code" data-file="greet/go.mod"><pre><code class="language-go">module example.com/greet/v2
+
+go 1.27.1</code></pre></div>
+  <div class="code" data-file="greet/greet.go"><pre><code class="language-go">// Package greet is published as major version 2.
+// Its module path ends in /v2, but the package name is greet.
+package greet
+
+// Style was added in v2: Hello's signature changed, which is a
+// breaking change, so the major version had to go up.
+type Style int
+
+const (
+	Casual Style = iota
+	Formal
+)
+
+func Hello(name string, s Style) string {
+	if s == Formal {
+		return "Good day, " + name + "."
+	}
+	return "hey " + name
+}</code></pre></div>
+  <div class="code" data-file="cmd/report/main.go"><pre><code class="language-go">// Command report prints a greeting using a v2 module.
+package main
+
+import (
+	"fmt"
+
+	"example.com/greet/v2" // package name is still "greet"
+)
+
+func main() {
+	fmt.Println(greet.Hello("Sharad", greet.Formal))
+}</code></pre></div>
+  <div class="live" data-title="From import path to v2 code">
+    <pre><code class="language-go">// ---- greet/go.mod ----
+module example.com/greet/v2
+
+// ---- greet/greet.go ----
+package greet
+
+type Style int
+
+const (
+	Casual Style = iota
+	Formal
+)
+
+func Hello(name string, s Style) string {
+	if s == Formal {
+		return "Good day, " + name + "."
+	}
+	return "hey " + name
+}
+
+// ---- cmd/report/main.go (bookstore requires example.com/greet/v2 v2.0.0) ----
+package main
+
+import (
+	"fmt"
+
+	"example.com/greet/v2" // package name is still "greet"
+)
+
+func main() {
+	fmt.Println(greet.Hello("Sharad", greet.Formal))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="27" data-state="import path=example.com/greet/v2">The compiler meets the import path <code>example.com/greet/v2</code>. The <code>/v2</code> is part of the path, so this is a <strong>different module</strong> from plain <code>example.com/greet</code>.</li>
+      <li data-lines="2,27" data-state="module=example.com/greet/v2; version=v2.0.0 (replaced by ../greet)">The go command finds the module whose path matches, using bookstore's <code>go.mod</code>: <code>require ... v2.0.0</code>, and here a <code>replace</code> pointing at the local <code>../greet</code> folder.</li>
+      <li data-lines="5,27" data-state="package name=greet">The folder ends in <code>v2</code>, but its files say <code>package greet</code>. The <strong>package clause</strong> decides the name you type, so the code uses <code>greet.</code>, not <code>v2.</code>.</li>
+      <li data-lines="7-12" data-state="Casual=0; Formal=1">Package-level declarations are set up before <code>main</code>: <code>iota</code> gives <code>Casual=0</code>, <code>Formal=1</code>.</li>
+      <li data-lines="30-31,14" data-state="name=&quot;Sharad&quot;; s=Formal(1)"><code>main</code> calls <code>greet.Hello</code> with the v2-only <code>Style</code> argument. This two-argument signature is the breaking change that forced the major version bump.</li>
+      <li data-lines="15-16" data-state="s==Formal → true; return=&quot;Good day, Sharad.&quot;"><code>s</code> is <code>Formal</code>, so we take the formal branch.</li>
+      <li data-lines="31" data-out="Good day, Sharad.">Back in <code>main</code>, the result is printed.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go run ./cmd/report"><pre>Good day, Sharad.</pre></div>
+  <p>Why? The <strong>import compatibility rule</strong>: if two import paths are the same, the code must be compatible. A breaking change gets a new path, so <code>greet</code> (v1) and <code>greet/v2</code> are treated as <em>different modules</em>. One program can even use both at once, which lets a big codebase migrate gradually. MVS never has to choose between incompatible versions.</p>
+  <ul>
+    <li>Two ways to lay out v2 in a repo: change the <code>module</code> line on a branch (most common), or create a <code>v2/</code> subdirectory with its own <code>go.mod</code>.</li>
+    <li>Old repos tagged <code>v2.0.0</code> without the <code>/v2</code> path show up as <code>v2.0.0+incompatible</code>: Go can use them, but without the module guarantees.</li>
+    <li>Users upgrade by changing import paths, e.g. with <code>gofmt -r</code> or a find-and-replace, then <code>go mod tidy</code>.</li>
+  </ul>
+  <div class="callout tip"><p>Breaking changes are expensive for your users. Before reaching for v2, consider adding a new function (<code>HelloStyle</code>) alongside the old one, and deprecating the old one with a <code>// Deprecated:</code> comment. Many popular modules stay on v1 for a decade this way.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Project layout: internal/, cmd/, and not over-structuring</h2>
+  <h3>internal/ is enforced by the compiler</h3>
+  <p>A package whose path contains an <code>internal</code> element can be imported <strong>only by code rooted at the parent of that <code>internal</code> directory</strong>. So <code>github.com/sharad/bookstore/internal/money</code> can be imported by anything under <code>github.com/sharad/bookstore/</code>, and by nothing else. Here is another module trying:</p>
+  <div class="live" data-title="The internal/ check, step by step">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"github.com/sharad/bookstore/internal/money"
+)
+
+func main() {
+	fmt.Println(money.FromRupees(10))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="module=github.com/sharad/outsider">This file belongs to a <strong>different module</strong>, <code>github.com/sharad/outsider</code>. (The workspace lets it see the bookstore module's packages at all.)</li>
+      <li data-lines="4" data-state="&quot;fmt&quot; → std lib, OK"><code>fmt</code> is standard library: always importable.</li>
+      <li data-lines="6" data-state="path=github.com/sharad/bookstore/internal/money">The go command sees an <code>internal</code> element in the path. Everything before it, <code>github.com/sharad/bookstore</code>, is the only tree allowed to import it.</li>
+      <li data-lines="6" data-state="importer=github.com/sharad/outsider; allowed=github.com/sharad/bookstore/...; result=denied">Our importer path does not start with <code>github.com/sharad/bookstore/</code>, so the rule fails. Note this is checked by the go command <strong>before</strong> compiling, not by a naming convention.</li>
+      <li data-lines="6,10" data-out="package github.com/sharad/outsider\n&#9;main.go:6:2: use of internal package github.com/sharad/bookstore/internal/money not allowed">The build stops with an error pointing at line 6, column 2. Line 10 never gets compiled. To share <code>money</code>, you would have to move it out of <code>internal/</code> on purpose.</li>
+    </ol>
+  </div>
+  <div class="output error" data-label="$ go run ."><pre>package github.com/sharad/outsider
+	main.go:6:2: use of internal package github.com/sharad/bookstore/internal/money not allowed</pre></div>
+  <p>This is the most useful tool you have for keeping your public API small. Put everything in <code>internal/</code> by default, and move a package out only when you deliberately want outsiders to use it.</p>
+
+  <h3>cmd/ for executables</h3>
+  <p>When a module produces more than one program, put each in <code>cmd/&lt;name&gt;/main.go</code>. <code>go build ./cmd/bookstore</code> then produces a binary called <code>bookstore</code>, and <code>go install github.com/sharad/bookstore/cmd/bookstore@latest</code> works for users. Keep <code>main</code> thin: parse flags and config, wire dependencies together, call into packages. Logic in <code>main</code> cannot be imported or easily tested.</p>
+  <div class="live" data-title="One run of the bookstore, package by package">
+    <pre><code class="language-go">// Command bookstore is the shop's main program.
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"text/template"
+
+	"github.com/sharad/bookstore/assets"
+	"github.com/sharad/bookstore/internal/catalog"
+	m "github.com/sharad/bookstore/internal/money" // import alias
+	"github.com/sharad/bookstore/internal/platform"
+)
+
+func main() {
+	fmt.Print(assets.Banner)
+	fmt.Printf("running on %s (debug=%v)\n\n", platform.Name(), platform.Debug)
+
+	shop := catalog.New()
+	id := shop.Add("The Go Programming Language", m.FromRupees(899), 3)
+	shop.Add("Concurrency in Go", m.WithTax(m.FromRupees(650), 18), 0)
+
+	fmt.Println("genre:", catalog.Programming) // String() from go generate
+
+	ok, _ := shop.InStock(id)
+	fmt.Println("first book in stock:", ok)
+
+	if _, err := shop.InStock("missing"); errors.Is(err, catalog.ErrNotFound) {
+		fmt.Println("lookup error:", err)
+	}
+
+	t := template.Must(template.ParseFS(assets.Templates, "templates/receipt.tmpl"))
+	if err := t.Execute(os.Stdout, shop.All()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-13" data-state="imports=assets catalog m platform">Before <code>main</code>, Go initializes every imported package, dependencies first: <code>money</code>, then <code>catalog</code> (which needs it), <code>assets</code> and <code>platform</code>. The alias <code>m</code> is only a local nickname for <code>money</code>.</li>
+      <li data-lines="17" data-state="assets.Banner=string embedded at build time" data-out=" ____              _        _\n| __ )  ___   ___ | | _____| |_ ___  _ __ ___\n|  _ \ / _ \ / _ \| |/ / __| __/ _ \| &#x27;__/ _ \\n| |_) | (_) | (_) |   &lt;\__ \ || (_) | | |  __/\n|____/ \___/ \___/|_|\_\___/\__\___/|_|  \___|"><code>assets.Banner</code> is a plain <code>string</code> filled by <code>//go:embed banner.txt</code>. The bytes were copied into the binary by the compiler, so no file is read at run time.</li>
+      <li data-lines="18" data-state="platform.Name()=&quot;macOS&quot;; platform.Debug=false" data-out="running on macOS (debug=false)\n">Which <code>Name</code> runs was decided at <strong>build</strong> time: on a Mac only <code>platform_darwin.go</code> and <code>debug_off.go</code> were compiled.</li>
+      <li data-lines="20-21" data-state="shop=*catalog.Catalog; id=8-char uuid; book1=₹899.00 x3"><code>catalog.New()</code> is the constructor. <code>Add</code> generates an ID with the third-party <code>uuid</code> package and stores the stock in the unexported <code>stock</code> field.</li>
+      <li data-lines="22" data-state="book2=WithTax(65000, 18)=76700 → ₹767.00 x0"><code>m.WithTax</code> adds 18% GST to 65000 paise (= 76700) and calls the unexported <code>round</code> helper. We can call <code>WithTax</code> but not <code>round</code> from here.</li>
+      <li data-lines="24" data-state="catalog.Programming=1" data-out="genre: Programming"><code>Genre</code> has a <code>String()</code> method written by <code>go generate</code> + stringer, so <code>Println</code> prints the name, not the number 1.</li>
+      <li data-lines="26-27" data-state="ok=true" data-out="first book in stock: true">The first book has stock 3. We can't read <code>stock</code> ourselves, but <code>InStock</code> can, because it lives inside <code>catalog</code>.</li>
+      <li data-lines="29-30" data-state="err=catalog: &quot;missing&quot;: book not found; errors.Is=true" data-out="lookup error: catalog: &quot;missing&quot;: book not found">An unknown ID returns an error wrapping the exported sentinel <code>catalog.ErrNotFound</code>, so <code>errors.Is</code> matches it.</li>
+      <li data-lines="33" data-state="t=template from embed.FS"><code>template.ParseFS</code> reads <code>receipt.tmpl</code> out of the embedded <code>embed.FS</code>, which behaves like a read-only folder baked into the binary.</li>
+      <li data-lines="34" data-state="books=shop.All() (a copy)" data-out="Receipt\n- The Go Programming Language ... ₹899.00\n- Concurrency in Go ... ₹767.00">The template ranges over a <strong>copy</strong> of the books and prints each title and price. <code>Price</code> is a <code>money.Cents</code>, so its <code>String()</code> method formats rupees.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go run ./cmd/bookstore"><pre> ____              _        _
+| __ )  ___   ___ | | _____| |_ ___  _ __ ___
+|  _ \ / _ \ / _ \| |/ / __| __/ _ \| '__/ _ \
+| |_) | (_) | (_) |   &lt;\__ \ || (_) | | |  __/
+|____/ \___/ \___/|_|\_\___/\__\___/|_|  \___|
+running on macOS (debug=false)
+
+genre: Programming
+first book in stock: true
+lookup error: catalog: "missing": book not found
+Receipt
+- The Go Programming Language ... ₹899.00
+- Concurrency in Go ... ₹767.00</pre></div>
+
+  <h3>Don't over-structure</h3>
+  <table><thead><tr><th>Project size</th><th>Reasonable layout</th></tr></thead><tbody>
+    <tr><td>Tiny tool / script</td><td><code>go.mod</code> + <code>main.go</code>. Done. Add files in the same folder as it grows.</td></tr>
+    <tr><td>Library</td><td>Package at the repo root (<code>go.mod</code>, <code>greet.go</code>, <code>greet_test.go</code>); helpers in <code>internal/</code>.</td></tr>
+    <tr><td>Service / multiple binaries</td><td><code>cmd/</code> for binaries, <code>internal/</code> for everything else, organized by <strong>domain</strong> (<code>catalog</code>, <code>orders</code>, <code>billing</code>), not by layer.</td></tr>
+  </tbody></table>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid: Java-style layers from day one"><pre><code class="language-bash">pkg/
+  models/       # every struct in the app
+  controllers/
+  services/
+  repositories/
+  utils/
+  helpers/
+  interfaces/</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer: grow by domain, when needed"><pre><code class="language-bash">cmd/
+  shop/main.go
+internal/
+  catalog/      # books: types + store + logic
+  orders/       # orders: types + store + logic
+  money/        # shared small value type
+  platform/     # OS-specific bits</code></pre></div></div>
+  </div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>The famous "golang-standards/project-layout" repo is <strong>not</strong> an official standard, and the Go team has said so. The official guidance (go.dev/doc/modules/layout) is: start flat, add <code>internal/</code> and <code>cmd/</code> when you need them. A <code>pkg/</code> directory adds an extra word to every import and means nothing to the compiler. Layering by technical role (models/services/controllers) creates import cycles and packages that change together but live apart.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Workspaces with go.work</h2>
+  <p>Sometimes you work on two modules at once: say, a service and a library it uses, in sibling folders. Editing <code>replace</code> lines in <code>go.mod</code> and remembering to remove them is error prone. A <strong>workspace</strong> (Go 1.18+) solves it: a <code>go.work</code> file in a parent folder lists modules that should be built together from local source.</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go work init ./bookstore ./outsider
+$ go work use ./greet</code></pre></div>
+  <div class="code" data-file="go.work"><pre><code class="language-go">go 1.27.1
+
+use (
+	./bookstore
+	./greet
+	./outsider
+)</code></pre></div>
+  <p>Our <code>outsider</code> module imports <code>example.com/greet/v2</code>, yet its <code>go.mod</code> has no <code>require</code> line for it:</p>
+  <div class="code" data-file="outsider/main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"example.com/greet/v2"
+)
+
+func main() {
+	fmt.Println(greet.Hello("workspace", greet.Casual))
+}</code></pre></div>
+  <div class="code" data-file="outsider/go.mod"><pre><code class="language-go">module github.com/sharad/outsider
+
+go 1.27.1</code></pre></div>
+  <div class="output" data-label="$ go run .   (inside the workspace)"><pre>hey workspace</pre></div>
+  <div class="output error" data-label="$ GOWORK=off go run ."><pre>main.go:6:2: no required module provides package example.com/greet/v2; to add it:
+	go get example.com/greet/v2</pre></div>
+  <div class="live" data-title="How a workspace resolves an import">
+    <pre><code class="language-go">// ---- go.work (parent folder) ----
+go 1.27.1
+
+use (
+	./bookstore
+	./greet
+	./outsider
+)
+
+// ---- outsider/go.mod ----
+module github.com/sharad/outsider
+
+go 1.27.1
+
+// ---- outsider/main.go ----
+package main
+
+import (
+	"fmt"
+
+	"example.com/greet/v2"
+)
+
+func main() {
+	fmt.Println(greet.Hello("workspace", greet.Casual))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-8" data-state="GOWORK=../go.work; main modules=[bookstore greet outsider]">We run <code>go run .</code> inside <code>outsider/</code>. The go command walks up the folders, finds <code>go.work</code>, and treats all three listed modules as <strong>main modules</strong>, built from local source.</li>
+      <li data-lines="11-13" data-state="outsider requires=(none)"><code>outsider</code>'s own <code>go.mod</code> has no <code>require</code> lines at all.</li>
+      <li data-lines="20" data-state="import=example.com/greet/v2; candidates=[./greet]">The import <code>example.com/greet/v2</code> is not standard library. The go command first checks the workspace modules: <code>./greet</code>'s module path is exactly <code>example.com/greet/v2</code>.</li>
+      <li data-lines="6,20" data-state="example.com/greet/v2 → ./greet (local, no version)">Match found, so the package is loaded straight from the <code>./greet</code> folder. No download, no <code>go.sum</code> entry, no version number.</li>
+      <li data-lines="23-24" data-state="name=&quot;workspace&quot;; s=Casual" data-out="hey workspace"><code>Hello</code> with <code>Casual</code> takes the casual branch and returns <code>"hey workspace"</code>.</li>
+      <li data-lines="1,20" data-state="GOWORK=off; main modules=[outsider]; result=error">With <code>GOWORK=off</code>, only <code>outsider/go.mod</code> counts. It requires nothing, so the import cannot be resolved and Go suggests <code>go get</code>. This is how CI sees your module, so test it this way before releasing.</li>
+    </ol>
+  </div>
+  <p>Inside the workspace, the import resolves to the local <code>./greet</code> folder. Switch the workspace off and the module is on its own, so Go asks you to add a real dependency. <code>go env GOWORK</code> tells you which <code>go.work</code> is active.</p>
+  <div class="callout warn"><div class="callout-title">Gotcha: usually do not commit go.work</div><p><code>go.work</code> describes <em>your</em> machine's folders. Committing it can make CI build against different code than each module's <code>go.mod</code> says. The common practice is to add it to <code>.gitignore</code>, unless the repo is a monorepo designed around it. Before releasing, always test with <code>GOWORK=off</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Developer tools and publishing releases</h2>
+  <h3>Tools via the tool directive (Go 1.24)</h3>
+  <p>Projects depend on developer tools too: code generators (<code>stringer</code>, <code>mockgen</code>, <code>sqlc</code>), linters, protobuf plugins. Before Go 1.24 people used a hacky <code>tools.go</code> file with blank imports. Now there is a proper way:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go get -tool golang.org/x/tools/cmd/stringer@latest   # adds a `tool` line to go.mod
+$ go tool stringer -type=Genre                          # runs the pinned version
+$ go tool                                               # lists available tools
+$ go get tool                                           # upgrade all tools</code></pre></div>
+  <p>Remember the enums you wrote earlier, with <code>Status</code> constants and <code>iota</code>? Writing <code>String()</code> methods by hand is tedious. In the bookstore, <code>genre.go</code> asks stringer to do it, using a <code>//go:generate</code> comment:</p>
+  <div class="code" data-file="internal/catalog/genre.go"><pre><code class="language-go">package catalog
+
+//go:generate go tool stringer -type=Genre
+
+// Genre is an enum. stringer writes its String method for us.
+type Genre int
+
+const (
+	Fiction Genre = iota
+	Programming
+	Poetry
+)</code></pre></div>
+  <p><code>go generate ./...</code> scans for <code>//go:generate</code> lines and runs them. It created <code>genre_string.go</code> (starting with a "DO NOT EDIT" header), which is why <code>main</code> printed <code>genre: Programming</code> instead of <code>genre: 1</code>. Everyone on the team, and CI, gets exactly <code>x/tools v0.52.0</code>, because it is pinned in <code>go.mod</code>.</p>
+  <div class="callout tip"><p><code>go generate</code> never runs automatically during <code>go build</code>. Commit the generated files, and add a CI step that runs <code>go generate ./... &amp;&amp; git diff --exit-code</code> to catch anyone who forgot to regenerate.</p></div>
+
+  <h3>Publishing a module and tagging releases</h3>
+  <p>There is no "upload" step in Go. A module is published by pushing it to a public repository whose URL matches the module path, and tagging a version:</p>
+  <div class="code" data-file="terminal"><pre><code class="language-bash">$ go mod tidy &amp;&amp; go test ./... &amp;&amp; go vet ./...
+$ git tag v1.3.0
+$ git push origin v1.3.0
+# optional: ask the proxy to fetch it now, so pkg.go.dev lists it
+$ GOPROXY=proxy.golang.org go list -m github.com/sharad/bookstore@v1.3.0</code></pre></div>
+  <ul>
+    <li>Tags must be full semver with a <code>v</code>: <code>v1.3.0</code>, <code>v1.3.0-rc.1</code>. Not <code>1.3</code>.</li>
+    <li>Untagged commits can still be used; Go gives them a <strong>pseudo-version</strong> like <code>v0.0.0-20261009151841-97e8ea77aa2a</code> (base version, UTC timestamp, commit hash). You saw one for <code>x/telemetry</code> in <code>go list -m all</code>.</li>
+    <li>Once the proxy has a version, it is cached <strong>forever</strong>. You cannot change or delete it. If you publish a bad release, add a <code>retract v1.3.0 // broken: panics on empty input</code> line to <code>go.mod</code> and publish a new version; <code>go get</code> will then skip the retracted one.</li>
+    <li>A module in a subdirectory of a repo is tagged with a prefix: <code>tools/v1.0.0</code> for the module in <code>tools/</code>.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2>Build tags, file suffixes and go:embed</h2>
+  <h3>Conditional compilation</h3>
+  <p>Go has no <code>#ifdef</code>. Instead, whole <strong>files</strong> are included or excluded from a build, two ways:</p>
+  <ul>
+    <li><strong>File name suffixes.</strong> <code>name_GOOS.go</code>, <code>name_GOARCH.go</code> or <code>name_GOOS_GOARCH.go</code> are only built for that platform: <code>platform_linux.go</code>, <code>asm_arm64.go</code>, <code>sys_windows_amd64.go</code>. And <code>name_test.go</code> files are only built by <code>go test</code>.</li>
+    <li><strong>Build constraints.</strong> A <code>//go:build expr</code> line at the top of a file (before <code>package</code>, followed by a blank line). The expression uses <code>&amp;&amp;</code>, <code>||</code>, <code>!</code> and parentheses over tags: OS and arch names, <code>go1.22</code>-style version tags, <code>cgo</code>, and custom tags you pass with <code>-tags</code>.</li>
+  </ul>
+
+  <div class="live" data-title="Which platform/ files get compiled?">
+    <pre><code class="language-go">// platform_darwin.go
+package platform
+func Name() string { return "macOS" }
+
+// platform_linux.go
+package platform
+func Name() string { return "Linux" }
+
+// platform_other.go
+//go:build !darwin &amp;&amp; !linux
+package platform
+func Name() string { return "some other OS" }
+
+// debug_on.go
+//go:build debug
+package platform
+const Debug = true
+
+// debug_off.go
+//go:build !debug
+package platform
+const Debug = false</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-3,19-22" data-state="GOOS=darwin; tags=(none)" data-out="[debug_off.go platform_darwin.go]">On a Mac with no tags: the <code>_darwin</code> suffix matches, <code>!darwin &amp;&amp; !linux</code> is false, <code>!debug</code> is true. Exactly one <code>Name</code> and one <code>Debug</code>, so it compiles.</li>
+      <li data-lines="5-7,19-22" data-state="GOOS=linux; tags=(none)" data-out="[debug_off.go platform_linux.go]">Cross-compile for Linux with <code>GOOS=linux</code>: now the <code>_linux</code> file is chosen and the darwin one is ignored.</li>
+      <li data-lines="9-12,19-22" data-state="GOOS=windows; tags=(none)" data-out="[debug_off.go platform_other.go]">Windows matches neither suffix, so the fallback's constraint <code>!darwin &amp;&amp; !linux</code> is true. Every OS has exactly one <code>Name</code>.</li>
+      <li data-lines="1-3,14-17" data-state="GOOS=darwin; tags=debug" data-out="[debug_on.go platform_darwin.go]"><code>-tags debug</code> flips the debug pair. Same code, different constant, decided at build time with zero runtime cost.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="terminal"><pre>$ go list -f '{{.GoFiles}}' ./internal/platform
+[debug_off.go platform_darwin.go]
+$ GOOS=linux go list -f '{{.GoFiles}}' ./internal/platform
+[debug_off.go platform_linux.go]
+$ GOOS=windows go list -f '{{.GoFiles}}' ./internal/platform
+[debug_off.go platform_other.go]
+$ go list -tags debug -f '{{.GoFiles}}' ./internal/platform
+[debug_on.go platform_darwin.go]
+$ GOOS=linux GOARCH=amd64 go build -o bookstore-linux ./cmd/bookstore &amp;&amp; file bookstore-linux | cut -c1-60 &amp;&amp; rm bookstore-linux
+bookstore-linux: ELF 64-bit LSB executable, x86-64, version </pre></div>
+  <div class="code" data-file="internal/platform/platform_other.go"><pre><code class="language-go">//go:build !darwin &amp;&amp; !linux
+
+package platform
+
+// Name is the fallback for every other OS.
+func Name() string { return "some other OS" }</code></pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>The <code>//go:build</code> line must be followed by a blank line, and there must be no space after <code>//</code>. Otherwise it is just a comment and the file is always included. You may see old <code>// +build</code> lines in legacy code; <code>gofmt</code> converts them. Also beware of accidental suffixes: a file named <code>handler_test.go</code> or <code>image_js.go</code> is silently excluded from normal builds.</p></div>
+
+  <h3>go:embed: files inside your binary</h3>
+  <p>The <code>//go:embed</code> directive (Go 1.16) copies files into the compiled binary at build time, so you can ship a single executable with its HTML templates, SQL migrations or static assets.</p>
+  <div class="code" data-file="assets/assets.go"><pre><code class="language-go">// Package assets bundles static files into the binary.
+package assets
+
+import "embed"
+
+// Banner is the whole file as a string.
+//
+//go:embed banner.txt
+var Banner string
+
+// Templates is a read-only file system with every .tmpl file.
+//
+//go:embed templates/*.tmpl
+var Templates embed.FS</code></pre></div>
+  <div class="code" data-file="assets/templates/receipt.tmpl"><pre><code class="language-go">Receipt
+{{range .}}- {{.Title}} ... {{.Price}}
+{{end}}</code></pre></div>
+  <ul>
+    <li>The variable can be a <code>string</code>, a <code>[]byte</code> (one file each), or an <code>embed.FS</code> (many files, a read-only file system that works with <code>template.ParseFS</code>, <code>http.FileServerFS</code>, <code>fs.WalkDir</code>).</li>
+    <li>You must import <code>"embed"</code> (use <code>_ "embed"</code> if you only embed into strings/bytes).</li>
+    <li>Paths are relative to the source file's folder, use <code>/</code>, and cannot contain <code>..</code>: you can only embed files at or below the package directory.</li>
+    <li>Files starting with <code>.</code> or <code>_</code> are skipped when embedding a directory, unless you write <code>//go:embed all:static</code>.</li>
+  </ul>
+
+  <div class="live" data-title="go:embed at build time, embed.FS at run time">
+    <pre><code class="language-go">package main
+
+import (
+	"embed"
+	"fmt"
+	"io/fs"
+	"strings"
+)
+
+//go:embed version.txt
+var version string
+
+//go:embed static
+var site embed.FS
+
+func main() {
+	fmt.Printf("version: %q\n", strings.TrimSpace(version))
+
+	fs.WalkDir(site, ".", func(path string, d fs.DirEntry, err error) error {
+		if !d.IsDir() {
+			fmt.Println("embedded:", path)
+		}
+		return nil
+	})
+
+	b, err := site.ReadFile("static/index.html")
+	fmt.Printf("index.html: %s (%d bytes) err=%v\n", strings.TrimSpace(string(b)), len(b), err)
+
+	_, err = site.ReadFile("static/.env")
+	fmt.Println("dotfile:", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-11" data-state="version=&quot;v1.4.2\n&quot; (from version.txt)">At <strong>build</strong> time the compiler reads <code>version.txt</code> (next to this file) and stores its bytes in the binary. The directive must sit directly above the <code>var</code>.</li>
+      <li data-lines="13-14" data-state="site=embed.FS{static/css/site.css, static/index.html}"><code>//go:embed static</code> embeds the whole folder as an <code>embed.FS</code>. Files starting with <code>.</code> or <code>_</code>, like <code>static/.env</code>, are <strong>skipped</strong> unless you write <code>all:static</code>.</li>
+      <li data-lines="4" data-state="import embed (needed for embed.FS)">Using <code>embed.FS</code> requires importing <code>"embed"</code>. With only a <code>string</code> var you would still need <code>_ "embed"</code>.</li>
+      <li data-lines="17" data-state="version=&quot;v1.4.2&quot;" data-out="version: &quot;v1.4.2&quot;">At run time no file is opened: the string is already in memory. We trim the trailing newline the file had.</li>
+      <li data-lines="19-21" data-state="path=static/css/site.css" data-out="embedded: static/css/site.css"><code>embed.FS</code> implements <code>fs.FS</code>, so standard helpers like <code>fs.WalkDir</code> work. Paths keep the <code>static/</code> prefix and always use <code>/</code>. Entries come back in lexical order, so <code>css/</code> comes first.</li>
+      <li data-lines="19-21" data-state="path=static/index.html" data-out="embedded: static/index.html">The second (and last) file. <code>.env</code> is not listed: it was never embedded.</li>
+      <li data-lines="26-27" data-state="b=12 bytes; err=nil" data-out="index.html: &lt;h1&gt;Hi&lt;/h1&gt; (12 bytes) err=&lt;nil&gt;"><code>ReadFile</code> returns the embedded bytes. Deploy the binary alone and this still works.</li>
+      <li data-lines="29-30" data-state="err=file does not exist" data-out="dotfile: open static/.env: file does not exist">The dotfile was excluded, so reading it fails with <code>fs.ErrNotExist</code>. Handy: secrets in dotfiles do not leak into the binary by accident.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="$ go run ."><pre>version: "v1.4.2"
+embedded: static/css/site.css
+embedded: static/index.html
+index.html: &lt;h1&gt;Hi&lt;/h1&gt; (12 bytes) err=&lt;nil&gt;
+dotfile: open static/.env: file does not exist</pre></div>
+  <div class="quiz" data-answer="3">
+    <div class="quiz-q">Which file is included in a normal <code>go build</code> on Linux/amd64?</div>
+    <div class="quiz-opts"><button><code>server_windows.go</code></button><button><code>server_test.go</code></button><button><code>server_arm64.go</code></button><button><code>server_unix.go</code> containing <code>//go:build unix</code></button></div>
+    <div class="quiz-explain"><code>_windows</code> and <code>_arm64</code> are platform suffixes that don't match, and <code>_test.go</code> files are only built by <code>go test</code>. <code>unix</code> is not a recognized suffix (so the file name doesn't restrict it), but it <em>is</em> a build tag (Go 1.19+) that is true on Linux, macOS, the BSDs and friends.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Practice</h2>
+  <details class="exercise">
+    <summary>Exercise 1: a "premium" build of the same program</summary>
+    <p>Create a module with a <code>feature</code> package that exposes <code>Name()</code> and a <code>Limit</code> constant. A normal build should be the free tier (limit 10). Building with <code>-tags premium</code> should produce the premium tier. <code>main</code> must not change between the two.</p>
+    <p>Hint: two files in <code>feature/</code> with opposite <code>//go:build</code> lines.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="feature/free.go"><pre><code class="language-go">//go:build !premium
+
+package feature
+
+// Limit is the free tier's daily export limit.
+const Limit = 10
+
+func Name() string { return "free" }</code></pre></div>
+    <div class="code" data-file="feature/premium.go"><pre><code class="language-go">//go:build premium
+
+package feature
+
+// Limit is unlimited (well, very large) in the premium build.
+const Limit = 1_000_000
+
+func Name() string { return "premium" }</code></pre></div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"example.com/x1/feature"
+)
+
+func main() {
+	fmt.Printf("%s build: %d exports/day\n", feature.Name(), feature.Limit)
+}</code></pre></div>
+    <div class="output" data-label="terminal"><pre>$ go run .
+free build: 10 exports/day
+$ go run -tags premium .
+premium build: 1000000 exports/day</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: design a small library package with a command</summary>
+    <p>Make module <code>example.com/x2</code> with a library package <code>temperature</code> (exported type <code>Celsius</code> with a <code>Fahrenheit()</code> method and <code>String()</code>, an exported <code>Parse(s string) (Celsius, error)</code>, and an <strong>unexported</strong> validation helper) plus a command in <code>cmd/conv</code> that converts each argument. Keep <code>main</code> thin.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="temperature/temperature.go"><pre><code class="language-go">// Package temperature converts between scales.
+package temperature
+
+import "fmt"
+
+// Celsius is exported; its methods are part of the API.
+type Celsius float64
+
+// Fahrenheit converts c to Fahrenheit.
+func (c Celsius) Fahrenheit() float64 { return float64(c)*9/5 + 32 }
+
+func (c Celsius) String() string { return fmt.Sprintf("%.1f°C", float64(c)) }
+
+// Parse reads values like "21.5C".
+func Parse(s string) (Celsius, error) {
+	var v float64
+	if _, err := fmt.Sscanf(s, "%fC", &amp;v); err != nil {
+		return 0, fmt.Errorf("temperature: parse %q: %w", s, err)
+	}
+	if !valid(v) {
+		return 0, fmt.Errorf("temperature: %v is below absolute zero", v)
+	}
+	return Celsius(v), nil
+}
+
+// valid is an unexported helper.
+func valid(v float64) bool { return v &gt;= -273.15 }</code></pre></div>
+    <div class="live" data-title="A thin main calling into its package">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"os"
+
+	"example.com/x2/temperature"
+)
+
+func main() {
+	for _, arg := range os.Args[1:] {
+		c, err := temperature.Parse(arg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			continue
+		}
+		fmt.Printf("%v = %.1f°F\n", c, c.Fahrenheit())
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="7,11" data-state="os.Args[1:]=[21.5C 100C -300C hot]; arg=&quot;21.5C&quot;" data-out="$ go run ./cmd/conv 21.5C 100C -300C hot">We run the command with four arguments. <code>main</code> only loops and prints; all the logic lives in the imported <code>temperature</code> package.</li>
+      <li data-lines="12" data-state="arg=&quot;21.5C&quot;; c=21.5; err=nil"><code>temperature.Parse</code> scans <code>21.5</code> with the pattern <code>%fC</code>, checks it with the unexported <code>valid</code> helper, and returns a <code>Celsius</code>.</li>
+      <li data-lines="17" data-state="c=21.5°C; c.Fahrenheit()=70.7" data-out="21.5°C = 70.7°F"><code>%v</code> calls <code>Celsius.String()</code>, and <code>Fahrenheit()</code> is an exported method, so <code>main</code> can call it.</li>
+      <li data-lines="11-12,17" data-state="arg=&quot;100C&quot;; c=100" data-out="100.0°C = 212.0°F">Second argument, same happy path.</li>
+      <li data-lines="12-15" data-state="arg=&quot;-300C&quot;; c=0; err=temperature: -300 is below absolute zero" data-out="error: temperature: -300 is below absolute zero"><code>-300</code> parses, but <code>valid</code> rejects it. The error goes to <strong>stderr</strong> and <code>continue</code> moves to the next argument.</li>
+      <li data-lines="12-15" data-state="arg=&quot;hot&quot;; err=temperature: parse &quot;hot&quot;: ..." data-out="error: temperature: parse &quot;hot&quot;: strconv.ParseFloat: parsing &quot;&quot;: invalid syntax"><code>Sscanf</code> cannot read a number from <code>hot</code>. <code>Parse</code> wraps that error with the package name and input, so the message says exactly where it came from.</li>
+    </ol>
+  </div>
+    <div class="output" data-label="terminal"><pre>$ go run ./cmd/conv 21.5C 100C -300C hot
+21.5°C = 70.7°F
+100.0°C = 212.0°F
+error: temperature: -300 is below absolute zero
+error: temperature: parse "hot": strconv.ParseFloat: parsing "": invalid syntax</pre></div>
+    <p>Notice that errors are prefixed with the package name (<code>temperature: ...</code>), a common convention for library errors, and that <code>main</code> only loops, calls and prints.</p>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: break a cycle</summary>
+    <p><code>orders</code> imports <code>users</code> to look up a customer, and <code>users</code> imports <code>orders</code> to list a user's orders. The build fails with "import cycle not allowed". Suggest two fixes.</p>
+    <div class="solution-label">Solution</div>
+    <p>(1) Have <code>users</code> declare the small interface it needs, e.g. <code>type OrderLister interface { OrdersFor(userID string) ([]Order, error) }</code>, with <code>Order</code> moved to a tiny shared package (or defined in <code>users</code> as just the fields it needs); <code>main</code> wires the real <code>orders</code> store in. (2) Move the feature that needs both ("user's order history") into a third, higher package (<code>account</code>) that imports both. Dependencies should point one way: from high-level policy to low-level details.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>One directory is one package; a module (<code>go.mod</code>) is a versioned tree of packages. Import path = module path + directory.</li>
+      <li>Capitalized names are exported, lowercase are package-private. Export as little as possible.</li>
+      <li>Short lowercase package names, no <code>util</code>/<code>common</code>, no stutter. Blank imports for side effects; avoid dot imports. No import cycles, ever.</li>
+      <li>Init order: dependencies first; inside a package, variables (in dependency order) then <code>init()</code>s; then <code>main()</code>. Keep <code>init</code> trivial.</li>
+      <li><code>go.mod</code> lists exact minimum versions; <code>go.sum</code> holds hashes. MVS picks the highest minimum, giving reproducible builds. Run <code>go mod tidy</code> and commit both files.</li>
+      <li>v2+ modules change their path (<code>/v2</code>). Use <code>internal/</code> to hide code, <code>cmd/</code> for binaries, and grow structure only when needed.</li>
+      <li><code>go.work</code> for local multi-module development (usually uncommitted); <code>tool</code> directive for pinned dev tools; <code>GOPRIVATE</code> for company code.</li>
+      <li>Build tags and <code>_os</code>/<code>_arch</code> suffixes select files at build time; <code>//go:embed</code> bundles files into the binary.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

@@ -1,0 +1,1409 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 04 · Functions &amp; Closures — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="04">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part I · Chapter 04</div>
+  <h1>Functions &amp; Closures</h1>
+  <p class="lead">Functions are the building blocks of every Go program. In this chapter you will learn how to write them, how Go passes data into them, and how functions can be stored, passed around and even "remember" things. That last trick is called a closure, and it powers a lot of idiomatic Go.</p>
+  <div class="meta">
+    <span class="pill">⏱ 40 min read</span>
+    <span class="pill">◆ Beginner → Intermediate</span>
+    <span class="pill">▶ 16 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>How to declare functions, and why Go always passes arguments <em>by value</em></li>
+      <li>Multiple return values, the <code>(value, error)</code> convention, and named results</li>
+      <li>Variadic functions and spreading a slice with <code>...</code></li>
+      <li>Functions as values and types, anonymous functions, and closures</li>
+      <li>How Go 1.22 fixed the classic "closure in a loop" bug</li>
+      <li>Higher-order functions (<code>Map</code>, <code>Filter</code>, <code>Reduce</code>) and recursion</li>
+      <li>A first look at <code>defer</code>/<code>panic</code>/<code>recover</code>, functional options, method values and <code>init</code></li>
+      <li>How senior engineers design function signatures and keep functions small</li>
+    </ul>
+  </div>
+
+  <h2>Why functions exist</h2>
+  <p>Imagine writing a recipe book where every recipe that needs a white sauce re-explains how to make white sauce, step by step. It works, but the book is huge, and if you find a better sauce method you have to fix it in fifty places. A <strong>function</strong> is the "see page 12: white sauce" of programming. You write a piece of logic once, give it a name, and call it wherever you need it.</p>
+  <p>Functions give you three big wins:</p>
+  <ul>
+    <li><strong>Reuse</strong>: write once, call many times.</li>
+    <li><strong>Naming</strong>: <code>calculateTax(order)</code> tells the reader <em>what</em> happens without making them read <em>how</em>.</li>
+    <li><strong>Isolation</strong>: a function has its own variables. What happens inside does not leak out unless you return it.</li>
+  </ul>
+
+  <h3>Declaring a function</h3>
+  <p>A function declaration has four parts: the keyword <code>func</code>, a name, a list of <strong>parameters</strong> (the inputs, each with a type), and an optional <strong>result type</strong> (the output). The body sits between braces.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// add takes two ints and returns their sum.
+func add(a int, b int) int {
+	return a + b
+}
+
+// When neighbouring parameters share a type, list the type once.
+func volume(length, width, height float64) float64 {
+	return length * width * height
+}
+
+// A function with no parameters and no result.
+func sayHello() {
+	fmt.Println("hello from sayHello")
+}
+
+func greet(name string) string {
+	return "Hi, " + name + "!"
+}
+
+func main() {
+	sayHello()
+	fmt.Println(add(2, 3))
+	fmt.Println(volume(2, 3, 4))
+	fmt.Println(greet("Gopher"))
+}</code></pre></div>
+  <div class="output"><pre>hello from sayHello
+5
+24
+Hi, Gopher!</pre></div>
+  <p>Notice a few Go-specific details:</p>
+  <ul>
+    <li>The type comes <em>after</em> the name: <code>a int</code>, not <code>int a</code>. This reads naturally left to right: "a is an int".</li>
+    <li>When neighbouring parameters share a type you can write the type once: <code>length, width, height float64</code>.</li>
+    <li>There is no function overloading. You cannot have two functions called <code>add</code> with different parameters in the same package. Pick distinct names instead, like <code>addInts</code> and <code>addFloats</code> (or use generics, Chapter 9).</li>
+    <li>There are no default parameter values. If you want optional settings, see the <em>functional options</em> pattern later in this chapter.</li>
+    <li>Function names starting with an <strong>uppercase</strong> letter (<code>Add</code>) are <strong>exported</strong>: other packages can call them. Lowercase names (<code>add</code>) are private to the package. That is the whole visibility system.</li>
+  </ul>
+
+  <div class="callout info"><div class="callout-title">Vocabulary</div><p><strong>Parameter</strong>: the variable name in the function declaration (<code>a</code> in <code>func add(a int)</code>). <strong>Argument</strong>: the actual value you pass when calling (<code>2</code> in <code>add(2, 3)</code>). <strong>Signature</strong>: the parameter types plus the result types, e.g. <code>func(int, int) int</code>.</p></div>
+
+  <p>If a function promises a result, every path through it must end in a <code>return</code>. The compiler checks this for you:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+func sign(n int) string {
+	if n &gt; 0 {
+		return "positive"
+	} else if n &lt; 0 {
+		return "negative"
+	}
+}
+
+func main() {
+	_ = sign(1)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre>./main.go:9:1: missing return</pre></div>
+  <p>The compiler cannot prove one of the branches runs, so it complains. The fix is to make the final case a plain <code>return "zero"</code> after the <code>if</code>s.</p>
+
+  <h2>Parameters are always passed by value</h2>
+  <p>This is the single most important rule about Go functions: <strong>every argument is copied</strong> into the function's parameter. Go calls this <em>pass by value</em>. The function gets its own private copy, so changing the parameter does not change the caller's variable.</p>
+  <p>But "copy" means "copy the value you passed", and for some types that value is small and points somewhere else. Let's see all the cases side by side:</p>
+  <div class="live" data-title="Pass by value: copies, headers and pointers">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func double(n int) {
+	n = n * 2 // changes the local copy only
+	fmt.Println("inside double:", n)
+}
+
+func resetArray(a [3]int) {
+	a[0] = 0 // arrays are copied too
+}
+
+func resetSlice(s []int) {
+	s[0] = 0 // the slice header is copied, but it points at the SAME backing array
+}
+
+func doublePtr(n *int) {
+	*n = *n * 2 // write through the pointer
+}
+
+func main() {
+	x := 10
+	double(x)
+	fmt.Println("after double:", x)
+
+	arr := [3]int{1, 2, 3}
+	resetArray(arr)
+	fmt.Println("array after resetArray:", arr)
+
+	sl := []int{1, 2, 3}
+	resetSlice(sl)
+	fmt.Println("slice after resetSlice:", sl)
+
+	doublePtr(&amp;x)
+	fmt.Println("after doublePtr:", x)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="23" data-state="x=10">Execution starts in <code>main</code>. <code>x</code> is 10.</li>
+      <li data-lines="24,5-6" data-state="x=10; n=20">Calling <code>double(x)</code> copies 10 into a brand-new variable <code>n</code>. Doubling <code>n</code> touches only that copy.</li>
+      <li data-lines="7" data-state="x=10; n=20" data-out="inside double: 20">Inside the function, <code>n</code> really is 20.</li>
+      <li data-lines="25" data-state="x=10" data-out="after double: 10">Back in <code>main</code>, <code>n</code> is gone and <code>x</code> was never touched: still 10.</li>
+      <li data-lines="27-28,10-11" data-state="arr=[1 2 3]; a=[0 2 3]">Arrays are values too: <code>resetArray</code> receives a copy of all three ints, and zeroes the copy's first slot.</li>
+      <li data-lines="29" data-state="arr=[1 2 3]" data-out="array after resetArray: [1 2 3]">The caller's array is unchanged.</li>
+      <li data-lines="31-32,14-15" data-state="arr=[1 2 3]; sl=[0 2 3]; s=[0 2 3]">A slice is different. Only the small <strong>header</strong> (pointer, len, cap) is copied, and that copy points at the <em>same</em> backing array. Writing <code>s[0]</code> writes the caller's data.</li>
+      <li data-lines="33" data-state="sl=[0 2 3]" data-out="slice after resetSlice: [0 2 3]">So <code>sl</code> now starts with 0.</li>
+      <li data-lines="35,18-19" data-state="x=20; n=&amp;x">To change <code>x</code> itself, we pass its address. <code>*n = *n * 2</code> writes through the pointer into <code>main</code>'s <code>x</code>.</li>
+      <li data-lines="36" data-state="x=20" data-out="after doublePtr: 20">This time the change sticks: <code>x</code> is 20.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>inside double: 20
+after double: 10
+array after resetArray: [1 2 3]
+slice after resetSlice: [0 2 3]
+after doublePtr: 20</pre></div>
+  <p>What happened?</p>
+  <ul>
+    <li><code>double(x)</code> got a copy of 10. Changing it inside did nothing outside.</li>
+    <li><code>resetArray(arr)</code> got a copy of the <em>whole array</em> (all three ints). Arrays are values in Go.</li>
+    <li><code>resetSlice(sl)</code> got a copy of the <strong>slice header</strong>: a tiny struct holding a pointer, a length and a capacity. The copy still points at the same underlying array, so writing <code>s[0]</code> changed the caller's data. (Chapter 5 dives deep into this.)</li>
+    <li><code>doublePtr(&amp;x)</code> got a copy of the <strong>address</strong> of <code>x</code>. Through that address it can change the original.</li>
+  </ul>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Passing an argument is like handing someone a <em>photocopy</em>. If the page contains a recipe, they can scribble on their copy and yours stays clean. If the page contains your <em>home address</em> (a pointer, or a slice/map header), they can't change your copy of the address, but they can drive to your house and rearrange the furniture.</p></div>
+
+  <table>
+    <thead><tr><th>Type you pass</th><th>What gets copied</th><th>Can the callee change the caller's data?</th></tr></thead>
+    <tbody>
+      <tr><td><code>int</code>, <code>bool</code>, <code>string</code>, <code>float64</code></td><td>The value itself</td><td>No</td></tr>
+      <tr><td>Array <code>[N]T</code></td><td>All N elements</td><td>No</td></tr>
+      <tr><td>Struct</td><td>Every field (shallow)</td><td>No (but pointer fields inside still point to shared data)</td></tr>
+      <tr><td>Pointer <code>*T</code></td><td>The address</td><td>Yes, through <code>*p</code></td></tr>
+      <tr><td>Slice <code>[]T</code></td><td>Header: ptr, len, cap (24 bytes)</td><td>Yes, existing elements. <em>No</em>, its length (append is not visible)</td></tr>
+      <tr><td>Map, channel, function</td><td>A small reference value</td><td>Yes (map entries, channel sends)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Don't reach for pointers "for performance" by default. Copying a struct of a few fields is extremely cheap, and values are easier to reason about (no surprise mutation, no nil checks). Use a pointer when the function <em>must</em> modify the caller's data, or when the struct is genuinely large (think hundreds of bytes) and measured to matter. Clear intent beats micro-optimisation.</p></div>
+
+  <h2>Multiple return values</h2>
+  <p>Many languages let a function return only one thing, so programmers resort to tricks: returning a tuple object, using "out" parameters, or returning <code>-1</code> to mean "failed". Go simply lets a function return several values. Put the result types in parentheses.</p>
+  <div class="live" data-title="Multiple return values and (value, error)">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+)
+
+func divmod(a, b int) (int, int) {
+	return a / b, a % b
+}
+
+var ErrDivByZero = errors.New("division by zero")
+
+func safeDiv(a, b float64) (float64, error) {
+	if b == 0 {
+		return 0, ErrDivByZero
+	}
+	return a / b, nil
+}
+
+func main() {
+	q, r := divmod(17, 5)
+	fmt.Println("17 / 5 =", q, "remainder", r)
+
+	// Ignore a value you don't need with the blank identifier _.
+	_, rem := divmod(10, 3)
+	fmt.Println("10 % 3 =", rem)
+
+	if v, err := safeDiv(1, 0); err != nil {
+		fmt.Println("error:", err)
+	} else {
+		fmt.Println("value:", v)
+	}
+
+	// The standard library uses (value, error) everywhere.
+	n, err := strconv.Atoi("42x")
+	fmt.Println(n, err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13" data-state="ErrDivByZero=&quot;division by zero&quot;">Before <code>main</code> runs, the package-level <code>ErrDivByZero</code> is created. It's a sentinel error callers can compare against.</li>
+      <li data-lines="23,9-10" data-state="a=17; b=5">We call <code>divmod(17, 5)</code>. One <code>return</code> statement hands back <strong>two</strong> values: 17/5 and 17%5.</li>
+      <li data-lines="23-24" data-state="q=3; r=2" data-out="17 / 5 = 3 remainder 2">Both results land in <code>q</code> and <code>r</code> in one assignment.</li>
+      <li data-lines="27-28" data-state="q=3; r=2; rem=1" data-out="10 % 3 = 1">We only care about the remainder, so the quotient goes to <code>_</code>, the blank identifier. Go insists you receive every value, but <code>_</code> lets you drop one on purpose.</li>
+      <li data-lines="30,15-17" data-state="a=1; b=0">The <code>if</code> short statement calls <code>safeDiv(1, 0)</code>. <code>b</code> is zero, so it returns <code>0, ErrDivByZero</code>.</li>
+      <li data-lines="30-31" data-state="v=0; err=division by zero" data-out="error: division by zero"><code>err</code> is not <code>nil</code>, so we take the error branch. <code>v</code> and <code>err</code> exist only inside this if/else.</li>
+      <li data-lines="37" data-state="n=0; err=strconv.Atoi: parsing &quot;42x&quot;: invalid syntax">The standard library follows the same <code>(value, error)</code> shape. <code>"42x"</code> isn't a number, so <code>Atoi</code> returns the zero value 0 plus an error.</li>
+      <li data-lines="38" data-state="n=0; err=strconv.Atoi: parsing &quot;42x&quot;: invalid syntax" data-out="0 strconv.Atoi: parsing &quot;42x&quot;: invalid syntax">Printing both shows why you always check <code>err</code> first: the 0 is not a real answer.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>17 / 5 = 3 remainder 2
+10 % 3 = 1
+error: division by zero
+0 strconv.Atoi: parsing "42x": invalid syntax</pre></div>
+  <p>The most important use of multiple returns is the <strong>(value, error)</strong> convention. A function that can fail returns its result <em>and</em> an <code>error</code> as the last value. If the error is <code>nil</code>, the value is good. If not, the caller handles it. You will see this pattern thousands of times in Go code. Chapter 10 covers errors in depth.</p>
+  <p>You must receive <em>all</em> the return values (or explicitly discard them with <code>_</code>). Go will not silently drop one:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func pair() (int, string) { return 1, "one" }
+
+func main() {
+	n := pair()
+	fmt.Println(n)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre>./main.go:8:7: assignment mismatch: 1 variable but pair returns 2 values</pre></div>
+
+  <div class="callout tip"><p>Use the "if with a short statement" form, <code>if v, err := f(); err != nil { ... }</code>, when you only need <code>v</code> and <code>err</code> inside the if/else. It keeps those variables scoped tightly so they can't be misused later.</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A function is declared <code>func lookup(id int) (string, bool)</code>. Which call compiles?</div>
+    <div class="quiz-opts"><button><code>name := lookup(1)</code></button><button><code>name, ok, err := lookup(1)</code></button><button><code>_, ok := lookup(1)</code></button><button><code>lookup(1) + "x"</code></button></div>
+    <div class="quiz-explain">The function returns exactly two values, so you must receive exactly two. <code>_</code> throws one away on purpose. You also cannot use a multi-value call inside an expression like <code>+</code>.</div>
+  </div>
+
+  <h3>Named results and naked returns</h3>
+  <p>You can give your result values names. They become ordinary local variables, initialised to their <strong>zero values</strong> (0, <code>""</code>, <code>nil</code> and so on). A bare <code>return</code> with no values, called a <strong>naked return</strong>, then returns whatever those variables hold.</p>
+  <div class="live" data-title="Named results, naked returns and a deferred fix-up">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Named results document what comes back. They start at their zero values.
+func splitName(full string) (first, last string) {
+	parts := strings.Fields(full)
+	if len(parts) == 0 {
+		return // naked return: returns first="" last=""
+	}
+	first = parts[0]
+	last = parts[len(parts)-1]
+	return // naked return: returns the current first and last
+}
+
+// The most useful job for named results: letting a deferred func change them.
+func parseAge(s string) (age int, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("parseAge(%q): %w", s, err)
+		}
+	}()
+	_, err = fmt.Sscanf(s, "%d", &amp;age)
+	return age, err
+}
+
+func main() {
+	f, l := splitName("Ada King Lovelace")
+	fmt.Printf("first=%q last=%q\n", f, l)
+
+	f, l = splitName("   ")
+	fmt.Printf("first=%q last=%q\n", f, l)
+
+	fmt.Println(parseAge("37"))
+	fmt.Println(parseAge("old"))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="31,9" data-state="full=Ada King Lovelace; first=&quot;&quot;; last=&quot;&quot;">Calling <code>splitName</code>. The named results <code>first</code> and <code>last</code> already exist as local variables, set to their zero value <code>""</code>.</li>
+      <li data-lines="10-11" data-state="parts=[Ada King Lovelace]; first=&quot;&quot;; last=&quot;&quot;"><code>strings.Fields</code> splits on whitespace into three words, so we skip the early return.</li>
+      <li data-lines="14-16" data-state="first=Ada; last=Lovelace">We assign the named results, then a <strong>naked</strong> <code>return</code> sends back whatever they hold right now.</li>
+      <li data-lines="31-32" data-state="f=Ada; l=Lovelace" data-out="first=&quot;Ada&quot; last=&quot;Lovelace&quot;">Back in <code>main</code>, <code>f</code> and <code>l</code> get the two names.</li>
+      <li data-lines="34,10-12" data-state="parts=[]; first=&quot;&quot;; last=&quot;&quot;">With only spaces, <code>parts</code> is empty. The naked <code>return</code> on line 12 returns the untouched zero values.</li>
+      <li data-lines="35" data-state="f=&quot;&quot;; l=&quot;&quot;" data-out="first=&quot;&quot; last=&quot;&quot;">Both come back empty.</li>
+      <li data-lines="37,20-21,26-27" data-state="s=37; age=37; err=nil"><code>parseAge("37")</code> first <em>registers</em> the deferred closure (it doesn't run yet). <code>Sscanf</code> fills <code>age</code> through <code>&amp;age</code> and leaves <code>err</code> nil.</li>
+      <li data-lines="22,37" data-state="age=37; err=nil" data-out="37 &lt;nil&gt;">On return the deferred func runs, sees <code>err == nil</code>, and does nothing. Result: 37 and nil.</li>
+      <li data-lines="38,26-27" data-state="s=old; age=0; err=expected integer">With <code>"old"</code>, <code>Sscanf</code> fails. <code>return age, err</code> stores 0 and the error into the named results.</li>
+      <li data-lines="22-23" data-state="age=0; err=parseAge(&quot;old&quot;): expected integer">Now the deferred closure runs <em>after</em> the return values were set, and replaces <code>err</code> with a wrapped version. This only works because the result is named.</li>
+      <li data-lines="38" data-state="age=0; err=parseAge(&quot;old&quot;): expected integer" data-out="0 parseAge(&quot;old&quot;): expected integer">The caller sees the wrapped error with its extra context.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>first="Ada" last="Lovelace"
+first="" last=""
+37 &lt;nil&gt;
+0 parseAge("old"): expected integer</pre></div>
+  <p>Named results have two genuinely good uses:</p>
+  <ol>
+    <li><strong>Documentation.</strong> <code>func splitName(full string) (first, last string)</code> tells the reader which string is which. Compare with <code>(string, string)</code>, where you'd have to read the body.</li>
+    <li><strong>Letting a <code>defer</code> modify the result.</strong> In <code>parseAge</code>, the deferred function runs after <code>return</code> has set <code>err</code>, and it can wrap the error with extra context. This only works because <code>err</code> has a name the deferred closure can see.</li>
+  </ol>
+
+  <div class="callout warn"><div class="callout-title">When to avoid naked returns</div><p>In a long function, a bare <code>return</code> forces the reader to scroll up and track what every named result currently holds. That is a bug magnet. The common rule in Go code reviews: naked returns are fine in tiny functions (a handful of lines); otherwise write <code>return first, last</code> explicitly even when the results are named. You get the documentation benefit without the mystery.</p></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">func load(path string) (cfg Config, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // what is cfg here? reader must check
+	}
+	// ... 40 more lines ...
+	err = json.Unmarshal(data, &amp;cfg)
+	return // which err? which cfg?
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">func load(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &amp;cfg); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, nil
+}</code></pre></div></div>
+  </div>
+
+  <h2>Variadic functions</h2>
+  <p>A <strong>variadic</strong> function accepts any number of arguments of one type. You mark the last parameter with <code>...T</code>. Inside the function that parameter is just a <code>[]T</code> slice. You have already used one: <code>fmt.Println</code> is declared as <code>func Println(a ...any) (n int, err error)</code>.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// nums is a []int inside the function.
+func sum(nums ...int) int {
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	return total
+}
+
+// Fixed parameters come first; the variadic one must be last.
+func joinWith(sep string, words ...string) string {
+	return strings.Join(words, sep)
+}
+
+func main() {
+	fmt.Println(sum())        // zero args -&gt; nums is nil
+	fmt.Println(sum(1, 2, 3)) // packed into []int{1, 2, 3}
+
+	scores := []int{90, 85, 77}
+	fmt.Println(sum(scores...)) // spread an existing slice
+
+	fmt.Println(joinWith("-", "a", "b", "c"))
+	parts := []string{"usr", "local", "bin"}
+	fmt.Println("/" + joinWith("/", parts...))
+
+	// fmt.Println itself is variadic: func Println(a ...any)
+	args := []any{"x =", 1, true}
+	fmt.Println(args...)
+}</code></pre></div>
+  <div class="output"><pre>0
+6
+252
+a-b-c
+/usr/local/bin
+x = 1 true</pre></div>
+  <p>The rules:</p>
+  <ul>
+    <li>Only the <strong>last</strong> parameter can be variadic.</li>
+    <li>Calling with zero variadic arguments gives a <code>nil</code> slice (length 0), so <code>range</code> just does nothing.</li>
+    <li>To pass an existing slice, <strong>spread</strong> it with <code>slice...</code>. You can't mix: <code>sum(1, xs...)</code> does not compile.</li>
+  </ul>
+
+  <div class="live" data-title="Watch variadic arguments get packed into a slice">
+    <pre><code class="language-go">func sum(label string, nums ...int) {
+	total := 0
+	for _, n := range nums {
+		total += n
+	}
+	fmt.Println(label, len(nums), total)
+}
+
+func main() {
+	sum("none")
+	sum("three", 1, 2, 3)
+	xs := []int{10, 20}
+	sum("spread", xs...)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="call=sum(&quot;none&quot;)">First call passes only the label. No numbers at all.</li>
+      <li data-lines="1-2" data-state="label=none; nums=[] (nil); total=0">Inside <code>sum</code>, <code>nums</code> is a <code>nil</code> slice. Its length is 0.</li>
+      <li data-lines="3-6" data-state="label=none; len(nums)=0; total=0" data-out="none 0 0">The loop runs zero times, so we print the label, 0 and 0.</li>
+      <li data-lines="11" data-state="call=sum(&quot;three&quot;, 1, 2, 3)">Second call: Go builds a brand-new slice <code>[]int{1, 2, 3}</code> for us.</li>
+      <li data-lines="3-5" data-state="nums=[1 2 3]; total=6">The loop adds 1, 2 and 3.</li>
+      <li data-lines="6" data-state="nums=[1 2 3]; total=6" data-out="three 3 6">Prints the count and the total.</li>
+      <li data-lines="12-13" data-state="xs=[10 20]; call=sum(&quot;spread&quot;, xs...)">Third call spreads <code>xs</code>. No new slice is built: <code>nums</code> <em>is</em> <code>xs</code> (same backing array).</li>
+      <li data-lines="6" data-state="nums=[10 20]; total=30" data-out="spread 2 30">So if <code>sum</code> modified <code>nums[0]</code>, the caller's <code>xs</code> would change too.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: spreading shares memory</div><p>When you call <code>f(xs...)</code>, the function receives <code>xs</code> itself, not a copy. If the function writes to <code>nums[i]</code>, it writes to your slice. If you need isolation, pass <code>slices.Clone(xs)...</code>.</p></div>
+
+  <h2>Functions are values</h2>
+  <p>In Go, functions are <strong>first-class values</strong>. That fancy phrase just means a function can be treated like any other value: stored in a variable, put in a map or slice, passed as an argument, and returned from another function. Every function has a type, written like its signature without names: <code>func(int, int) int</code>.</p>
+  <div class="live" data-title="Functions stored in variables and maps">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// A named function type. Any func with this signature fits.
+type BinaryOp func(a, b int) int
+
+func add(a, b int) int { return a + b }
+func mul(a, b int) int { return a * b }
+
+func apply(op BinaryOp, a, b int) int {
+	return op(a, b)
+}
+
+func main() {
+	// Functions are values: store them in variables...
+	var f func(int, int) int = add
+	fmt.Println(f(3, 4))
+
+	// ...in maps...
+	ops := map[string]BinaryOp{
+		"+": add,
+		"*": mul,
+		"-": func(a, b int) int { return a - b },
+	}
+	for _, sym := range []string{"+", "*", "-"} {
+		fmt.Printf("7 %s 3 = %d\n", sym, apply(ops[sym], 7, 3))
+	}
+
+	// The zero value of a func type is nil. Calling nil panics, so check first.
+	var hook func(string)
+	if hook == nil {
+		fmt.Println("no hook registered")
+	}
+	fmt.Printf("type of add: %T\n", add)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17" data-state="f=add">A variable of type <code>func(int, int) int</code> can hold any function with that signature. We store <code>add</code> in it (no parentheses: we're not calling it).</li>
+      <li data-lines="18,8" data-state="f=add" data-out="7">Calling <code>f(3, 4)</code> really calls <code>add</code>.</li>
+      <li data-lines="21-25" data-state="f=add; ops={+:add *:mul -:func literal}">A map from symbol to function: a <strong>dispatch table</strong>. The <code>"-"</code> entry is an anonymous function written inline.</li>
+      <li data-lines="26-27,11-12" data-state="sym=+; op=add; a=7; b=3" data-out="7 + 3 = 10">First iteration: <code>ops["+"]</code> looks up <code>add</code> and passes it to <code>apply</code>, which simply calls <code>op(a, b)</code>.</li>
+      <li data-lines="26-27,11-12" data-state="sym=*; op=mul; a=7; b=3" data-out="7 * 3 = 21">Same code, different function: now <code>op</code> is <code>mul</code>.</li>
+      <li data-lines="26-27,24" data-state="sym=-; op=func literal; a=7; b=3" data-out="7 - 3 = 4">The anonymous function works exactly the same way.</li>
+      <li data-lines="31-33" data-state="hook=nil" data-out="no hook registered">The zero value of a func type is <code>nil</code>. Calling <code>hook("x")</code> now would panic, so we check first.</li>
+      <li data-lines="35" data-state="hook=nil" data-out="type of add: func(int, int) int"><code>%T</code> shows a function's type: its signature without parameter names.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>7
+7 + 3 = 10
+7 * 3 = 21
+7 - 3 = 4
+no hook registered
+type of add: func(int, int) int</pre></div>
+  <p>A few things worth noticing:</p>
+  <ul>
+    <li><code>type BinaryOp func(a, b int) int</code> creates a <strong>named function type</strong>. It makes signatures readable (<code>apply(op BinaryOp, ...)</code>) and lets you attach methods to it (the standard library's <code>http.HandlerFunc</code> does exactly this).</li>
+    <li>A map from strings to functions is a neat replacement for a long <code>switch</code>: a <em>dispatch table</em>.</li>
+    <li>The zero value of any function type is <code>nil</code>. Calling a nil function panics, so check optional callbacks before calling them.</li>
+    <li>Function values can only be compared to <code>nil</code>. <code>add == mul</code> does not compile, so funcs can't be map keys.</li>
+  </ul>
+
+  <h3>Anonymous functions</h3>
+  <p>An <strong>anonymous function</strong> (also called a <em>function literal</em>) is a function without a name, written right where you need it. You can store it in a variable, call it on the spot, or pass it straight to another function.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"slices"
+)
+
+func main() {
+	// Assign an anonymous function (a "function literal") to a variable.
+	square := func(n int) int { return n * n }
+	fmt.Println(square(9))
+
+	// Call it immediately (an IIFE): handy for a one-off scope.
+	result := func(a, b int) int {
+		return a*10 + b
+	}(4, 2)
+	fmt.Println(result)
+
+	// The most common use: passing behaviour inline.
+	people := []string{"Charlie", "al", "Bob"}
+	slices.SortFunc(people, func(a, b string) int {
+		return len(a) - len(b)
+	})
+	fmt.Println(people)
+}</code></pre></div>
+  <div class="output"><pre>81
+42
+[al Bob Charlie]</pre></div>
+  <p>The third form, passing a small function inline, is what you'll write most often: sort comparators, HTTP handlers, goroutine bodies (<code>go func() { ... }()</code>), cleanup callbacks (<code>t.Cleanup(func() { ... })</code>) and so on.</p>
+
+  <div class="callout tip"><p>If an anonymous function grows past roughly ten lines, or you need it in two places, give it a name. Named functions show up in stack traces with a readable name instead of <code>main.main.func3</code>, which makes debugging much easier.</p></div>
+
+  <h2>Closures: functions that remember</h2>
+  <p>Here's where things get interesting. An anonymous function can use variables from the function around it. When it does, it <strong>captures</strong> those variables. The combination of "a function + the variables it captured" is called a <strong>closure</strong>.</p>
+  <p>The key word is <em>variables</em>, not <em>values</em>. A closure does not take a snapshot. It holds on to the variable itself, so it sees later changes, and its own changes are visible outside:</p>
+
+  <div class="live" data-title="A closure shares the variable, not a copy">
+    <pre><code class="language-go">x := 1
+show := func() { fmt.Println("x is", x) }
+show()
+x = 2
+show()
+inc := func() { x++ }
+inc()
+inc()
+show()</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="x=1">We create <code>x</code> with value 1.</li>
+      <li data-lines="2" data-state="x=1; show=closure over x">We build a closure. It doesn't copy 1; it remembers <em>the variable x</em>.</li>
+      <li data-lines="3" data-state="x=1" data-out="x is 1">Calling it reads the current value: 1.</li>
+      <li data-lines="4" data-state="x=2">We change <code>x</code> outside the closure.</li>
+      <li data-lines="5" data-state="x=2" data-out="x is 2">The closure sees the change, because it shares the same variable.</li>
+      <li data-lines="6-7" data-state="x=3; inc=closure over x">A second closure, <code>inc</code>, captures the same <code>x</code> and increments it.</li>
+      <li data-lines="8" data-state="x=4">Again: x is now 4. Both closures and <code>main</code> all see one variable.</li>
+      <li data-lines="9" data-state="x=4" data-out="x is 4">So <code>show</code> prints 4.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Real output"><pre>x is 1
+x is 2
+x is 4</pre></div>
+
+  <h3>The counter: state that outlives its function</h3>
+  <p>The classic closure example is a counter. <code>newCounter</code> creates a local variable <code>count</code>, then returns a function that increments it. Normally a local variable dies when its function returns. But here the returned closure still needs <code>count</code>, so Go keeps it alive. Every call to <code>newCounter</code> creates a <em>fresh</em> <code>count</code>, so each counter is independent.</p>
+
+  <div class="live" data-title="Two independent counters">
+    <pre><code class="language-go">func newCounter() func() int {
+	count := 0
+	return func() int {
+		count++
+		return count
+	}
+}
+
+func main() {
+	c1 := newCounter()
+	fmt.Println(c1())
+	fmt.Println(c1())
+	c2 := newCounter()
+	fmt.Println(c2())
+	fmt.Println(c1())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="c1=closure">We call <code>newCounter()</code>. Go is about to create a brand-new <code>count</code> variable.</li>
+      <li data-lines="2-6" data-state="c1.count=0">Inside, <code>count := 0</code> is created and the function literal captures it. That closure is returned and stored in <code>c1</code>.</li>
+      <li data-lines="11,4-5" data-state="c1.count=1" data-out="1">Calling <code>c1()</code> runs lines 4 and 5: <code>count</code> becomes 1 and is returned.</li>
+      <li data-lines="12" data-state="c1.count=2" data-out="2">Calling again: the same <code>count</code> is still alive, now 2.</li>
+      <li data-lines="13" data-state="c1.count=2; c2.count=0">A second call to <code>newCounter()</code> creates a <em>separate</em> <code>count</code> for <code>c2</code>.</li>
+      <li data-lines="14" data-state="c1.count=2; c2.count=1" data-out="1">c2 starts from scratch: 1.</li>
+      <li data-lines="15" data-state="c1.count=3; c2.count=1" data-out="3">c1 is untouched by c2 and continues from 2 to 3.</li>
+    </ol>
+  </div>
+
+  <figure class="diagram"><svg viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect x="0" y="0" width="640" height="230" rx="10" fill="#262624"/>
+    <text x="20" y="28" fill="#a8a49a" font-size="12">main's variables (stack)</text>
+    <rect x="20" y="40" width="150" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+    <text x="34" y="67" fill="#ece9e1" font-family="JetBrains Mono, monospace" font-size="14">c1  func() int</text>
+    <rect x="20" y="130" width="150" height="44" rx="6" fill="#2e2d2a" stroke="#3a3936"/>
+    <text x="34" y="157" fill="#ece9e1" font-family="JetBrains Mono, monospace" font-size="14">c2  func() int</text>
+    <text x="250" y="28" fill="#a8a49a" font-size="12">closures (code + environment)</text>
+    <rect x="250" y="40" width="160" height="44" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+    <text x="262" y="60" fill="#ece9e1" font-size="12">code: count++; return</text>
+    <text x="262" y="76" fill="#a8a49a" font-size="11">env → &amp;count #1</text>
+    <rect x="250" y="130" width="160" height="44" rx="6" fill="#2e2d2a" stroke="#d97757"/>
+    <text x="262" y="150" fill="#ece9e1" font-size="12">code: count++; return</text>
+    <text x="262" y="166" fill="#a8a49a" font-size="11">env → &amp;count #2</text>
+    <text x="480" y="28" fill="#a8a49a" font-size="12">captured vars (heap)</text>
+    <rect x="480" y="40" width="130" height="44" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/>
+    <text x="494" y="67" fill="#8fbf7f" font-family="JetBrains Mono, monospace" font-size="14">count = 3</text>
+    <rect x="480" y="130" width="130" height="44" rx="6" fill="#2e2d2a" stroke="#8fbf7f"/>
+    <text x="494" y="157" fill="#8fbf7f" font-family="JetBrains Mono, monospace" font-size="14">count = 1</text>
+    <g stroke="#7fa6d9" stroke-width="2" fill="none">
+      <path d="M170 62 L246 62"/><path d="M170 152 L246 152"/>
+      <path d="M410 62 L476 62"/><path d="M410 152 L476 152"/>
+    </g>
+    <g fill="#7fa6d9"><path d="M246 57 L254 62 L246 67z"/><path d="M246 147 L254 152 L246 157z"/><path d="M476 57 L484 62 L476 67z"/><path d="M476 147 L484 152 L476 157z"/></g>
+    <text x="20" y="210" fill="#a8a49a" font-size="12">Each newCounter() call makes a new count. Escape analysis moves it to the heap because the closure outlives the call.</text>
+  </svg><figcaption>A closure is a pointer to code plus a pointer to its captured variables. Two counters, two separate <code>count</code> variables.</figcaption></figure>
+
+  <div class="callout info"><div class="callout-title">Under the hood</div><p>How does <code>count</code> survive after <code>newCounter</code> returns? The compiler runs <strong>escape analysis</strong>: it notices the variable is still referenced after the function ends, so it allocates <code>count</code> on the <em>heap</em> (long-lived memory managed by the garbage collector) instead of the <em>stack</em> (short-lived, per-call memory). You can see this decision with <code>go build -gcflags=-m</code>, which prints lines like <code>moved to heap: count</code>. Chapter 18 explores this more.</p></div>
+
+  <h3>Generators</h3>
+  <p>A closure that returns "the next value" each time you call it is called a <strong>generator</strong>. The captured variables hold the generator's progress:</p>
+  <div class="live" data-title="A generator keeps its progress in captured variables">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+// newCounter returns a function that "remembers" count.
+func newCounter() func() int {
+	count := 0
+	return func() int {
+		count++
+		return count
+	}
+}
+
+// fibGen returns a generator: each call yields the next Fibonacci number.
+func fibGen() func() int {
+	a, b := 0, 1
+	return func() int {
+		r := a
+		a, b = b, a+b
+		return r
+	}
+}
+
+func main() {
+	c1 := newCounter()
+	fmt.Println(c1())
+	fmt.Println(c1())
+	c2 := newCounter()
+	fmt.Println(c2())
+	fmt.Println(c1())
+
+	next := fibGen()
+	for range 10 {
+		fmt.Print(next(), " ")
+	}
+	fmt.Println()
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="25-27,9-10" data-state="c1.count=2" data-out="1\n2">The counter part works just like the walkthrough above: <code>c1</code> owns one <code>count</code>, which goes 1, 2.</li>
+      <li data-lines="28-30" data-state="c1.count=3; c2.count=1" data-out="1\n3"><code>c2</code> gets its own fresh <code>count</code>; <code>c1</code> carries on from where it was.</li>
+      <li data-lines="32,15-17" data-state="a=0; b=1; next=closure over a, b"><code>fibGen()</code> creates <code>a</code> and <code>b</code> and returns a closure that captures <strong>both</strong>. They live on after <code>fibGen</code> returns.</li>
+      <li data-lines="33-34,18-20" data-state="call=1; r=0; a=1; b=1">First call: remember the current <code>a</code> (0) in <code>r</code>, then shift the pair forward with a tuple assignment. The right side is evaluated first, so no temp variable is needed.</li>
+      <li data-lines="34,18-20" data-state="call=2; r=1; a=1; b=2">Second call picks up the saved state: returns 1, pair becomes (1, 2).</li>
+      <li data-lines="34,18-20" data-state="call=3; r=1; a=2; b=3">Third call returns 1 again, pair becomes (2, 3). <code>fmt.Print</code> adds no newline, so the numbers pile up on one line.</li>
+      <li data-lines="33-35" data-state="call=10; r=34; a=55; b=89">Calls 4 to 10 continue the same way: 2, 3, 5, 8, 13, 21, 34. The generator's whole "progress" is just those two captured variables.</li>
+      <li data-lines="36" data-state="a=55; b=89" data-out="0 1 1 2 3 5 8 13 21 34 ">The final <code>Println()</code> ends the line of ten numbers.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1
+2
+1
+3
+0 1 1 2 3 5 8 13 21 34 </pre></div>
+  <p>Since Go 1.23 there's an even nicer way to express "a sequence of values": <strong>range-over-func iterators</strong>. An iterator is a function that takes a <code>yield</code> callback and calls it once per value. The <code>iter</code> package names this shape <code>iter.Seq[T]</code>, and you can loop over it with plain <code>for ... range</code>:</p>
+  <div class="live" data-title="Range-over-func: the iterator and the loop body take turns">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"iter"
+)
+
+// Countdown returns an iterator: a func that pushes values to yield.
+func Countdown(from int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i := from; i &gt;= 0; i-- {
+			if !yield(i) { // the loop body said "break"
+				return
+			}
+		}
+	}
+}
+
+func main() {
+	for n := range Countdown(5) {
+		if n == 1 {
+			break
+		}
+		fmt.Print(n, " ")
+	}
+	fmt.Println("liftoff?")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="20,9-10" data-state="from=5">The <code>range</code> calls <code>Countdown(5)</code>, which just returns a function. Nothing has been counted yet.</li>
+      <li data-lines="20,10" data-state="from=5; yield=loop body">The compiler turns the loop body (lines 21-24) into a function and passes it as <code>yield</code>. Then the iterator function starts running.</li>
+      <li data-lines="11-12,20-24" data-state="i=5; n=5; printed=5">The iterator calls <code>yield(5)</code>. Control jumps into the loop body with <code>n = 5</code>; it's not 1, so it prints <code>5 </code> (no newline yet) and <code>yield</code> returns <code>true</code>.</li>
+      <li data-lines="11-12,24" data-state="i=4; n=4; printed=5 4">Back in the iterator, <code>i--</code> and <code>yield(4)</code>: the body prints <code>4 </code>.</li>
+      <li data-lines="11-12,24" data-state="i=2; n=2; printed=5 4 3 2">Same for 3 and 2. The iterator and the loop body take turns, one value at a time.</li>
+      <li data-lines="12,21-22" data-state="i=1; n=1; yield returned=false">With <code>n == 1</code>, the body hits <code>break</code>. That makes <code>yield</code> return <strong>false</strong> to the iterator.</li>
+      <li data-lines="12-13" data-state="i=1; yield returned=false">The iterator sees <code>false</code> and must stop with <code>return</code>. Calling <code>yield</code> again after false would panic at run time.</li>
+      <li data-lines="26" data-state="printed=5 4 3 2 liftoff?" data-out="5 4 3 2 liftoff?">The loop is over and <code>main</code> continues on the same line.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>5 4 3 2 liftoff?</pre></div>
+  <p>When the loop body hits <code>break</code>, <code>yield</code> returns <code>false</code> and the iterator must stop. It's closures all the way down: the loop body itself is turned into the <code>yield</code> function by the compiler. You'll use iterators from the <code>slices</code> and <code>maps</code> packages in the next chapter.</p>
+
+  <h3>Closures in loops (and the Go 1.22 fix)</h3>
+  <p>For over a decade this was the most famous Go bug. Before Go 1.22, a <code>for</code> loop had <strong>one</strong> loop variable shared by every iteration. Closures created in the loop all captured that same variable, so after the loop they all saw its final value.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	var funcs []func()
+	for i := 0; i &lt; 3; i++ {
+		// Go 1.22+: each iteration has its OWN i.
+		funcs = append(funcs, func() { fmt.Print(i, " ") })
+	}
+	for _, f := range funcs {
+		f()
+	}
+	fmt.Println()
+}</code></pre></div>
+  <p>Run with a <code>go.mod</code> that says <code>go 1.21</code> (old semantics):</p>
+  <div class="output" data-label="go 1.21 semantics"><pre>3 3 3 </pre></div>
+  <p>The exact same code with <code>go 1.22</code> or later in <code>go.mod</code>:</p>
+  <div class="output" data-label="go 1.22+ semantics"><pre>0 1 2 </pre></div>
+  <p>Go 1.22 changed loops so that <strong>each iteration gets its own fresh copy</strong> of the loop variable. Closures (and goroutines) created in different iterations now capture different variables, which is what everyone expected all along. The behaviour is controlled by the <code>go</code> line in your module's <code>go.mod</code>, so old code keeps its old meaning until you upgrade that line.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: you'll still see the old workaround</div><p>Older codebases are full of <code>i := i</code> lines inside loops, or <code>go func(i int) { ... }(i)</code>. Those were workarounds for the shared loop variable. On Go 1.22+ they are harmless but redundant (the <code>copyloopvar</code> linter in golangci-lint flags them). The fix only applies to variables <em>declared by the for statement</em>; a variable declared outside the loop and captured inside is still one shared variable.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">With <code>go 1.22</code> in go.mod, what does this print?<br><code>var fs []func(); for i := range 3 { fs = append(fs, func(){ fmt.Print(i) }) }; for _, f := range fs { f() }</code></div>
+    <div class="quiz-opts"><button><code>333</code></button><button><code>012</code></button><button><code>222</code></button><button>It doesn't compile</button></div>
+    <div class="quiz-explain">Each iteration has its own <code>i</code>, so the three closures capture 0, 1 and 2. Under the pre-1.22 rules a classic three-clause loop would print <code>333</code> (the final value after the loop increments past 2).</div>
+  </div>
+
+  <h2>Higher-order functions</h2>
+  <p>A <strong>higher-order function</strong> is a function that takes a function as an argument, returns a function, or both. You have already met some: <code>slices.SortFunc</code> takes a comparator, <code>newCounter</code> returns a function. With generics (Chapter 9) you can write reusable <code>Map</code>, <code>Filter</code> and <code>Reduce</code> helpers:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Map applies f to every element and returns a new slice.
+func Map[T, U any](in []T, f func(T) U) []U {
+	out := make([]U, 0, len(in))
+	for _, v := range in {
+		out = append(out, f(v))
+	}
+	return out
+}
+
+// Filter keeps the elements for which keep returns true.
+func Filter[T any](in []T, keep func(T) bool) []T {
+	var out []T
+	for _, v := range in {
+		if keep(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// Reduce folds the slice into a single value.
+func Reduce[T, A any](in []T, init A, f func(A, T) A) A {
+	acc := init
+	for _, v := range in {
+		acc = f(acc, v)
+	}
+	return acc
+}
+
+// A function that RETURNS a function: a factory of predicates.
+func longerThan(n int) func(string) bool {
+	return func(s string) bool { return len(s) &gt; n }
+}
+
+func main() {
+	nums := []int{1, 2, 3, 4, 5, 6}
+	evens := Filter(nums, func(n int) bool { return n%2 == 0 })
+	squares := Map(evens, func(n int) int { return n * n })
+	total := Reduce(squares, 0, func(acc, n int) int { return acc + n })
+	fmt.Println(evens, squares, total)
+
+	words := []string{"go", "gopher", "channel", "map"}
+	fmt.Println(Filter(words, longerThan(3)))
+	fmt.Println(Map(words, strings.ToUpper))
+}</code></pre></div>
+  <div class="output"><pre>[2 4 6] [4 16 36] 56
+[gopher channel]
+[GO GOPHER CHANNEL MAP]</pre></div>
+  <p>Two patterns are shown here. First, <em>taking</em> behaviour as a parameter (<code>Filter(nums, isEven)</code>). Second, <em>returning</em> behaviour: <code>longerThan(3)</code> is a factory that builds a predicate with <code>n</code> baked in. Also notice <code>Map(words, strings.ToUpper)</code>: any function with the right signature can be passed directly, no wrapper needed.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Go is not a functional language, and idiomatic Go leans towards a plain <code>for</code> loop. A loop is easy to read, easy to debug, and lets you <code>break</code> early or return an error mid-way. Use <code>Map</code>/<code>Filter</code> helpers when they make code genuinely clearer, but don't build a five-step functional chain where a six-line loop would do. In code review, "just write the loop" is common, friendly feedback.</p></div>
+
+  <h3>Composing functions</h3>
+  <p>Higher-order functions really shine for <em>wrapping</em> behaviour. HTTP middleware (Chapter 17) is the canonical case: a function takes a handler and returns a new handler that does something before and after. Here's the shape, in miniature:</p>
+  <div class="code" data-file="shape.go"><pre><code class="language-go">func withLogging(next func(string) string) func(string) string {
+	return func(in string) string {
+		log.Println("calling with", in)
+		out := next(in)
+		log.Println("returned", out)
+		return out
+	}
+}</code></pre></div>
+
+  <h2>Recursion</h2>
+  <p>A <strong>recursive</strong> function is one that calls itself. It solves a problem by breaking it into a smaller version of the same problem. Every recursive function needs two parts:</p>
+  <ul>
+    <li>A <strong>base case</strong>: a small input you can answer directly, which stops the recursion.</li>
+    <li>A <strong>recursive case</strong>: call yourself with a smaller input and build the answer from the result.</li>
+  </ul>
+  <p>Each call gets its own <strong>stack frame</strong>: a fresh set of local variables and parameters. Let's trace <code>fact(3)</code> frame by frame:</p>
+
+  <div class="live" data-title="Recursion: the call stack grows, then unwinds">
+    <pre><code class="language-go">func fact(n int) int {
+	if n &lt;= 1 {
+		return 1
+	}
+	return n * fact(n-1)
+}
+
+func main() {
+	fmt.Println(fact(3))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="stack=main">main calls <code>fact(3)</code>.</li>
+      <li data-lines="1-2,5" data-state="stack=main → fact(3); n=3">Frame for n=3. Not the base case, so it needs <code>fact(2)</code> before it can multiply. This frame pauses.</li>
+      <li data-lines="1-2,5" data-state="stack=main → fact(3) → fact(2); n=2">New frame, n=2. Its own <code>n</code>; the n=3 frame is waiting underneath. Calls <code>fact(1)</code>.</li>
+      <li data-lines="2-3" data-state="stack=main → fact(3) → fact(2) → fact(1); n=1">n=1 hits the base case and returns 1 right away. No further calls.</li>
+      <li data-lines="5" data-state="stack=main → fact(3) → fact(2); n=2; returns=2*1=2">Back in the n=2 frame: 2 × 1 = 2. This frame returns 2 and is popped.</li>
+      <li data-lines="5" data-state="stack=main → fact(3); n=3; returns=3*2=6">Back in the n=3 frame: 3 × 2 = 6. Returns 6.</li>
+      <li data-lines="9" data-state="stack=main" data-out="6">main receives 6 and prints it.</li>
+    </ol>
+  </div>
+
+  <p>Here's a fuller example with three classic recursive problems: factorial, a memoised Fibonacci, and walking a tree (the kind of structure you get from a file system, JSON, or an HTML DOM):</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func factorial(n int) int {
+	if n &lt;= 1 { // base case: stops the recursion
+		return 1
+	}
+	return n * factorial(n-1) // recursive case: a smaller problem
+}
+
+// Naive fib is exponential. Memoising with a map makes it linear.
+func fibMemo() func(int) int {
+	memo := map[int]int{}
+	var fib func(int) int // declare first so the literal can call itself
+	fib = func(n int) int {
+		if n &lt; 2 {
+			return n
+		}
+		if v, ok := memo[n]; ok {
+			return v
+		}
+		memo[n] = fib(n-1) + fib(n-2)
+		return memo[n]
+	}
+	return fib
+}
+
+type Node struct {
+	Name     string
+	Size     int
+	Children []*Node
+}
+
+// walk visits every node depth-first and prints it indented.
+func walk(n *Node, depth int) int {
+	total := n.Size
+	fmt.Printf("%*s%s (%d)\n", depth*2, "", n.Name, n.Size)
+	for _, c := range n.Children {
+		total += walk(c, depth+1)
+	}
+	return total
+}
+
+func main() {
+	fmt.Println("5! =", factorial(5))
+
+	fib := fibMemo()
+	fmt.Println("fib(50) =", fib(50))
+
+	root := &amp;Node{Name: "/", Children: []*Node{
+		{Name: "bin", Size: 40},
+		{Name: "home", Children: []*Node{
+			{Name: "notes.txt", Size: 3},
+			{Name: "photo.jpg", Size: 120},
+		}},
+	}}
+	fmt.Println("total size:", walk(root, 0))
+}</code></pre></div>
+  <div class="output"><pre>5! = 120
+fib(50) = 12586269025
+/ (0)
+  bin (40)
+  home (0)
+    notes.txt (3)
+    photo.jpg (120)
+total size: 163</pre></div>
+  <p>Note the trick in <code>fibMemo</code>: an anonymous function can't refer to itself by name, because it doesn't have one. So we first declare <code>var fib func(int) int</code>, then assign the literal. Inside the literal, <code>fib</code> refers to the captured variable, which by the time it's called holds the function itself.</p>
+  <p>The <code>%*s</code> verb in <code>walk</code> means "pad to a width given as an argument", a quick way to indent by depth.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: Go has no tail-call optimisation</div><p>Some languages turn certain recursive calls into loops automatically. Go doesn't. Goroutine stacks start small (a few KB) and grow on demand up to a limit (1 GB on 64-bit by default), so deep recursion works for a while, but a runaway recursion ends in <code>fatal error: stack overflow</code>. For recursion whose depth depends on user input (deeply nested JSON, long linked lists), prefer an explicit loop with your own stack slice.</p></div>
+
+  <h2>defer, panic and recover: a first look</h2>
+  <p>Chapter 3 introduced <code>defer</code>, and Chapter 10 covers <code>panic</code> and <code>recover</code> properly. Since they are all about <em>function calls</em>, here is the overview you need now:</p>
+  <ul>
+    <li><strong><code>defer f()</code></strong> schedules <code>f</code> to run when the surrounding function returns, however it returns. Multiple defers run in <strong>last-in, first-out</strong> order, like a stack of plates.</li>
+    <li>The deferred call's <strong>arguments are evaluated immediately</strong>, at the <code>defer</code> line. Only the call itself is postponed.</li>
+    <li><strong><code>panic(v)</code></strong> stops normal execution. Deferred functions still run as the panic travels up the call stack. If nothing stops it, the program crashes with a stack trace.</li>
+    <li><strong><code>recover()</code></strong>, called inside a deferred function, stops a panic and returns the panic value. Anywhere else it returns <code>nil</code>.</li>
+  </ul>
+
+  <div class="live" data-title="defer: LIFO order and early argument evaluation">
+    <pre><code class="language-go">func() {
+	for i := 1; i &lt;= 3; i++ {
+		defer fmt.Println("defer", i)
+	}
+	x := 10
+	defer fmt.Println("x at defer time:", x)
+	x = 99
+	fmt.Println("x now:", x)
+}()</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2-3" data-state="i=1; defer stack=[defer 1]">First iteration: <code>defer</code> evaluates its arguments now ("defer", 1) and pushes the call on the defer stack.</li>
+      <li data-lines="2-3" data-state="i=3; defer stack=[defer 1, defer 2, defer 3]">After the loop, three calls are waiting. Nothing printed yet.</li>
+      <li data-lines="5-6" data-state="x=10; defer stack=[…, x at defer time: 10]">We defer a print of <code>x</code>. The value <strong>10</strong> is captured right now.</li>
+      <li data-lines="7-8" data-state="x=99" data-out="x now: 99">We change <code>x</code> to 99 and print it immediately.</li>
+      <li data-lines="9" data-state="x=99; running=deferred calls, newest first" data-out="x at defer time: 10">The function ends. The most recent defer runs first, and prints the old value 10, not 99.</li>
+      <li data-lines="9" data-state="defer stack=[]" data-out="defer 3\ndefer 2\ndefer 1">Then the loop's defers, in reverse order: 3, 2, 1.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Real output"><pre>x now: 99
+x at defer time: 10
+defer 3
+defer 2
+defer 1</pre></div>
+
+  <p>And here's <code>recover</code> turning a runtime panic into an ordinary error. Notice that it relies on a <strong>named result</strong> (<code>err</code>) so the deferred closure can set it:</p>
+  <div class="live" data-title="defer order, then recover turning a panic into an error">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func deferOrder() {
+	for i := range 3 {
+		defer fmt.Println("deferred", i) // runs when deferOrder returns, LIFO
+	}
+	fmt.Println("body done")
+}
+
+// safeDiv turns a panic into an ordinary error.
+func safeDiv(a, b int) (q int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil
+}
+
+func main() {
+	deferOrder()
+
+	fmt.Println(safeDiv(10, 2))
+	fmt.Println(safeDiv(1, 0))
+
+	err := errors.New("boom")
+	fmt.Println("plain error, no panic needed:", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="26,9-10" data-state="i=0; defer stack=[deferred 0]"><code>main</code> calls <code>deferOrder</code>. Each loop iteration pushes a deferred <code>Println</code> with that iteration's <code>i</code>, evaluated right now.</li>
+      <li data-lines="9-10" data-state="i=2; defer stack=[deferred 0, deferred 1, deferred 2]">After three iterations, three calls are waiting. Nothing has printed.</li>
+      <li data-lines="12" data-state="defer stack=[deferred 0, deferred 1, deferred 2]" data-out="body done">The body finishes normally.</li>
+      <li data-lines="13" data-state="defer stack=[]" data-out="deferred 2\ndeferred 1\ndeferred 0">As <code>deferOrder</code> returns, its defers run newest first: 2, 1, 0.</li>
+      <li data-lines="28,16-17,22" data-state="a=10; b=2; q=5; err=nil"><code>safeDiv(10, 2)</code> registers the recover closure, then <code>return a / b, nil</code> sets <code>q=5</code>, <code>err=nil</code>.</li>
+      <li data-lines="18,28" data-state="q=5; err=nil; r=nil" data-out="5 &lt;nil&gt;">The deferred func runs; <code>recover()</code> returns <code>nil</code> because nothing panicked, so the results are untouched.</li>
+      <li data-lines="29,22" data-state="a=1; b=0; q=0; err=nil">Now <code>1 / 0</code>: integer division by zero <strong>panics</strong> in the middle of the return statement. Normal execution stops.</li>
+      <li data-lines="17-19" data-state="q=0; r=runtime error: integer divide by zero; err=recovered: runtime error: integer divide by zero">While the panic unwinds, deferred functions still run. <code>recover()</code> catches the panic value, and the closure writes the named result <code>err</code>.</li>
+      <li data-lines="29" data-state="q=0; err=recovered: runtime error: integer divide by zero" data-out="0 recovered: runtime error: integer divide by zero"><code>safeDiv</code> returns normally to <code>main</code> with <code>q</code> at its zero value and an ordinary error. The program keeps running.</li>
+      <li data-lines="31-32" data-state="err=boom" data-out="plain error, no panic needed: boom">For expected failures you don't need panic at all: just create and return an <code>error</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>body done
+deferred 2
+deferred 1
+deferred 0
+5 &lt;nil&gt;
+0 recovered: runtime error: integer divide by zero
+plain error, no panic needed: boom</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Panics are for programmer bugs and truly impossible situations, not for "file not found" or "invalid input". Return an <code>error</code> for anything a caller might reasonably expect. The main legitimate place for <code>recover</code> is at a boundary, such as an HTTP server catching a panic in one request so the whole process doesn't die (<code>net/http</code> does this for you). If a library panics on bad input, users will rightly be annoyed.</p></div>
+
+  <h2>More function patterns</h2>
+  <p>Three more function-shaped ideas you will meet constantly in real Go code: functional options, method values, and <code>init</code>.</p>
+
+  <h3>The functional options pattern</h3>
+  <p>Go has no default arguments and no overloading. So how do you build something with many optional settings, like a server with a timeout, a connection limit, TLS config and a logger? Passing ten parameters is awful, and a config struct makes it hard to tell "not set" from "set to zero". The idiomatic answer is <strong>functional options</strong>: each option is a small function that tweaks the object being built.</p>
+  <div class="live" data-title="Functional options: closures that configure a struct">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Server struct {
+	addr    string
+	timeout time.Duration
+	maxConn int
+}
+
+// Option is a function that tweaks a Server.
+type Option func(*Server)
+
+func WithTimeout(d time.Duration) Option {
+	return func(s *Server) { s.timeout = d }
+}
+
+func WithMaxConn(n int) Option {
+	return func(s *Server) { s.maxConn = n }
+}
+
+// NewServer sets sensible defaults, then applies each option in order.
+func NewServer(addr string, opts ...Option) *Server {
+	s := &amp;Server{addr: addr, timeout: 30 * time.Second, maxConn: 100}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+func main() {
+	a := NewServer(":8080")
+	b := NewServer(":9090", WithTimeout(5*time.Second), WithMaxConn(10))
+	fmt.Println(a.addr, a.timeout, a.maxConn)
+	fmt.Println(b.addr, b.timeout, b.maxConn)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="35,26-27" data-state="addr=:8080; opts=[] (nil); s={:8080 30s 100}"><code>NewServer(":8080")</code> passes no options, so <code>opts</code> is a nil slice. The server is built with the defaults first.</li>
+      <li data-lines="28-31,35" data-state="a={:8080 30s 100}">The loop over zero options does nothing. <code>a</code> keeps every default.</li>
+      <li data-lines="36,17-18" data-state="d=5s; opt1=closure setting timeout=5s">For <code>b</code>, the arguments are evaluated first. <code>WithTimeout(5*time.Second)</code> doesn't touch any server; it returns a closure that captured <code>d</code>.</li>
+      <li data-lines="36,21-22" data-state="d=5s; n=10; opt2=closure setting maxConn=10"><code>WithMaxConn(10)</code> likewise returns a closure capturing <code>n</code>. Both closures are packed into <code>opts</code>.</li>
+      <li data-lines="26-27" data-state="opts=[opt1 opt2]; s={:9090 30s 100}">Inside <code>NewServer</code>, defaults are set first.</li>
+      <li data-lines="28-29,18" data-state="opt=opt1; s={:9090 5s 100}">First option runs: <code>s.timeout = d</code> overrides the default 30s.</li>
+      <li data-lines="28-29,22" data-state="opt=opt2; s={:9090 5s 10}">Second option runs: <code>s.maxConn = n</code>. Options apply in order, so a later one can override an earlier one.</li>
+      <li data-lines="31,36" data-state="a={:8080 30s 100}; b={:9090 5s 10}">The pointer to the configured server is returned into <code>b</code>.</li>
+      <li data-lines="37-38" data-state="a={:8080 30s 100}; b={:9090 5s 10}" data-out=":8080 30s 100\n:9090 5s 10">Printing shows the defaults on <code>a</code> and only the changed knobs on <code>b</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>:8080 30s 100
+:9090 5s 10</pre></div>
+  <p>Why people like it:</p>
+  <ul>
+    <li>Callers only mention what they change: <code>NewServer(":8080")</code> is valid and readable.</li>
+    <li>Adding a new option later doesn't break any existing caller. The signature stays the same.</li>
+    <li>Option names (<code>WithTimeout</code>) document themselves at the call site.</li>
+  </ul>
+  <p>It's built entirely from things in this chapter: a named function type (<code>Option</code>), closures (<code>WithTimeout</code> captures <code>d</code>), and a variadic parameter (<code>opts ...Option</code>). You'll see it in gRPC, Zap, the OpenTelemetry SDK and many other libraries.</p>
+
+  <div class="callout tip"><p>Functional options are great for libraries with many knobs. For a struct with three fields used inside your own app, a plain config struct (<code>NewServer(Config{Addr: ":8080"})</code>) is simpler and perfectly idiomatic. Don't add the pattern until you feel the pain it solves.</p></div>
+
+  <h3>Method values: a preview</h3>
+  <p>Chapter 7 covers methods (functions attached to a type). One function-related trick is worth seeing now. If <code>g</code> has a method <code>Hello</code>, then <code>g.Hello</code> <em>without parentheses</em> is a function value with <code>g</code> already bound. This is a <strong>method value</strong>. Writing <code>Greeter.Hello</code> (type name, not variable) gives a <strong>method expression</strong>, where the receiver becomes the first parameter.</p>
+  <div class="live" data-title="Method values and method expressions">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Greeter struct{ Name string }
+
+func (g Greeter) Hello(to string) string {
+	return g.Name + " says hi to " + to
+}
+
+func main() {
+	g := Greeter{Name: "Ann"}
+
+	// Method VALUE: the receiver g is bound now. Type: func(string) string
+	hello := g.Hello
+	fmt.Println(hello("Bob"))
+
+	// Method EXPRESSION: the receiver becomes the first parameter.
+	// Type: func(Greeter, string) string
+	expr := Greeter.Hello
+	fmt.Println(expr(Greeter{Name: "Cy"}, "Dee"))
+
+	// Method values plug straight into higher-order funcs.
+	for _, name := range []string{"Eve", "Fay"} {
+		run(hello, name)
+	}
+}
+
+func run(f func(string) string, arg string) {
+	fmt.Println(f(arg))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12" data-state="g={Ann}">We create a <code>Greeter</code> named Ann.</li>
+      <li data-lines="15" data-state="g={Ann}; hello=g.Hello (bound to Ann)"><code>g.Hello</code> without parentheses is a <strong>method value</strong>: a <code>func(string) string</code> with a copy of <code>g</code> baked in right now.</li>
+      <li data-lines="16,7-8" data-state="hello=g.Hello (bound to Ann); to=Bob" data-out="Ann says hi to Bob">Calling <code>hello("Bob")</code> runs <code>Hello</code> with Ann as the receiver.</li>
+      <li data-lines="20" data-state="expr=Greeter.Hello"><code>Greeter.Hello</code> (type name, not variable) is a <strong>method expression</strong>. No receiver is bound; its type is <code>func(Greeter, string) string</code>.</li>
+      <li data-lines="21,7-8" data-state="g=Cy; to=Dee" data-out="Cy says hi to Dee">So we pass the receiver as the first argument.</li>
+      <li data-lines="24-25,29-30" data-state="name=Eve; f=hello (bound to Ann)" data-out="Ann says hi to Eve">The method value goes into <code>run</code> like any other function. <code>run</code> has no idea it's a method.</li>
+      <li data-lines="24-25,29-30" data-state="name=Fay; f=hello (bound to Ann)" data-out="Ann says hi to Fay">Second iteration: still bound to Ann.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Ann says hi to Bob
+Cy says hi to Dee
+Ann says hi to Eve
+Ann says hi to Fay</pre></div>
+  <p>Method values are common when passing callbacks: <code>http.HandleFunc("/", srv.handleIndex)</code> hands the router a function that already knows which <code>srv</code> to use. Note that the receiver is evaluated (and for value receivers, copied) at the moment you write <code>g.Hello</code>.</p>
+
+  <h3>init functions</h3>
+  <p>Every package can declare one or more functions named <code>init</code>. They take no arguments, return nothing, can't be called by you, and run automatically once, before <code>main</code>. The full start-up order is:</p>
+  <ol>
+    <li>Imported packages are initialised first (recursively, each only once).</li>
+    <li>Package-level variables are initialised, in dependency order.</li>
+    <li><code>init()</code> functions run, in the order they appear (files are presented to the compiler sorted by name).</li>
+    <li><code>main()</code> starts.</li>
+  </ol>
+  <div class="live" data-title="Program start-up: package vars, init, then main">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+var config = loadConfig() // package-level vars initialise first
+
+func loadConfig() map[string]string {
+	fmt.Println("1. loadConfig (package var initialiser)")
+	return map[string]string{"env": "dev"}
+}
+
+func init() {
+	fmt.Println("2. first init(), env =", config["env"])
+}
+
+func init() {
+	fmt.Println("3. second init() - a file may have several")
+}
+
+func main() {
+	fmt.Println("4. main()")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="5,7-9" data-state="phase=package vars" data-out="1. loadConfig (package var initialiser)">Before any <code>init</code> or <code>main</code>, package-level variables are initialised. Initialising <code>config</code> means calling <code>loadConfig()</code>, which prints.</li>
+      <li data-lines="5" data-state="phase=package vars; config=map[env:dev]"><code>config</code> now holds the map.</li>
+      <li data-lines="12-13" data-state="phase=init #1; config=map[env:dev]" data-out="2. first init(), env = dev">Next, <code>init</code> functions run in source order. The first one can already rely on <code>config</code> being ready.</li>
+      <li data-lines="16-17" data-state="phase=init #2; config=map[env:dev]" data-out="3. second init() - a file may have several">A file may declare several <code>init</code> functions; the second runs after the first. You can never call them yourself.</li>
+      <li data-lines="20-21" data-state="phase=main; config=map[env:dev]" data-out="4. main()">Only now does <code>main</code> start.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1. loadConfig (package var initialiser)
+2. first init(), env = dev
+3. second init() - a file may have several
+4. main()</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Use init sparingly</div><p><code>init</code> runs hidden code just because a package was imported. That makes programs harder to test (you can't skip it), harder to reason about (order across files is subtle), and slower to start. Good uses: registering a driver or codec (<code>import _ "image/png"</code> registers the PNG decoder via <code>init</code>), or computing a lookup table. Bad uses: reading config files, connecting to databases, or anything that can fail. Do those explicitly in <code>main</code> and return errors.</p></div>
+
+  <h2>Designing good functions</h2>
+  <p>Writing a function that works is the easy part. Writing one that is pleasant to call, hard to misuse and easy to change is the craft. Here's what experienced Go engineers look for.</p>
+
+  <h3>Keep functions small and focused</h3>
+  <p>A function should do one thing, and its name should say what that is. If you need the word "and" to describe it (<code>validateAndSaveAndNotify</code>), split it. Small functions are easier to test, easier to name, and easier to reuse. A long function is often several small ones in a trench coat.</p>
+  <div class="live" data-title="Small checks combined with errors.Join">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Small, focused functions with honest signatures compose well.
+
+type User struct {
+	Name  string
+	Email string
+	Age   int
+}
+
+func validateName(name string) error {
+	if name == "" {
+		return errors.New("name is required")
+	}
+	return nil
+}
+
+func validateAge(age int) error {
+	if age &lt; 0 || age &gt; 150 {
+		return fmt.Errorf("age %d out of range", age)
+	}
+	return nil
+}
+
+// validate is just a list of small checks.
+func validate(u User) error {
+	return errors.Join(
+		validateName(u.Name),
+		validateAge(u.Age),
+	)
+}
+
+func main() {
+	fmt.Println(validate(User{Name: "Sam", Age: 30}))
+	fmt.Println(validate(User{Age: 200}))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="39,31-32" data-state="u={Sam  30}">First call: <code>validate</code> evaluates each argument of <code>errors.Join</code> in order, so every small check runs.</li>
+      <li data-lines="33,16-20" data-state="u={Sam  30}; nameErr=nil">The name is non-empty, so <code>validateName</code> returns <code>nil</code>.</li>
+      <li data-lines="34,23-27" data-state="u={Sam  30}; nameErr=nil; ageErr=nil">30 is in range, so <code>validateAge</code> also returns <code>nil</code>.</li>
+      <li data-lines="32,39" data-state="result=nil" data-out="&lt;nil&gt;"><code>errors.Join</code> skips nil errors; if all are nil it returns <code>nil</code>. Valid user, no error.</li>
+      <li data-lines="40,33,16-18" data-state="u={  200}; nameErr=name is required">Second user has no name: <code>validateName</code> returns an error. Crucially, we <em>don't stop here</em>.</li>
+      <li data-lines="34,23-25" data-state="u={  200}; nameErr=name is required; ageErr=age 200 out of range">The age check still runs and fails too.</li>
+      <li data-lines="32,40" data-state="result=joined(2 errors)" data-out="name is required\nage 200 out of range"><code>errors.Join</code> combines both; its message puts each error on its own line, so the caller sees every problem at once.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>&lt;nil&gt;
+name is required
+age 200 out of range</pre></div>
+  <p><code>validate</code> reads like a checklist. Each rule is tiny and testable on its own, and <code>errors.Join</code> (Go 1.20+) combines them, skipping the <code>nil</code>s, so the caller sees every problem at once.</p>
+
+  <h3>Signature design checklist</h3>
+  <table>
+    <thead><tr><th>Guideline</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>context.Context</code> first, <code>error</code> last</td><td>Universal Go convention. Readers and linters expect it: <code>func Fetch(ctx context.Context, id string) (*User, error)</code>.</td></tr>
+      <tr><td>Accept interfaces, return concrete types</td><td>Take an <code>io.Reader</code> so callers can pass files, buffers or network streams. Return <code>*User</code> so callers get full access. (Chapter 8)</td></tr>
+      <tr><td>Avoid long parameter lists</td><td>More than about four parameters, especially several of the same type, invites mix-ups: <code>resize(w, h, x, y int)</code>. Group them into a struct.</td></tr>
+      <tr><td>Avoid boolean flags</td><td><code>save(doc, true)</code> means nothing at the call site. Two functions (<code>save</code>, <code>saveDraft</code>) or a named type are clearer.</td></tr>
+      <tr><td>Return early</td><td>Handle errors and edge cases first with <code>if ... { return }</code>, so the "happy path" is un-indented and easy to follow.</td></tr>
+      <tr><td>Let the caller decide about concurrency</td><td>Write synchronous functions. Callers can wrap them in <code>go</code> if they want. Hiding goroutines inside functions makes leaks and races likely.</td></tr>
+      <tr><td>Don't return values the caller must ignore</td><td>If half the callers write <code>_, _ = f()</code>, the signature is wrong.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">// What do true and false mean? What's 3?
+sendEmail("ann@x.io", "Hi", body, true, false, 3)
+
+func sendEmail(to, subject, body string,
+	html, urgent bool, retries int) error</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">sendEmail(ctx, Email{
+	To:      "ann@x.io",
+	Subject: "Hi",
+	Body:    body,
+	HTML:    true,
+}, WithRetries(3))
+
+func sendEmail(ctx context.Context, e Email,
+	opts ...SendOption) error</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Optimise function signatures for the <em>call site</em>, not the definition. A function is written once and read at every call. Before finalising an API, write three example calls. If any of them make you squint ("which string is the name?"), change the signature. This is also why Go programmers prefer short, clear names for parameters and local variables in small scopes (<code>r</code> for a reader, <code>i</code> for an index) and longer descriptive names for exported functions.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Pure functions (output depends only on input, no side effects) are the easiest code you'll ever test. Push I/O to the edges: have <code>parseInvoice(data []byte) (Invoice, error)</code> do the logic and let a thin outer function read the file. Then your tests just pass bytes in, no temp files or mocks required.</p></div>
+
+  <h2>Practice</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1: build an accumulator with two closures</summary>
+    <p>Write <code>makeAccumulator()</code> that returns two functions: <code>add(n int)</code> and <code>total() int</code>. Both must share the same running sum. Hint: declare the sum once, then create two function literals that capture it. You can use named results to document which function is which.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// makeAccumulator returns add and total, sharing one captured sum.
+func makeAccumulator() (add func(int), total func() int) {
+	sum := 0
+	add = func(n int) { sum += n }
+	total = func() int { return sum }
+	return add, total
+}
+
+func main() {
+	add, total := makeAccumulator()
+	add(5)
+	add(10)
+	fmt.Println(total())
+	add(-3)
+	fmt.Println(total())
+}</code></pre></div>
+    <div class="output"><pre>15
+12</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: write a generic Compose</summary>
+    <p>Write <code>Compose(f, g)</code> that returns a new function which runs <code>f</code> and passes its result to <code>g</code>. It should work for any types, so use type parameters <code>[A, B, C any]</code>. Use it to build a "trim, uppercase, add !" pipeline.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Compose returns a function that runs f first, then g.
+func Compose[A, B, C any](f func(A) B, g func(B) C) func(A) C {
+	return func(a A) C { return g(f(a)) }
+}
+
+func main() {
+	shout := Compose(strings.TrimSpace, strings.ToUpper)
+	exclaim := Compose(shout, func(s string) string { return s + "!" })
+	fmt.Println(exclaim("   hello gophers  "))
+
+	length := Compose(strings.TrimSpace, func(s string) int { return len(s) })
+	fmt.Println(length("  abc  "))
+}</code></pre></div>
+    <div class="output"><pre>HELLO GOPHERS!
+3</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: memoize any single-argument function</summary>
+    <p>Write <code>Memoize[K comparable, V any](f func(K) V) func(K) V</code> that remembers results in a map, so repeated calls with the same argument don't call <code>f</code> again. Count the real calls to prove it works. (Bonus thought: why is this unsafe to call from several goroutines at once? You'll fix that with a mutex in Chapter 13.)</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+// Memoize caches results of a pure function of one comparable argument.
+func Memoize[K comparable, V any](f func(K) V) func(K) V {
+	cache := make(map[K]V)
+	return func(k K) V {
+		if v, ok := cache[k]; ok {
+			return v
+		}
+		v := f(k)
+		cache[k] = v
+		return v
+	}
+}
+
+func main() {
+	calls := 0
+	slowSquare := func(n int) int {
+		calls++
+		return n * n
+	}
+	fast := Memoize(slowSquare)
+	fmt.Println(fast(4), fast(4), fast(5), fast(4))
+	fmt.Println("real calls:", calls)
+}</code></pre></div>
+    <div class="output"><pre>16 16 25 16
+real calls: 2</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Go passes every argument <strong>by value</strong>. Slices, maps and pointers are small values that refer to shared data, which is why changes through them are visible.</li>
+      <li>Functions can return multiple values; <code>(result, error)</code> is the standard way to signal failure.</li>
+      <li>Named results document meaning and let a <code>defer</code> adjust the result; avoid naked returns except in tiny functions.</li>
+      <li>Variadic parameters are slices; <code>f(xs...)</code> passes the slice itself, sharing its memory.</li>
+      <li>Functions are first-class values with types like <code>func(int) int</code>; their zero value is <code>nil</code>.</li>
+      <li>A closure captures <strong>variables</strong>, not values, and keeps them alive (on the heap) as long as needed.</li>
+      <li>Since Go 1.22 each loop iteration has a fresh loop variable, fixing the classic closure-in-loop bug.</li>
+      <li>Recursion needs a base case; Go has no tail-call optimisation, so prefer loops for unbounded depth.</li>
+      <li><code>defer</code> runs LIFO and evaluates arguments immediately; <code>recover</code> only works inside a deferred function.</li>
+      <li>Keep functions small, put <code>ctx</code> first and <code>error</code> last, avoid boolean flags, and design for the call site.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

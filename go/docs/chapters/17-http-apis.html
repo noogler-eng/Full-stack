@@ -1,0 +1,2038 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 17 · Building HTTP APIs — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<body data-root="../" data-chapter="17">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part V · Chapter 17</div>
+  <h1>Building HTTP APIs</h1>
+  <p class="lead">Go was built at Google to write network servers, and it shows: <code>net/http</code> in the standard library is production-grade. In this chapter we build a complete JSON API for tasks from scratch: routing, JSON helpers, validation, error responses, middleware, safe timeouts, graceful shutdown, an HTTP client, and how to talk to a real database. Every response you see below was produced by actually running the server and calling it with <code>curl</code>.</p>
+  <div class="meta">
+    <span class="pill">⏱ 55 min read</span>
+    <span class="pill">◆ Intermediate → Advanced</span>
+    <span class="pill">▶ 12 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>How a request flows through <code>net/http</code>: the <code>Handler</code> interface, <code>HandlerFunc</code>, <code>ResponseWriter</code></li>
+      <li>Go 1.22+ routing with <code>ServeMux</code>: methods, <code>{id}</code> wildcards, <code>r.PathValue</code>, precedence, automatic 405s</li>
+      <li>Clean JSON request/response helpers, body size limits, strict decoding and validation</li>
+      <li>Consistent status codes and error bodies</li>
+      <li>Middleware: logging, panic recovery, request IDs and CORS, and how a chain is built</li>
+      <li>Why the default server and client are dangerous, and which timeouts to set</li>
+      <li>Graceful shutdown with <code>signal.NotifyContext</code> and <code>Server.Shutdown</code></li>
+      <li><code>database/sql</code>: pooling, queries, <code>sql.ErrNoRows</code>, prepared statements and transactions</li>
+    </ul>
+  </div>
+
+  <h2>net/http basics: your first server</h2>
+  <p>HTTP is a request/response protocol. A client sends a <em>request</em> (a method like <code>GET</code> or <code>POST</code>, a path like <code>/tasks/1</code>, headers, and maybe a body). The server sends back a <em>response</em> (a status code like <code>200</code>, headers, and a body). A Go web server is a program that listens on a TCP port, parses each request, and calls your code to produce the response.</p>
+  <p>The smallest useful server is about ten lines:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+)
+
+func main() {
+	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			name = "world"
+		}
+		fmt.Fprintf(w, "hello, %s! you sent %s %s\n", name, r.Method, r.URL.Path)
+	})
+
+	log.Println("listening on :8081")
+	log.Fatal(http.ListenAndServe(":8081", nil)) // nil = use http.DefaultServeMux
+}</code></pre></div>
+  <p>Run it with <code>go run .</code>, then call it from another terminal:</p>
+  <div class="output" data-label="Terminal"><pre>$ curl localhost:8081/hello
+hello, world! you sent GET /hello
+$ curl "localhost:8081/hello?name=Gopher"
+hello, Gopher! you sent GET /hello
+$ curl -X POST localhost:8081/hello
+hello, world! you sent POST /hello
+$ curl -i localhost:8081/nope
+HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+Date: Fri, 16 Oct 2026 18:03:21 GMT
+Content-Length: 19
+
+404 page not found</pre></div>
+  <p>What just happened:</p>
+  <ul>
+    <li><code>http.HandleFunc</code> registered a function for the path <code>/hello</code> on the <em>default mux</em> (a global router).</li>
+    <li><code>http.ListenAndServe(":8081", nil)</code> started listening on port 8081 on all interfaces. It blocks forever, and only returns if something goes wrong.</li>
+    <li>For <strong>every connection</strong>, the server starts a new goroutine. So your handler runs concurrently with itself. That's how Go servers handle thousands of requests at once without you writing any concurrency code, and also why any shared state in handlers must be protected.</li>
+    <li>Unknown paths get a plain-text <code>404 page not found</code> for free.</li>
+  </ul>
+
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>This "hello" version is fine for learning but has two production problems we'll fix later: it uses the global <code>DefaultServeMux</code> (any imported package can register routes on it, including <code>net/http/pprof</code>'s debug endpoints), and <code>http.ListenAndServe</code> has <strong>no timeouts</strong>.</p></div>
+
+  <h2>The Handler interface and HandlerFunc</h2>
+  <p>Everything in <code>net/http</code> revolves around one interface:</p>
+  <div class="code" data-file="net/http (simplified)"><pre><code class="language-go">type Handler interface {
+	ServeHTTP(w ResponseWriter, r *Request)
+}
+
+// HandlerFunc lets an ordinary function act as a Handler.
+type HandlerFunc func(ResponseWriter, *Request)
+
+func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+	f(w, r) // just call the function itself
+}</code></pre></div>
+  <p>A <strong>Handler</strong> is anything that can answer a request. The two parameters are:</p>
+  <ul>
+    <li><code>*http.Request</code>: everything about the incoming request. <code>r.Method</code>, <code>r.URL.Path</code>, <code>r.URL.Query()</code>, <code>r.Header</code>, <code>r.Body</code> (an <code>io.ReadCloser</code>), and <code>r.Context()</code>, which is cancelled when the client disconnects.</li>
+    <li><code>http.ResponseWriter</code>: how you build the response. Set headers with <code>w.Header().Set(...)</code>, then the status with <code>w.WriteHeader(code)</code>, then the body with <code>w.Write(...)</code> (it's an <code>io.Writer</code>, so <code>fmt.Fprintf</code> and <code>json.NewEncoder(w)</code> work).</li>
+  </ul>
+  <p><strong>HandlerFunc</strong> is a clever adapter: it's a function <em>type</em> with a <code>ServeHTTP</code> method that calls the function. Converting your function with <code>http.HandlerFunc(myFunc)</code> turns it into a Handler. <code>mux.HandleFunc</code> does that conversion for you.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"sync/atomic"
+)
+
+// counter is a Handler because it has a ServeHTTP method.
+type counter struct {
+	hits atomic.Int64 // handlers run concurrently: use atomics or locks
+}
+
+func (c *counter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	n := c.hits.Add(1)
+	fmt.Fprintf(w, "visit #%d\n", n)
+}
+
+func health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK) // headers must be set BEFORE this
+	w.Write([]byte(`{"status":"ok"}` + "\n"))
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.Handle("/count", &amp;counter{})                // a value implementing Handler
+	mux.Handle("/health", http.HandlerFunc(health)) // a function converted to Handler
+	mux.HandleFunc("/health2", health)              // shorthand for the line above
+
+	log.Fatal(http.ListenAndServe(":8082", mux))
+}</code></pre></div>
+  <div class="output" data-label="Terminal"><pre>$ curl localhost:8082/count
+visit #1
+$ curl localhost:8082/count
+visit #2
+$ curl localhost:8082/count
+visit #3
+$ curl -i localhost:8082/health
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Fri, 16 Oct 2026 18:03:21 GMT
+Content-Length: 16
+
+{"status":"ok"}</pre></div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A Handler is a function with a fixed shape: request in, response out. A router is a Handler that picks another Handler. Middleware is a Handler that wraps another Handler. The server is just a loop that calls the top Handler for each request. Once this clicks, all of <code>net/http</code> becomes "Handlers all the way down".</p></div>
+
+  <h3>The order of ResponseWriter calls matters</h3>
+  <p>The response is streamed to the client. The first call to <code>Write</code> sends the status line and headers immediately (with <code>200 OK</code> if you didn't call <code>WriteHeader</code>). After that, changing the status or headers is impossible:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"log"
+	"net/http"
+)
+
+func main() {
+	http.HandleFunc("/broken", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("oops, something failed\n"))   // implicitly sends 200 OK
+		w.WriteHeader(http.StatusInternalServerError) // too late!
+		w.Header().Set("X-Debug", "never sent")       // also too late
+	})
+	log.Fatal(http.ListenAndServe(":8084", nil))
+}</code></pre></div>
+  <div class="output" data-label="Terminal"><pre>$ curl -i localhost:8084/broken
+HTTP/1.1 200 OK
+Date: Fri, 16 Oct 2026 18:06:09 GMT
+Content-Length: 23
+Content-Type: text/plain; charset=utf-8
+
+oops, something failed</pre></div>
+  <div class="output" data-label="Server log"><pre>2026/10/16 23:36:09 http: superfluous response.WriteHeader call from main.main.func1 (main.go:11)</pre></div>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">fmt.Fprintln(w, "hello")
+w.Header().Set("Content-Type", "application/json")
+w.WriteHeader(http.StatusCreated)</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">w.Header().Set("Content-Type", "application/json") // 1. headers
+w.WriteHeader(http.StatusCreated)                    // 2. status
+fmt.Fprintln(w, `{"ok":true}`)                       // 3. body</code></pre></div></div>
+  </div>
+  <p>Remember it as <strong>headers → status → body</strong>. Go warns you in the server log with "superfluous response.WriteHeader call", which is a sign of exactly this bug, often an error path that runs after something was already written.</p>
+
+  <p>You can watch this bug without starting a server. <code>httptest.NewRecorder()</code> is a fake <code>ResponseWriter</code>, and <code>rec.Result()</code> shows the response the client would have received:</p>
+  <div class="live" data-title="Watch the header order bug in a recorder">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+)
+
+func broken(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("oops\n"))                     // first write sends 200 + headers
+	w.WriteHeader(http.StatusInternalServerError) // too late: ignored
+	w.Header().Set("X-Debug", "never sent")       // too late: headers are gone
+}
+
+func fixed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Debug", "sent")             // 1. headers
+	w.WriteHeader(http.StatusInternalServerError) // 2. status
+	w.Write([]byte("oops\n"))                     // 3. body
+}
+
+func call(name string, h http.HandlerFunc) {
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest("GET", "/", nil))
+	res := rec.Result() // the response as the client would see it
+	fmt.Printf("%-7s status=%d X-Debug=%q body=%q\n",
+		name, res.StatusCode, res.Header.Get("X-Debug"), strings.TrimSpace(rec.Body.String()))
+}
+
+func main() {
+	call("broken", broken)
+	call("fixed", fixed)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="31,22-24" data-state="name=&quot;broken&quot;; committed=false">We call <code>call("broken", broken)</code>. It creates a fresh recorder and invokes the handler directly. A handler is just a function, so no network is needed.</li>
+      <li data-lines="11" data-state="status=200; committed=true; sentHeaders={Content-Type: text/plain}">The very first <code>Write</code> has no status yet, so Go calls <code>WriteHeader(200)</code> for you. It also sniffs a <code>Content-Type</code>. The status line and headers are now <strong>committed</strong>; on a real server they are already on the wire.</li>
+      <li data-lines="12" data-state="status=200; committed=true"><code>WriteHeader(500)</code> comes too late and is ignored. A real server logs "superfluous response.WriteHeader call" here, which is the clue to look for in logs.</li>
+      <li data-lines="13" data-state="w.Header()[X-Debug]=never sent; sentHeaders=unchanged">Setting a header still changes the map in memory, but that map was already sent. The client never sees it.</li>
+      <li data-lines="25-27" data-state="res.StatusCode=200; X-Debug=&quot;&quot;" data-out="broken  status=200 X-Debug=&quot;&quot; body=&quot;oops&quot;"><code>Result()</code> returns the snapshot taken at commit time: an error page served with <strong>200 OK</strong>. Monitoring would count this as a success.</li>
+      <li data-lines="32,17" data-state="name=&quot;fixed&quot;; committed=false; w.Header()[X-Debug]=sent">Now the fixed handler with a new recorder. Step 1: set headers while nothing is committed yet.</li>
+      <li data-lines="18" data-state="status=500; committed=true; sentHeaders={X-Debug: sent}">Step 2: <code>WriteHeader(500)</code> commits the status <em>together with</em> the headers set so far.</li>
+      <li data-lines="19" data-state="body=&quot;oops\n&quot;">Step 3: the body. Write as much as you want from here on.</li>
+      <li data-lines="25-27" data-state="res.StatusCode=500; X-Debug=&quot;sent&quot;" data-out="fixed   status=500 X-Debug=&quot;sent&quot; body=&quot;oops&quot;">Same bytes in the body, but now the client sees the right status and the header. <strong>Headers → status → body.</strong></li>
+    </ol>
+  </div>
+  <div class="output"><pre>broken  status=200 X-Debug="" body="oops"
+fixed   status=500 X-Debug="sent" body="oops"</pre></div>
+
+  <h2>Routing with ServeMux (Go 1.22+ patterns)</h2>
+  <p>A <strong>mux</strong> (short for multiplexer, i.e. a router) looks at each request and picks the handler to run. Since Go 1.22 the standard <code>http.ServeMux</code> understands methods and path wildcards, so most APIs no longer need a third-party router. A pattern looks like:</p>
+  <div class="output" data-label="Pattern syntax"><pre>[METHOD ][HOST]/[PATH]
+
+GET /tasks/{id}          method + path with a wildcard
+POST /tasks              only POST
+/static/                 trailing slash: matches /static/ and everything below it
+GET /files/{path...}     {name...} captures the rest of the path, slashes included
+GET /{$}                 {$} means "exactly this path", so only "/"
+api.example.com/         only requests whose Host is api.example.com</pre></div>
+  <p>Inside the handler, <code>r.PathValue("id")</code> returns the text that matched <code>{id}</code>. It's always a <code>string</code>; parsing it into a number is your job.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+)
+
+func show(label string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%-22s id=%q path=%q\n", label, r.PathValue("id"), r.PathValue("path"))
+	}
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tasks", show("list tasks"))
+	mux.HandleFunc("POST /tasks", show("create task"))
+	mux.HandleFunc("GET /tasks/{id}", show("get task"))
+	mux.HandleFunc("DELETE /tasks/{id}", show("delete task"))
+	mux.HandleFunc("GET /tasks/latest", show("latest (more specific)"))
+	mux.HandleFunc("GET /files/{path...}", show("file (wildcard rest)"))
+	mux.HandleFunc("GET /{$}", show("home (exact /)"))
+	mux.HandleFunc("api.example.com/", show("host-specific"))
+
+	log.Fatal(http.ListenAndServe(":8083", mux))
+}</code></pre></div>
+  <div class="output" data-label="Terminal"><pre>$ curl localhost:8083/tasks
+list tasks             id="" path=""
+$ curl -X POST localhost:8083/tasks
+create task            id="" path=""
+$ curl localhost:8083/tasks/42
+get task               id="42" path=""
+$ curl -X DELETE localhost:8083/tasks/42
+delete task            id="42" path=""
+$ curl localhost:8083/tasks/latest
+latest (more specific) id="" path=""
+$ curl localhost:8083/files/img/logo.png
+file (wildcard rest)   id="" path="img/logo.png"
+$ curl localhost:8083/
+home (exact /)         id="" path=""
+$ curl -i -X PUT localhost:8083/tasks/42
+HTTP/1.1 405 Method Not Allowed
+Allow: DELETE, GET, HEAD
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+Date: Fri, 16 Oct 2026 18:03:29 GMT
+Content-Length: 19
+
+Method Not Allowed
+
+$ curl -i localhost:8083/about
+HTTP/1.1 404 Not Found
+$ curl -H "Host: api.example.com" localhost:8083/anything
+host-specific          id="" path=""</pre></div>
+
+  <div class="live" data-title="How the mux picks a handler">
+    <pre><code class="language-go">mux := http.NewServeMux()
+mux.HandleFunc("GET /tasks", show("list tasks"))
+mux.HandleFunc("POST /tasks", show("create task"))
+mux.HandleFunc("GET /tasks/{id}", show("get task"))
+mux.HandleFunc("DELETE /tasks/{id}", show("delete task"))
+mux.HandleFunc("GET /tasks/latest", show("latest (more specific)"))
+mux.HandleFunc("GET /files/{path...}", show("file (wildcard rest)"))
+mux.HandleFunc("GET /{$}", show("home (exact /)"))</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="req=GET /tasks; match=GET /tasks" data-out="list tasks             id=&quot;&quot; path=&quot;&quot;"><code>GET /tasks</code>: the method and the literal path match line 2 exactly. No wildcards, so both path values are empty.</li>
+      <li data-lines="3" data-state="req=POST /tasks; match=POST /tasks" data-out="create task            id=&quot;&quot; path=&quot;&quot;">Same path, different method. The method is part of the pattern, so line 3 wins.</li>
+      <li data-lines="4" data-state="req=GET /tasks/42; id=&quot;42&quot;" data-out="get task               id=&quot;42&quot; path=&quot;&quot;"><code>/tasks/42</code> matches <code>/tasks/{id}</code>. A wildcard matches one whole path segment, so <code>id</code> = <code>"42"</code>.</li>
+      <li data-lines="4,6" data-state="req=GET /tasks/latest; candidates=2; winner=line 6" data-out="latest (more specific) id=&quot;&quot; path=&quot;&quot;"><code>/tasks/latest</code> matches both line 4 and line 6. The rule: <strong>the most specific pattern wins</strong>. Line 6 matches only one path; line 4 matches many. So line 6 wins, and registration order doesn't matter.</li>
+      <li data-lines="7" data-state="req=GET /files/img/logo.png; path=&quot;img/logo.png&quot;" data-out="file (wildcard rest)   id=&quot;&quot; path=&quot;img/logo.png&quot;">A <code>{path...}</code> wildcard must come last and swallows the remaining segments, slashes included.</li>
+      <li data-lines="8" data-state="req=GET /; match=GET /{$}" data-out="home (exact /)         id=&quot;&quot; path=&quot;&quot;">Without <code>{$}</code>, the pattern <code>/</code> would match every path as a catch-all. With it, only the root matches, and <code>/about</code> correctly returns 404.</li>
+      <li data-lines="4-5" data-state="req=PUT /tasks/42; status=405; Allow=DELETE, GET, HEAD">A <code>PUT</code> matches the path of lines 4-5 but no method. The mux answers <code>405 Method Not Allowed</code> and fills in the <code>Allow</code> header for you. <code>GET</code> patterns also accept <code>HEAD</code>.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: conflicting patterns panic at startup</div><p>If two patterns could match the same requests and neither is more specific (for example <code>GET /tasks/{id}</code> and <code>GET /{kind}/latest</code>), <code>HandleFunc</code> panics when you register them. That's a feature: you find routing ambiguity at startup, not in production. Also note that path matching is on the <em>unescaped</em> path, segment by segment, and the mux redirects <code>/static</code> to <code>/static/</code> when only the slash version is registered.</p></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Always create your own mux with <code>http.NewServeMux()</code> and keep the route table in one function (we'll call it <code>routes()</code>). Being able to read every endpoint of a service in one screen is worth a lot during an incident. With 1.22 patterns, you only need a third-party router if you want things like route groups with per-group middleware, regex constraints, or automatic OpenAPI docs.</p></div>
+
+  <h2>JSON in and out: helpers, status codes and errors</h2>
+  <p>Now let's build a real API. Our service manages tasks with the classic five operations:</p>
+  <table>
+    <thead><tr><th>Method &amp; path</th><th>Action</th><th>Success status</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /tasks</code></td><td>List tasks (optional <code>?done=true</code>)</td><td>200 OK</td></tr>
+      <tr><td><code>POST /tasks</code></td><td>Create a task</td><td>201 Created + <code>Location</code> header</td></tr>
+      <tr><td><code>GET /tasks/{id}</code></td><td>Fetch one</td><td>200 OK</td></tr>
+      <tr><td><code>PATCH /tasks/{id}</code></td><td>Partially update</td><td>200 OK</td></tr>
+      <tr><td><code>DELETE /tasks/{id}</code></td><td>Delete</td><td>204 No Content</td></tr>
+    </tbody>
+  </table>
+  <p>First, the storage. To keep examples runnable without a database, we use an in-memory store: a map protected by a <code>sync.RWMutex</code>. Many readers can hold the read lock at once; a writer gets exclusive access. Later in the chapter we'll write the same store against SQL.</p>
+  <div class="code" data-file="store.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"slices"
+	"sync"
+	"time"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Task struct {
+	ID        int       `json:"id"`
+	Title     string    `json:"title"`
+	Done      bool      `json:"done"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Store is an in-memory, concurrency-safe task store.
+// Handlers run on many goroutines at once, so every access is locked.
+type Store struct {
+	mu     sync.RWMutex
+	nextID int
+	tasks  map[int]Task
+	now    func() time.Time
+}
+
+func NewStore(now func() time.Time) *Store {
+	return &amp;Store{nextID: 1, tasks: map[int]Task{}, now: now}
+}
+
+func (s *Store) Create(title string) Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Task{ID: s.nextID, Title: title, CreatedAt: s.now()}
+	s.tasks[t.ID] = t
+	s.nextID++
+	return t
+}
+
+func (s *Store) Get(id int) (Task, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return Task{}, ErrNotFound
+	}
+	return t, nil
+}
+
+func (s *Store) List() []Task {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Task, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		out = append(out, t)
+	}
+	slices.SortFunc(out, func(a, b Task) int { return a.ID - b.ID })
+	return out
+}
+
+func (s *Store) Update(id int, fn func(*Task)) (Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return Task{}, ErrNotFound
+	}
+	fn(&amp;t)
+	s.tasks[id] = t
+	return t, nil
+}
+
+func (s *Store) Delete(id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tasks[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.tasks, id)
+	return nil
+}</code></pre></div>
+  <p>Notice the store returns <code>ErrNotFound</code>, its own error, not anything HTTP-specific. The storage layer shouldn't know about status codes; the handler translates errors into responses. That separation lets you swap the in-memory store for a SQL one without touching the error handling.</p>
+
+  <h3>Response and request helpers</h3>
+  <p>Every handler needs to send JSON and read JSON. Writing that code once, carefully, keeps handlers short and makes the API consistent: every error has the same shape, every body has a size limit.</p>
+  <div class="code" data-file="httpjson.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+)
+
+// writeJSON sends v as JSON with the given status code.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// Too late to change the status code; just log it.
+		slog.Error("encode response", "err", err)
+	}
+}
+
+// apiError is the one error shape every endpoint returns.
+type apiError struct {
+	Error   string            `json:"error"`
+	Details map[string]string `json:"details,omitempty"`
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, apiError{Error: msg})
+}
+
+const maxBody = 1 &lt;&lt; 20 // 1 MiB
+
+// readJSON decodes a single JSON object from the body into dst,
+// with a size limit and strict field checking.
+func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(dst); err != nil {
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		var maxErr *http.MaxBytesError
+		switch {
+		case errors.As(err, &amp;syntaxErr):
+			return fmt.Errorf("malformed JSON at byte %d", syntaxErr.Offset)
+		case errors.As(err, &amp;typeErr):
+			return fmt.Errorf("field %q must be %s", typeErr.Field, typeErr.Type)
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			return errors.New("malformed JSON: unexpected end of body")
+		case errors.Is(err, io.EOF):
+			return errors.New("body must not be empty")
+		case strings.HasPrefix(err.Error(), "json: unknown field "):
+			return fmt.Errorf("unknown field %s", strings.TrimPrefix(err.Error(), "json: unknown field "))
+		case errors.As(err, &amp;maxErr):
+			return fmt.Errorf("body must be at most %d bytes", maxErr.Limit)
+		default:
+			return err
+		}
+	}
+	// Reject trailing data like `{"a":1}{"b":2}`.
+	if dec.More() {
+		return errors.New("body must contain a single JSON object")
+	}
+	return nil
+}</code></pre></div>
+  <p>Several defenses are packed in there:</p>
+  <ul>
+    <li><code>http.MaxBytesReader</code> caps the body at 1 MiB. Without it, a client can stream gigabytes at you and your decoder will happily buffer them. When the limit is hit, reads fail with <code>*http.MaxBytesError</code> and the server closes the connection.</li>
+    <li><code>DisallowUnknownFields</code> rejects typos like <code>"titel"</code> instead of silently ignoring them.</li>
+    <li><code>dec.More()</code> after decoding catches junk after the object.</li>
+    <li>Raw decoder errors (<code>"invalid character 'h' looking for..."</code>) are turned into messages a client developer can act on.</li>
+  </ul>
+
+  <div class="live" data-title="Trace readJSON with a bad body">
+    <pre><code class="language-go">func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		// ... translate err into a friendly message (see httpjson.go) ...
+		return friendly(err)
+	}
+	if dec.More() {
+		return errors.New("body must contain a single JSON object")
+	}
+	return nil
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="body={&quot;title&quot;:&quot;x&quot;,&quot;priority&quot;:5}; dst=*createTaskRequest">The handler calls <code>readJSON(w, r, &amp;req)</code>. <code>dst</code> is a pointer to an empty <code>createTaskRequest</code>.</li>
+      <li data-lines="2" data-state="limit=1048576 bytes">We replace the body with a limited reader. From now on, reading byte 1,048,577 returns an error. The handler code doesn't change at all; it's still just an <code>io.Reader</code>.</li>
+      <li data-lines="3-4" data-state="strict=true">Create a streaming decoder over the body and switch on strict mode.</li>
+      <li data-lines="5" data-state="title=&quot;x&quot;; next key=&quot;priority&quot;; err=json: unknown field &quot;priority&quot;"><code>Decode</code> reads <code>"title"</code> into <code>req.Title</code>, then meets <code>"priority"</code>, which has no matching field, and fails.</li>
+      <li data-lines="6-7" data-state="return=unknown field &quot;priority&quot;">The error is translated. The handler writes it with status 400. The real response was <code>{"error":"unknown field \"priority\""}</code>.</li>
+      <li data-lines="9-12" data-state="body={&quot;title&quot;:&quot;a&quot;}{&quot;title&quot;:&quot;b&quot;}; More()=true">For a different body with two objects, the first <code>Decode</code> succeeds, but <code>More()</code> sees another value waiting, so we reject it. A clean body reaches line 12 and returns <code>nil</code>.</li>
+    </ol>
+  </div>
+
+  <p>Here is the size limit in action with a tiny 32-byte cap, so you can watch each of the three outcomes (created, too large, bad JSON):</p>
+  <div class="live" data-title="Cap a request body and classify decode errors">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+)
+
+type input struct {
+	Title string `json:"title"`
+}
+
+func create(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32) // cap the body at 32 bytes
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var in input
+	if err := dec.Decode(&amp;in); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &amp;mbe) {
+			http.Error(w, fmt.Sprintf("body over %d bytes", mbe.Limit), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, "created %q\n", in.Title)
+}
+
+func main() {
+	bodies := []string{
+		`{"title":"ship it"}`,
+		`{"title":"` + strings.Repeat("x", 40) + `"}`,
+		`{"name":"x"}`,
+	}
+	for _, b := range bodies {
+		rec := httptest.NewRecorder()
+		create(rec, httptest.NewRequest("POST", "/tasks", strings.NewReader(b)))
+		fmt.Printf("%d %s", rec.Code, rec.Body)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="40-42,16-17" data-state="b={&quot;title&quot;:&quot;ship it&quot;} (19 bytes); limit=32">First body. We call the handler with a recorder. It wraps <code>r.Body</code> in a <code>MaxBytesReader</code>, which counts bytes as they are read and fails once more than 32 have been read.</li>
+      <li data-lines="18-21" data-state="in.Title=&quot;ship it&quot;; err=nil">The decoder reads all 19 bytes, which is under the cap, and fills <code>in</code>. No error.</li>
+      <li data-lines="30-31,43" data-state="rec.Code=201" data-out="201 created &quot;ship it&quot;">Success path: status <strong>201</strong>, then the body.</li>
+      <li data-lines="40-42,17-21" data-state="b=52 bytes; read so far=32; err=*http.MaxBytesError">Second body: 52 bytes. The decoder is still inside the title string when the reader hits 32 bytes and returns an error, which <code>Decode</code> passes back up.</li>
+      <li data-lines="22-25" data-state="mbe.Limit=32; rec.Code=413"><code>errors.As</code> digs out the typed <code>*http.MaxBytesError</code>, so we can report the limit and use 413. On a real server, <code>MaxBytesReader</code> also tells the server to close the connection after the response.</li>
+      <li data-lines="43" data-state="rec.Code=413" data-out="413 body over 32 bytes"><code>http.Error</code> adds the trailing newline.</li>
+      <li data-lines="40-42,19-21" data-state="b={&quot;name&quot;:&quot;x&quot;}; err=json: unknown field &quot;name&quot;">Third body: small enough, but <code>DisallowUnknownFields</code> rejects a key that isn't in the struct. Without it, this request would "succeed" with an empty title.</li>
+      <li data-lines="22-23,27-28" data-state="errors.As=false; rec.Code=400">It isn't a size error, so <code>errors.As</code> fails and we fall through to a generic 400.</li>
+      <li data-lines="43" data-state="rec.Code=400" data-out="400 bad json: json: unknown field &quot;name&quot;">In a real API you would translate this into a friendlier message, as <code>readJSON</code> does.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>201 created "ship it"
+413 body over 32 bytes
+400 bad json: json: unknown field "name"</pre></div>
+
+  <h3>Status codes cheat sheet</h3>
+  <p>Status codes are part of your API contract. Clients (and monitoring) rely on them, so pick them deliberately. Use the named constants (<code>http.StatusNotFound</code>), not magic numbers.</p>
+  <table>
+    <thead><tr><th>Code</th><th>Constant</th><th>When to use it</th></tr></thead>
+    <tbody>
+      <tr><td>200</td><td><code>StatusOK</code></td><td>Successful GET / PATCH with a body</td></tr>
+      <tr><td>201</td><td><code>StatusCreated</code></td><td>POST created something; set <code>Location</code></td></tr>
+      <tr><td>204</td><td><code>StatusNoContent</code></td><td>Success with no body (DELETE)</td></tr>
+      <tr><td>400</td><td><code>StatusBadRequest</code></td><td>Malformed input: bad JSON, wrong types, bad id</td></tr>
+      <tr><td>401 / 403</td><td><code>StatusUnauthorized</code> / <code>StatusForbidden</code></td><td>Not logged in / logged in but not allowed</td></tr>
+      <tr><td>404</td><td><code>StatusNotFound</code></td><td>The resource doesn't exist</td></tr>
+      <tr><td>405</td><td><code>StatusMethodNotAllowed</code></td><td>The mux sends this for you</td></tr>
+      <tr><td>409</td><td><code>StatusConflict</code></td><td>Duplicate, version conflict</td></tr>
+      <tr><td>413</td><td><code>StatusRequestEntityTooLarge</code></td><td>Body over the limit (you may prefer 400 with a clear message)</td></tr>
+      <tr><td>422</td><td><code>StatusUnprocessableEntity</code></td><td>Well-formed JSON that fails validation</td></tr>
+      <tr><td>429</td><td><code>StatusTooManyRequests</code></td><td>Rate limited</td></tr>
+      <tr><td>500</td><td><code>StatusInternalServerError</code></td><td>Our bug. Never leak internal error text</td></tr>
+      <tr><td>503</td><td><code>StatusServiceUnavailable</code></td><td>Overloaded or shutting down</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Handlers, validation and the full API</h2>
+  <p>With the helpers in place, handlers become short and readable. Each one follows the same rhythm: <strong>parse input → validate → call the store → translate the result into a response</strong>.</p>
+  <div class="code" data-file="handlers.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type API struct {
+	store *Store
+}
+
+func (a *API) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("GET /tasks", a.listTasks)
+	mux.HandleFunc("POST /tasks", a.createTask)
+	mux.HandleFunc("GET /tasks/{id}", a.getTask)
+	mux.HandleFunc("PATCH /tasks/{id}", a.updateTask)
+	mux.HandleFunc("DELETE /tasks/{id}", a.deleteTask)
+	mux.HandleFunc("GET /panic", func(http.ResponseWriter, *http.Request) {
+		panic("something went very wrong") // to demo the recovery middleware
+	})
+	mux.HandleFunc("GET /slow", a.slow) // to demo graceful shutdown
+	return mux
+}
+
+func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// slow simulates a 2-second job that respects cancellation.
+func (a *API) slow(w http.ResponseWriter, r *http.Request) {
+	select {
+	case &lt;-time.After(2 * time.Second):
+		writeJSON(w, http.StatusOK, map[string]string{"result": "finished slow work"})
+	case &lt;-r.Context().Done(): // client went away: stop working
+		return
+	}
+}
+
+func (a *API) listTasks(w http.ResponseWriter, r *http.Request) {
+	tasks := a.store.List()
+	if r.URL.Query().Get("done") == "true" {
+		filtered := tasks[:0]
+		for _, t := range tasks {
+			if t.Done {
+				filtered = append(filtered, t)
+			}
+		}
+		tasks = filtered
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+type createTaskRequest struct {
+	Title string `json:"title"`
+}
+
+// validate returns field -&gt; problem; empty means valid.
+func (req createTaskRequest) validate() map[string]string {
+	problems := map[string]string{}
+	title := strings.TrimSpace(req.Title)
+	switch {
+	case title == "":
+		problems["title"] = "is required"
+	case len(title) &gt; 100:
+		problems["title"] = "must be at most 100 characters"
+	}
+	return problems
+}
+
+func (a *API) createTask(w http.ResponseWriter, r *http.Request) {
+	var req createTaskRequest
+	if err := readJSON(w, r, &amp;req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if problems := req.validate(); len(problems) &gt; 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: "validation failed", Details: problems})
+		return
+	}
+	t := a.store.Create(strings.TrimSpace(req.Title))
+	w.Header().Set("Location", "/tasks/"+strconv.Itoa(t.ID))
+	writeJSON(w, http.StatusCreated, t)
+}
+
+// taskID parses the {id} wildcard; it writes the error response itself.
+func taskID(w http.ResponseWriter, r *http.Request) (int, bool) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil || id &lt; 1 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return 0, false
+	}
+	return id, true
+}
+
+func (a *API) getTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	t, err := a.store.Get(id)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+type updateTaskRequest struct {
+	Title *string `json:"title"` // pointers tell "absent" apart from "zero"
+	Done  *bool   `json:"done"`
+}
+
+func (a *API) updateTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var req updateTaskRequest
+	if err := readJSON(w, r, &amp;req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Title != nil {
+		if p := (createTaskRequest{Title: *req.Title}).validate(); len(p) &gt; 0 {
+			writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: "validation failed", Details: p})
+			return
+		}
+	}
+	t, err := a.store.Update(id, func(t *Task) {
+		if req.Title != nil {
+			t.Title = strings.TrimSpace(*req.Title)
+		}
+		if req.Done != nil {
+			t.Done = *req.Done
+		}
+	})
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (a *API) deleteTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	if err := a.store.Delete(id); errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent) // 204: success, no body
+}</code></pre></div>
+  <p>Things worth copying from this file:</p>
+  <ul>
+    <li><strong>Validation is a method on the request type</strong> returning field → problem. Clients get <em>all</em> problems at once, not one per round trip.</li>
+    <li><strong>PATCH uses pointer fields.</strong> With <code>Done bool</code>, a body of <code>{"title":"x"}</code> would look identical to <code>{"title":"x","done":false}</code>. With <code>*bool</code>, <code>nil</code> means "not sent, don't touch".</li>
+    <li><strong>Early returns.</strong> Every error path writes a response and <code>return</code>s immediately. Forgetting that <code>return</code> is a classic bug: the handler keeps going and writes a second response.</li>
+    <li><strong>The handler owns no state</strong> except the store, injected through the <code>API</code> struct. No globals, so tests can create a fresh API each time.</li>
+  </ul>
+
+  <p>Here's the API running. The server was started in the background with <code>go run .</code> and called with curl. First, the happy path:</p>
+  <div class="output" data-label="Terminal: happy path"><pre>$ curl -s localhost:8080/healthz
+{"status":"ok"}
+
+$ curl -si -X POST localhost:8080/tasks -H 'X-Request-ID: demo-1' -d '{"title":"Write chapter 17"}'
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /tasks/1
+Vary: Origin
+X-Request-Id: demo-1
+Date: Fri, 16 Oct 2026 18:05:09 GMT
+Content-Length: 97
+
+{"id":1,"title":"Write chapter 17","done":false,"created_at":"2026-10-16T23:35:09.055389+05:30"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"Curl the server"}'
+{"id":2,"title":"Curl the server","done":false,"created_at":"2026-10-16T23:35:09.066691+05:30"}
+
+$ curl -s localhost:8080/tasks
+[{"id":1,"title":"Write chapter 17","done":false,"created_at":"2026-10-16T23:35:09.055389+05:30"},{"id":2,"title":"Curl the server","done":false,"created_at":"2026-10-16T23:35:09.066691+05:30"}]
+
+$ curl -s localhost:8080/tasks/1
+{"id":1,"title":"Write chapter 17","done":false,"created_at":"2026-10-16T23:35:09.055389+05:30"}
+
+$ curl -s -X PATCH localhost:8080/tasks/2 -d '{"done":true}'
+{"id":2,"title":"Curl the server","done":true,"created_at":"2026-10-16T23:35:09.066691+05:30"}
+
+$ curl -s "localhost:8080/tasks?done=true"
+[{"id":2,"title":"Curl the server","done":true,"created_at":"2026-10-16T23:35:09.066691+05:30"}]</pre></div>
+  <p>And the error paths. Every one of them returns the same <code>{"error": ...}</code> shape, so client code needs exactly one error parser:</p>
+  <div class="output" data-label="Terminal: error paths"><pre>$ curl -si localhost:8080/tasks/99
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+Vary: Origin
+X-Request-Id: 2NGJQMJZK5EM
+Date: Fri, 16 Oct 2026 18:05:09 GMT
+Content-Length: 27
+
+{"error":"task not found"}
+
+$ curl -s localhost:8080/tasks/abc
+{"error":"id must be a positive integer"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"   "}'
+{"error":"validation failed","details":{"title":"is required"}}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"x","priority":5}'
+{"error":"unknown field \"priority\""}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title": 42}'
+{"error":"field \"title\" must be string"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title": "oops"'
+{"error":"malformed JSON: unexpected end of body"}
+
+$ curl -s -X POST localhost:8080/tasks -d '{"title":"a"}{"title":"b"}'
+{"error":"body must contain a single JSON object"}
+
+$ curl -s -X POST localhost:8080/tasks
+{"error":"body must not be empty"}
+
+$ python3 -c 'print("{\"title\":\"" + "a"*2000000 + "\"}")' | curl -s -X POST localhost:8080/tasks --data-binary @-
+{"error":"body must be at most 1048576 bytes"}</pre></div>
+  <div class="output" data-label="Terminal: delete and wrong method"><pre>$ curl -si -X DELETE localhost:8080/tasks/1
+HTTP/1.1 204 No Content
+Vary: Origin
+X-Request-Id: 2KBU4ULXEKJI
+Date: Fri, 16 Oct 2026 18:05:09 GMT
+
+$ curl -si -X PUT localhost:8080/tasks/2
+HTTP/1.1 405 Method Not Allowed
+Allow: DELETE, GET, HEAD, PATCH
+Content-Type: text/plain; charset=utf-8
+Vary: Origin
+X-Content-Type-Options: nosniff
+X-Request-Id: OXEZCOCPVQIU
+Date: Fri, 16 Oct 2026 18:05:09 GMT
+Content-Length: 19
+
+Method Not Allowed</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Decide your error format on day one and never deviate. A stable JSON shape (<code>error</code> + optional <code>details</code>, maybe a machine-readable <code>code</code> like <code>"task_not_found"</code>) is what lets frontend and mobile teams write robust clients. Many teams adopt RFC 9457 "Problem Details" (<code>application/problem+json</code>) for this. And for 500s, log the real error with the request ID, but send the client only a generic message plus that ID.</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">A client sends <code>PATCH /tasks/2</code> with body <code>{"done":false}</code>. In our handler, why do we need <code>Done *bool</code> instead of <code>Done bool</code>?</div>
+    <div class="quiz-opts"><button>JSON can't decode into a plain bool</button><button>Pointers are faster to decode</button><button>To tell "done was sent as false" apart from "done was not sent at all"</button><button>Because the store requires pointers</button></div>
+    <div class="quiz-explain">With a plain <code>bool</code>, both a missing field and an explicit <code>false</code> decode to <code>false</code>. With <code>*bool</code>, a missing field stays <code>nil</code>, so we only update fields the client actually sent. That's the essence of PATCH semantics.</div>
+  </div>
+
+  <h2>Middleware: logging, recovery, request IDs, CORS</h2>
+  <p>Some work should happen for <em>every</em> request: logging it, assigning an ID, catching panics, adding CORS headers, checking auth. Copy-pasting that into each handler would be awful. <strong>Middleware</strong> solves it: a function that takes a Handler and returns a new Handler that does something before and/or after calling the original.</p>
+  <div class="code" data-file="the middleware shape"><pre><code class="language-go">type Middleware func(http.Handler) http.Handler
+
+func example(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// before: runs on the way in
+		next.ServeHTTP(w, r) // call the next layer
+		// after: runs on the way out
+	})
+}</code></pre></div>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 720 330" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="720" height="330" fill="#262624"/>
+      <defs>
+        <marker id="m17a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker>
+        <marker id="m17g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8fbf7f"/></marker>
+      </defs>
+      <text x="360" y="28" fill="#ece9e1" font-size="15" font-weight="600" text-anchor="middle">The middleware onion</text>
+      <rect x="40" y="50" width="640" height="250" rx="14" fill="#2e2d2a" stroke="#7fa6d9"/>
+      <text x="60" y="74" fill="#7fa6d9" font-size="13" font-family="JetBrains Mono, monospace">requestID</text>
+      <text x="660" y="74" fill="#a8a49a" font-size="11" text-anchor="end">sets X-Request-ID, puts it in ctx</text>
+      <rect x="80" y="86" width="560" height="200" rx="12" fill="#2b2a27" stroke="#e0b45c"/>
+      <text x="100" y="110" fill="#e0b45c" font-size="13" font-family="JetBrains Mono, monospace">logging</text>
+      <text x="620" y="110" fill="#a8a49a" font-size="11" text-anchor="end">start timer · wrap writer · log status+duration</text>
+      <rect x="120" y="122" width="480" height="150" rx="10" fill="#2e2d2a" stroke="#d97757"/>
+      <text x="140" y="146" fill="#d97757" font-size="13" font-family="JetBrains Mono, monospace">recovery</text>
+      <text x="580" y="146" fill="#a8a49a" font-size="11" text-anchor="end">defer recover() → 500</text>
+      <rect x="160" y="158" width="400" height="100" rx="10" fill="#2b2a27" stroke="#8fbf7f"/>
+      <text x="180" y="182" fill="#8fbf7f" font-size="13" font-family="JetBrains Mono, monospace">cors</text>
+      <text x="540" y="182" fill="#a8a49a" font-size="11" text-anchor="end">headers · answer preflight</text>
+      <rect x="250" y="196" width="220" height="48" rx="8" fill="#2e2d2a" stroke="#3a3936"/>
+      <text x="360" y="217" fill="#ece9e1" font-size="13" text-anchor="middle">mux → handler</text>
+      <text x="360" y="234" fill="#a8a49a" font-size="11" text-anchor="middle">createTask, getTask, ...</text>
+      <line x1="10" y1="220" x2="246" y2="220" stroke="#d97757" stroke-width="2" marker-end="url(#m17a)"/>
+      <text x="14" y="212" fill="#d97757" font-size="11">request in</text>
+      <line x1="474" y1="220" x2="710" y2="220" stroke="#8fbf7f" stroke-width="2" marker-end="url(#m17g)"/>
+      <text x="706" y="212" fill="#8fbf7f" font-size="11" text-anchor="end">response out</text>
+      <text x="360" y="318" fill="#a8a49a" font-size="12" text-anchor="middle">"before" code runs outside → in; "after" code runs inside → out</text>
+    </svg>
+    <figcaption>chain(mux, requestID, logging, recovery, cors): the first middleware listed is the outermost layer.</figcaption>
+  </figure>
+
+  <p>Before the full middleware file, here's one request traced end to end through a small onion: a logging middleware that captures the status code, then the mux, then the handler, and finally the response the client gets back:</p>
+  <div class="live" data-title="Trace two requests: middleware → mux → handler → response">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+)
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("log: start", r.Method, r.URL.Path)
+		sr := &amp;statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sr, r)
+		fmt.Println("log: done ", sr.status)
+	})
+}
+
+func getTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fmt.Println("handler: id =", id)
+	if id != "1" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintln(w, `{"id":1,"title":"write docs"}`)
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tasks/{id}", getTask)
+	h := logging(mux)
+
+	for _, path := range []string{"/tasks/1", "/tasks/7"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		fmt.Printf("client: %d %s\n", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="41-43" data-state="h=logging(mux)">The mux knows one route. <code>logging(mux)</code> wraps it, so <code>h</code> is the outermost layer, and every request enters there first.</li>
+      <li data-lines="45-47,21-22" data-state="path=/tasks/1; layer=logging" data-out="log: start GET /tasks/1">Request 1 enters <code>h.ServeHTTP</code>, which is the logging closure. Its "before" code runs.</li>
+      <li data-lines="23" data-state="sr.status=200 (default); sr=wraps rec">The middleware wraps the real writer in a <code>statusRecorder</code>. The default is 200, because a handler that never calls <code>WriteHeader</code> gets 200 implicitly.</li>
+      <li data-lines="24,42" data-state="layer=mux; pattern=&quot;GET /tasks/{id}&quot;; id=&quot;1&quot;">It passes <code>sr</code> (not <code>w</code>) to the mux. The mux matches the method and path, stores <code>id=1</code> on the request, and calls <code>getTask</code>.</li>
+      <li data-lines="30-31" data-state="layer=getTask; id=&quot;1&quot;" data-out="handler: id = 1"><code>r.PathValue("id")</code> reads what the mux captured.</li>
+      <li data-lines="36-37" data-state="rec.Code=200; body={&quot;id&quot;:1,...}">The happy path writes a header and then the body. <code>Fprintln</code> calls <code>sr.Write</code>. <code>statusRecorder</code> doesn't override <code>Write</code>, so the embedded writer's <code>Write</code> runs and sends an implicit 200. <code>sr.status</code> is never touched, which is why the default of 200 was important.</li>
+      <li data-lines="24-25" data-state="layer=logging (after); sr.status=200" data-out="log: done  200">The handler returns, the mux returns, and we are back in the middleware's "after" code with the status in hand.</li>
+      <li data-lines="48" data-state="rec.Code=200" data-out="client: 200 {&quot;id&quot;:1,&quot;title&quot;:&quot;write docs&quot;}">The recorder holds the response as the client sees it.</li>
+      <li data-lines="45-47,22-24" data-state="path=/tasks/7; id=&quot;7&quot;; sr.status=200" data-out="log: start GET /tasks/7\nhandler: id = 7">Request 2 follows the same path in: logging, then mux, then handler.</li>
+      <li data-lines="32-34,15-17" data-state="sr.status=404; rec.Code=404"><code>http.Error</code> calls <code>w.WriteHeader(404)</code>. Because <code>w</code> is our <code>sr</code>, the overridden method runs: it records 404 and then forwards to the real writer.</li>
+      <li data-lines="25,48" data-state="sr.status=404; rec.Code=404" data-out="log: done  404\nclient: 404 not found">The early <code>return</code> unwinds back to the logger, which now logs 404. Without the wrapper, middleware has no way to read the status back from a <code>ResponseWriter</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>log: start GET /tasks/1
+handler: id = 1
+log: done  200
+client: 200 {"id":1,"title":"write docs"}
+log: start GET /tasks/7
+handler: id = 7
+log: done  404
+client: 404 not found</pre></div>
+
+  <p>Here are the four middlewares for our API, plus a <code>chain</code> helper that applies them in a readable order:</p>
+  <div class="code" data-file="middleware.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"runtime/debug"
+	"time"
+)
+
+// Middleware wraps a Handler and returns a new Handler.
+type Middleware func(http.Handler) http.Handler
+
+// chain applies middlewares so the FIRST one listed is the OUTERMOST.
+func chain(h http.Handler, mws ...Middleware) http.Handler {
+	for i := len(mws) - 1; i &gt;= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+
+type ctxKey struct{}
+
+func requestIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(ctxKey{}).(string)
+	return id
+}
+
+// requestID reuses an incoming X-Request-ID or creates one.
+func requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			id = rand.Text()[:12]
+		}
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), ctxKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// statusRecorder remembers the status code the handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += n
+	return n, err
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func logging(log *slog.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &amp;statusRecorder{ResponseWriter: w}
+			next.ServeHTTP(rec, r)
+			if rec.status == 0 {
+				rec.status = http.StatusOK
+			}
+			log.Info("request",
+				"id", requestIDFrom(r.Context()),
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.status,
+				"bytes", rec.bytes,
+				"dur", time.Since(start).Round(time.Microsecond),
+			)
+		})
+	}
+}
+
+// recovery turns a panic in a handler into a 500 instead of a dropped connection.
+func recovery(log *slog.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if v := recover(); v != nil {
+					if v == http.ErrAbortHandler { // deliberate abort: re-panic
+						panic(v)
+					}
+					log.Error("panic",
+						"id", requestIDFrom(r.Context()),
+						"value", fmt.Sprint(v),
+						"stack_bytes", len(debug.Stack()))
+					w.Header().Set("Connection", "close")
+					writeError(w, http.StatusInternalServerError, "internal server error")
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// cors allows browser apps from the given origin to call the API.
+func cors(allowedOrigin string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Add("Vary", "Origin")
+			if r.Header.Get("Origin") == allowedOrigin {
+				w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+			}
+			// Preflight: the browser asks permission before the real request.
+			if r.Method == http.MethodOptions &amp;&amp; r.Header.Get("Access-Control-Request-Method") != "" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}</code></pre></div>
+  <p>A few design notes:</p>
+  <ul>
+    <li><strong>statusRecorder</strong> embeds the real <code>ResponseWriter</code> and overrides <code>WriteHeader</code>/<code>Write</code> to remember the status and byte count. The <code>Unwrap</code> method lets <code>http.ResponseController</code> reach the original writer for features like flushing.</li>
+    <li><strong>Request IDs</strong> travel in the request's <code>context.Context</code>, under an unexported key type (<code>ctxKey{}</code>) so no other package can collide with it. If the caller already sent <code>X-Request-ID</code> (say, from a load balancer), we keep it so one ID follows the request across services.</li>
+    <li><strong>recovery</strong> uses <code>defer</code> + <code>recover()</code>. Without it, <code>net/http</code> still recovers panics per connection, but it just logs a stack trace and drops the connection: the client gets no response at all. Ours logs with the request ID and returns a proper JSON 500.</li>
+    <li><strong>CORS</strong> (Cross-Origin Resource Sharing) is how a browser decides whether JavaScript on <code>localhost:5173</code> may call an API on <code>localhost:8080</code>. For non-simple requests the browser first sends an <code>OPTIONS</code> "preflight" asking permission; we answer it with 204 and the allowed methods and headers.</li>
+  </ul>
+
+  <div class="live" data-title="Build a chain, then watch a request go through it">
+    <pre><code class="language-go">func chain(h http.Handler, mws ...Middleware) http.Handler {
+	for i := len(mws) - 1; i &gt;= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+
+func tag(name string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Println("→ enter", name)
+			next.ServeHTTP(w, r)
+			fmt.Println("← leave", name)
+		})
+	}
+}
+
+h := chain(final, tag("A"), tag("B"), tag("C"))
+h.ServeHTTP(rec, req)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="18" data-state="mws=[A B C]; h=final">We ask for A outermost, then B, then C. <code>chain</code> receives the final handler and the three middlewares.</li>
+      <li data-lines="2-3" data-state="i=2; h=C(final)">We loop <strong>backwards</strong>. First C wraps the final handler.</li>
+      <li data-lines="2-3" data-state="i=1; h=B(C(final))">Then B wraps that.</li>
+      <li data-lines="2-5" data-state="i=0; h=A(B(C(final)))">Finally A wraps everything. Looping backwards is what makes the first one listed the outermost.</li>
+      <li data-lines="19,11" data-state="layer=A" data-out="→ enter A">A request arrives. The outer layer, A, runs its "before" code first.</li>
+      <li data-lines="12,11" data-state="layer=B" data-out="→ enter B">A calls <code>next.ServeHTTP</code>, which is B. B prints its "before".</li>
+      <li data-lines="12,11" data-state="layer=C" data-out="→ enter C\n  handler runs">B calls C, C calls the final handler.</li>
+      <li data-lines="13" data-state="unwinding=C→B→A" data-out="← leave C\n← leave B\n← leave A">Now each <code>next.ServeHTTP</code> returns and the "after" code runs in reverse order, like a stack. This is why the logger (outer) can measure the time spent in everything inside it.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Real output of the full program"><pre>→ enter A
+→ enter B
+→ enter C
+  handler runs
+← leave C
+← leave B
+← leave A</pre></div>
+
+  <p>The order of middleware is a design decision. In our API: <code>requestID</code> is outermost so every log line, including the panic log, has an ID. <code>logging</code> wraps <code>recovery</code> so it records the 500 that recovery produces. Here's what the panic endpoint looks like from both sides:</p>
+  <div class="output" data-label="Terminal"><pre>$ curl -si localhost:8080/panic
+HTTP/1.1 500 Internal Server Error
+Connection: close
+Content-Type: application/json
+Vary: Origin
+X-Request-Id: FGHZRWLG55R3
+Date: Fri, 16 Oct 2026 18:05:09 GMT
+Content-Length: 34
+
+{"error":"internal server error"}</pre></div>
+  <div class="output" data-label="Server log"><pre>time=2026-10-16T23:35:09.259+05:30 level=ERROR msg=panic id=FGHZRWLG55R3 value="something went very wrong" stack_bytes=2908
+time=2026-10-16T23:35:09.259+05:30 level=INFO msg=request id=FGHZRWLG55R3 method=GET path=/panic status=500 bytes=34 dur=171µs</pre></div>
+  <div class="output" data-label="Terminal: CORS preflight"><pre>$ curl -si -X OPTIONS localhost:8080/tasks -H 'Origin: http://localhost:5173' -H 'Access-Control-Request-Method: POST'
+HTTP/1.1 204 No Content
+Access-Control-Allow-Headers: Content-Type, X-Request-ID
+Access-Control-Allow-Methods: GET, POST, PATCH, DELETE
+Access-Control-Allow-Origin: http://localhost:5173
+Vary: Origin
+X-Request-Id: JMN4YVD2MOO6
+Date: Fri, 16 Oct 2026 18:05:09 GMT</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: panics in other goroutines</div><p><code>recover()</code> only catches panics in the <em>same goroutine</em>. If a handler starts <code>go doWork()</code> and that panics, your recovery middleware can't help and the whole process crashes. Any goroutine you start needs its own <code>defer</code>/<code>recover</code>, or better, use a library pattern like <code>errgroup</code> that handles it.</p></div>
+
+  <p>Here's the recovery idea in miniature. Watch the request ID travel through the context into the deferred <code>recover</code>, and the panic turn into a clean 500:</p>
+  <div class="live" data-title="A panic, recovered, with the request ID from context">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+)
+
+type ctxKey struct{}
+
+func requestID(next http.Handler) http.Handler {
+	n := 0
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		id := fmt.Sprintf("req-%d", n)
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), ctxKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func recovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				id, _ := r.Context().Value(ctxKey{}).(string)
+				fmt.Println("recovered:", v, "| id:", id)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "fine")
+	})
+	mux.HandleFunc("/boom", func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]int
+		m["x"] = 1 // panics: assignment to entry in nil map
+	})
+	h := requestID(recovery(mux))
+
+	for _, p := range []string{"/ok", "/boom"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		fmt.Printf("client: %d id=%s body=%q\n", rec.Code, rec.Header().Get("X-Request-ID"), strings.TrimSpace(rec.Body.String()))
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="46" data-state="h=requestID(recovery(mux)); n=0">The onion is <code>requestID</code> outside, then <code>recovery</code>, then the mux. <code>n</code> lives in the <code>requestID</code> closure and is shared by every request. A real server would need an atomic here because requests run concurrently; this demo runs them one at a time.</li>
+      <li data-lines="48-50,16-18" data-state="p=/ok; n=1; id=&quot;req-1&quot;; X-Request-ID=req-1">Request <code>/ok</code>: the outer layer creates an ID and sets the response header right away, so even an error response will carry it.</li>
+      <li data-lines="19-20" data-state="ctx[ctxKey{}]=&quot;req-1&quot;"><code>WithValue</code> makes a <strong>new</strong> context, and <code>r.WithContext</code> makes a shallow copy of the request carrying it. Every layer inside sees this new <code>r</code>.</li>
+      <li data-lines="26,33" data-state="deferred=[recover func]">Recovery registers its deferred function and then calls the mux.</li>
+      <li data-lines="39-40" data-state="body=&quot;fine\n&quot;">The handler writes normally. When it returns, the deferred function runs, <code>recover()</code> returns <code>nil</code>, and nothing happens.</li>
+      <li data-lines="51" data-state="rec.Code=200" data-out="client: 200 id=req-1 body=&quot;fine&quot;">The ID header made it to the client.</li>
+      <li data-lines="48-50,16-20" data-state="p=/boom; n=2; id=&quot;req-2&quot;">Request <code>/boom</code> gets <code>req-2</code> and goes through the same layers.</li>
+      <li data-lines="43-44" data-state="m=nil; panic=&quot;assignment to entry in nil map&quot;">Writing to a nil map panics. The goroutine starts unwinding the stack, running deferred calls as it goes. The handler and the mux have none.</li>
+      <li data-lines="26-29" data-state="v=assignment to entry in nil map; id=&quot;req-2&quot;" data-out="recovered: assignment to entry in nil map | id: req-2">Recovery's deferred function runs, and <code>recover()</code> stops the panic and returns its value. The <code>r</code> it captured already carries the ID, so the log line can be correlated with the client's report.</li>
+      <li data-lines="30" data-state="rec.Code=500">Nothing had been written yet, so we can still send a proper 500. If the handler had already written a body, this status would come too late.</li>
+      <li data-lines="51" data-state="rec.Code=500" data-out="client: 500 id=req-2 body=&quot;internal error&quot;">The client gets a clean error with the ID to quote in a bug report. The internal panic text is never leaked.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>client: 200 id=req-1 body="fine"
+recovered: assignment to entry in nil map | id: req-2
+client: 500 id=req-2 body="internal error"</pre></div>
+
+  <h2>http.Server: timeouts and why defaults are dangerous</h2>
+  <p><code>http.ListenAndServe(addr, h)</code> creates an <code>http.Server</code> with every timeout set to zero, which means <strong>no timeout at all</strong>. That lets a single client hold a connection open forever. The classic attack is <em>Slowloris</em>: open thousands of connections and send one header byte every few seconds. Each connection costs you a goroutine and a file descriptor, and eventually you run out. No exploit needed, just patience.</p>
+  <p>Always build the server yourself:</p>
+  <div class="code" data-file="main.go (excerpt)"><pre><code class="language-go">srv := &amp;http.Server{
+	Addr:              ":8080",
+	Handler:           handler,
+	ReadHeaderTimeout: 5 * time.Second,  // slowloris protection
+	ReadTimeout:       10 * time.Second, // whole request, incl. body
+	WriteTimeout:      15 * time.Second, // handler + writing response
+	IdleTimeout:       60 * time.Second, // keep-alive connections
+	MaxHeaderBytes:    1 &lt;&lt; 20,
+}</code></pre></div>
+  <table>
+    <thead><tr><th>Field</th><th>Clock starts</th><th>Clock stops</th><th>Protects against</th></tr></thead>
+    <tbody>
+      <tr><td><code>ReadHeaderTimeout</code></td><td>Connection accepted</td><td>Headers read</td><td>Slowloris</td></tr>
+      <tr><td><code>ReadTimeout</code></td><td>Connection accepted</td><td>Body fully read</td><td>Slow uploads</td></tr>
+      <tr><td><code>WriteTimeout</code></td><td>Headers read</td><td>Response written</td><td>Slow readers, stuck handlers</td></tr>
+      <tr><td><code>IdleTimeout</code></td><td>Response done</td><td>Next request starts</td><td>Idle keep-alive connections piling up</td></tr>
+    </tbody>
+  </table>
+  <div class="callout tip"><p><code>WriteTimeout</code> is a hard cutoff for the whole handler. If one endpoint legitimately needs longer (a big export, server-sent events), extend it per request with <code>http.NewResponseController(w).SetWriteDeadline(...)</code> rather than raising it for everyone. For a deadline on the <em>work</em> a handler does, wrap the handler with <code>http.TimeoutHandler</code> or use <code>context.WithTimeout(r.Context(), ...)</code> for downstream calls.</p></div>
+
+  <p>Every request carries a context. It is cancelled when the client disconnects or a deadline passes. A slow handler should watch <code>r.Context().Done()</code> and stop working for nobody:</p>
+  <div class="live" data-title="A handler that stops when the request's context is done">
+    <pre><code class="language-go">package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"time"
+)
+
+func slow(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("handler: working...")
+	select {
+	case &lt;-time.After(200 * time.Millisecond): // pretend to query a DB
+		fmt.Fprintln(w, "report ready")
+	case &lt;-r.Context().Done(): // client went away or deadline hit
+		fmt.Println("handler: stopping early:", r.Context().Err())
+		return
+	}
+}
+
+func main() {
+	// Fast enough: a generous deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	rec := httptest.NewRecorder()
+	slow(rec, httptest.NewRequest("GET", "/report", nil).WithContext(ctx))
+	cancel()
+	fmt.Printf("client: %d %q\n", rec.Code, strings.TrimSpace(rec.Body.String()))
+
+	// Too slow: the deadline fires first.
+	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	rec = httptest.NewRecorder()
+	slow(rec, httptest.NewRequest("GET", "/report", nil).WithContext(ctx))
+	fmt.Printf("client: %d %q\n", rec.Code, strings.TrimSpace(rec.Body.String()))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="25-27" data-state="deadline=1s; rec.Code=200">Request 1 gets a 1-second deadline. <code>WithContext</code> attaches it to the request, the same way the server attaches a context that is cancelled on client disconnect.</li>
+      <li data-lines="13-14" data-state="waiting on=timer(200ms), ctx.Done()" data-out="handler: working...">The handler blocks in a <code>select</code> and waits for whichever channel is ready first.</li>
+      <li data-lines="15-16" data-state="timer=fired at 200ms; ctx=still alive">The 200ms "query" finishes well before the 1s deadline, so the first case wins and we write the body.</li>
+      <li data-lines="28-29" data-state="rec.Code=200" data-out="client: 200 &quot;report ready&quot;">Back in <code>main</code>, we call <code>cancel()</code> right away to release the context's timer. <code>go vet</code> warns if you forget.</li>
+      <li data-lines="32-35,13-14" data-state="deadline=50ms" data-out="handler: working...">Request 2 has only 50ms. Same handler, same <code>select</code>.</li>
+      <li data-lines="17-19" data-state="ctx.Err()=context.DeadlineExceeded" data-out="handler: stopping early: context deadline exceeded">At 50ms the context's <code>Done()</code> channel closes, before the timer. We log and <code>return</code>. In a real app you would pass <code>r.Context()</code> to the DB call so the query itself is cancelled too.</li>
+      <li data-lines="36" data-state="rec.Code=200; body=&quot;&quot;" data-out="client: 200 &quot;&quot;"><strong>Gotcha:</strong> the handler returned without writing anything, so the status is the implicit <strong>200</strong> with an empty body. If the client is still listening (a deadline, not a disconnect), write a 503 or 504 before returning.</li>
+      <li data-lines="33" data-state="cancel=deferred, runs at exit">The deferred <code>cancel()</code> fires when <code>main</code> returns. Calling it after the deadline already passed is harmless.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>handler: working...
+client: 200 "report ready"
+handler: working...
+handler: stopping early: context deadline exceeded
+client: 200 ""</pre></div>
+
+  <h2>Graceful shutdown</h2>
+  <p>When you deploy a new version, the old process is told to stop, usually with <code>SIGTERM</code> (Kubernetes, systemd, Docker) or <code>SIGINT</code> (Ctrl+C). If it just dies, every in-flight request fails: a user's payment, half an upload. <strong>Graceful shutdown</strong> means: stop accepting new connections, let the current requests finish, then exit.</p>
+  <p>Go gives you two tools:</p>
+  <ul>
+    <li><code>signal.NotifyContext(ctx, signals...)</code> returns a context that is cancelled when one of those signals arrives.</li>
+    <li><code>srv.Shutdown(ctx)</code> closes the listeners, closes idle connections, then waits for active requests to finish, or until <code>ctx</code> expires. Meanwhile <code>ListenAndServe</code> returns <code>http.ErrServerClosed</code> immediately.</li>
+  </ul>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	// ctx is cancelled when we receive Ctrl+C (SIGINT) or SIGTERM (what Kubernetes sends).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	api := &amp;API{store: NewStore(time.Now)}
+	handler := chain(api.routes(),
+		requestID, // outermost: runs first, so every log line has an ID
+		logging(log),
+		recovery(log),
+		cors("http://localhost:5173"),
+	)
+
+	srv := &amp;http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,  // slowloris protection
+		ReadTimeout:       10 * time.Second, // whole request, incl. body
+		WriteTimeout:      15 * time.Second, // handler + writing response
+		IdleTimeout:       60 * time.Second, // keep-alive connections
+		MaxHeaderBytes:    1 &lt;&lt; 20,
+	}
+
+	// Start serving in a goroutine so main can wait for a signal.
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			errCh &lt;- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := &lt;-errCh:
+		return err // failed to start, e.g. port already in use
+	case &lt;-ctx.Done():
+		log.Info("shutdown signal received")
+	}
+
+	// Give in-flight requests up to 10s to finish.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	log.Info("server stopped cleanly")
+	return nil
+}</code></pre></div>
+
+  <div class="live" data-title="A graceful shutdown, step by step">
+    <pre><code class="language-go">ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+errCh := make(chan error, 1)
+go func() {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		errCh &lt;- err
+	}
+	close(errCh)
+}()
+select {
+case err := &lt;-errCh:
+	return err
+case &lt;-ctx.Done():
+	log.Info("shutdown signal received")
+}
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+if err := srv.Shutdown(shutdownCtx); err != nil {
+	return err
+}
+log.Info("server stopped cleanly")</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1-2" data-state="ctx=active">We get a context that will be cancelled by Ctrl+C or SIGTERM. <code>stop()</code> restores default signal handling, so a <em>second</em> Ctrl+C kills the process immediately.</li>
+      <li data-lines="3-9" data-state="server=serving; errCh=empty">The server runs in its own goroutine. <code>errCh</code> is buffered (size 1) so the goroutine can always send without blocking, even if nobody reads.</li>
+      <li data-lines="10-11" data-state="main=blocked in select">Main blocks on two events. If the port is taken, <code>ListenAndServe</code> fails right away and line 12 returns that error.</li>
+      <li data-lines="13-14" data-state="t=0.0s; /slow in flight; ctx=cancelled" data-out="msg=&quot;shutdown signal received&quot;">A client is in the middle of <code>GET /slow</code> (a 2-second job) when we send SIGINT. The context is cancelled and we fall through the select.</li>
+      <li data-lines="16-18" data-state="listener=closed; active=1; deadline=10s"><code>Shutdown</code> closes the listening socket at once, so new connections are refused (our curl to <code>/healthz</code> got "connection refused"). <code>ListenAndServe</code> returns <code>ErrServerClosed</code>, which the goroutine ignores. Shutdown now waits for the one active request.</li>
+      <li data-lines="18" data-state="t=1.5s; /slow finished; active=0" data-out="msg=request path=/slow status=200 dur=2.000581s">The slow request completes normally with a 200. The client never noticed anything.</li>
+      <li data-lines="21" data-state="server=stopped" data-out="msg=&quot;server stopped cleanly&quot;">With no active requests left, Shutdown returns <code>nil</code>, and we exit with status 0. Had the requests run past 10 seconds, Shutdown would return <code>context.DeadlineExceeded</code>.</li>
+    </ol>
+  </div>
+  <p>The real run. In one terminal a slow request was in flight; 0.5 seconds later the server got SIGINT:</p>
+  <div class="output" data-label="Terminal"><pre>$ curl -s localhost:8080/slow     # terminal 1
+{"result":"finished slow work"}
+$ kill -INT &lt;server pid&gt;         # terminal 2, 0.5s later
+$ curl -s localhost:8080/healthz  # terminal 2, during shutdown
+curl exit code: 7 (connection refused)</pre></div>
+  <div class="output" data-label="Server log"><pre>time=2026-10-16T23:35:09.776+05:30 level=INFO msg="shutdown signal received"
+time=2026-10-16T23:35:11.278+05:30 level=INFO msg=request id=D7J6652WHPJ4 method=GET path=/slow status=200 bytes=32 dur=2.000581s
+time=2026-10-16T23:35:11.353+05:30 level=INFO msg="server stopped cleanly"</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: shutdown in Kubernetes</div><p>When a pod is deleted, Kubernetes sends SIGTERM and removes the pod from the Service endpoints <em>at roughly the same time</em>, so a few new requests can still arrive just after the signal. Many teams first fail the readiness probe and sleep a few seconds before calling <code>Shutdown</code>. Make sure your shutdown timeout is shorter than <code>terminationGracePeriodSeconds</code> (30s by default). And don't make the signal context the server's <code>BaseContext</code>: that would cancel every in-flight request's context the moment the signal arrives, which is the opposite of graceful.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">After <code>srv.Shutdown(ctx)</code> is called, what does the still-running <code>srv.ListenAndServe()</code> return?</div>
+    <div class="quiz-opts"><button>It keeps running until all requests finish</button><button><code>http.ErrServerClosed</code>, immediately</button><button><code>nil</code></button><button><code>context.Canceled</code></button></div>
+    <div class="quiz-explain"><code>ListenAndServe</code> returns <code>ErrServerClosed</code> as soon as the listener is closed. Shutdown itself is what blocks until active requests are done. That's why the program must wait for <code>Shutdown</code> to return before exiting, not for <code>ListenAndServe</code>.</div>
+  </div>
+
+  <h3>Testing handlers without a network</h3>
+  <p>Because handlers are just functions of <code>(ResponseWriter, *Request)</code>, you can test them with <code>net/http/httptest</code>: <code>NewRequest</code> builds a request and <code>NewRecorder</code> is a fake <code>ResponseWriter</code> that captures status, headers and body. No ports, no sleeps. Injecting a fixed clock into the store makes the output exact.</p>
+  <div class="live" data-title="Run the handler tests: create, get, then a validation table">
+    <pre><code class="language-go">package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestServer() http.Handler {
+	fixed := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	api := &amp;API{store: NewStore(fixed)}
+	return api.routes()
+}
+
+func TestCreateAndGetTask(t *testing.T) {
+	h := newTestServer()
+
+	// httptest.NewRecorder is a fake ResponseWriter that records everything.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"title":"test me"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, body %s", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/tasks/1", nil))
+	want := `{"id":1,"title":"test me","done":false,"created_at":"2026-01-01T00:00:00Z"}` + "\n"
+	if rec.Body.String() != want {
+		t.Errorf("get:\n got %s\nwant %s", rec.Body, want)
+	}
+}
+
+func TestCreateValidation(t *testing.T) {
+	tests := []struct {
+		name, body string
+		want       int
+	}{
+		{"empty title", `{"title":""}`, 422},
+		{"unknown field", `{"title":"a","x":1}`, 400},
+		{"not json", `hello`, 400},
+	}
+	h := newTestServer()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/tasks", strings.NewReader(tc.body)))
+			if rec.Code != tc.want {
+				t.Errorf("got %d want %d (%s)", rec.Code, tc.want, rec.Body)
+			}
+		})
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17-18,11-14" data-state="h=api.routes(); clock=2026-01-01T00:00:00Z" data-out="=== RUN   TestCreateAndGetTask"><code>go test -v</code> starts the first test. <code>newTestServer</code> builds the real router with a <strong>fixed clock</strong>, so <code>created_at</code> is predictable. There is no port and no network.</li>
+      <li data-lines="21-23" data-state="method=POST; path=/tasks; body={&quot;title&quot;:&quot;test me&quot;}">We build a fake request and a recorder, then call <code>h.ServeHTTP</code> directly. It goes through the same middleware, mux and <code>createTask</code> handler that production uses.</li>
+      <li data-lines="24-26" data-state="rec.Code=201; store=[task 1]">The handler stored task 1 and answered <strong>201</strong>, so <code>Fatalf</code> doesn't fire. <code>Fatalf</code> (rather than <code>Errorf</code>) is used here because there's no point fetching a task that wasn't created.</li>
+      <li data-lines="28-29" data-state="method=GET; path=/tasks/1; rec=new recorder">Each request needs a <strong>fresh</strong> recorder; reusing one would append to the old body. The same <code>h</code> keeps its store, so task 1 is still there.</li>
+      <li data-lines="30-33" data-state="rec.Body==want" data-out="--- PASS: TestCreateAndGetTask (0.00s)">The exact JSON matches, including the fixed timestamp. The test returns and is marked PASS.</li>
+      <li data-lines="36-45" data-state="tests=3 cases; h=fresh server" data-out="=== RUN   TestCreateValidation">Second test: a table of bad bodies, each with the status we expect.</li>
+      <li data-lines="46-49" data-state="tc=empty title; rec.Code=422" data-out="=== RUN   TestCreateValidation/empty_title"><code>t.Run</code> starts a subtest; spaces in the name become underscores. The JSON is valid but the title is empty, so the handler returns 422.</li>
+      <li data-lines="46-52" data-state="tc=unknown field; rec.Code=400" data-out="=== RUN   TestCreateValidation/unknown_field"><code>"x"</code> is rejected by <code>DisallowUnknownFields</code> inside <code>readJSON</code>: 400.</li>
+      <li data-lines="46-52" data-state="tc=not json; rec.Code=400" data-out="=== RUN   TestCreateValidation/not_json"><code>hello</code> isn't JSON at all: 400. Every code matched, so no <code>Errorf</code> calls.</li>
+      <li data-lines="54-55" data-state="failures=0" data-out="--- PASS: TestCreateValidation (0.00s)\n    --- PASS: TestCreateValidation/empty_title (0.00s)\n    --- PASS: TestCreateValidation/unknown_field (0.00s)\n    --- PASS: TestCreateValidation/not_json (0.00s)\nPASS\nok  	example.com/ch17/api	0.533s">The parent reports after all its children finish, with the subtests indented under it. The whole run took about half a second, mostly compile time.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go test -v"><pre>=== RUN   TestCreateAndGetTask
+--- PASS: TestCreateAndGetTask (0.00s)
+=== RUN   TestCreateValidation
+=== RUN   TestCreateValidation/empty_title
+=== RUN   TestCreateValidation/unknown_field
+=== RUN   TestCreateValidation/not_json
+--- PASS: TestCreateValidation (0.00s)
+    --- PASS: TestCreateValidation/empty_title (0.00s)
+    --- PASS: TestCreateValidation/unknown_field (0.00s)
+    --- PASS: TestCreateValidation/not_json (0.00s)
+PASS
+ok  	example.com/ch17/api	0.533s</pre></div>
+
+  <h2>http.Client: calling other services</h2>
+  <p>Services also call other services. The same warning applies: <code>http.Get</code> and <code>http.DefaultClient</code> have <strong>no timeout</strong>. If the other side hangs, your goroutine hangs forever, and under load you'll pile up thousands of them. Always create a client with a <code>Timeout</code>, and pass a context so the caller's deadline or cancellation flows through.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+type Task struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+}
+
+// fetchTask is how a well-behaved client call looks.
+func fetchTask(ctx context.Context, c *http.Client, url string) (Task, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Task{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return Task{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close() // ALWAYS close the body, or the connection leaks
+
+	if resp.StatusCode != http.StatusOK {
+		// Read a little of the body for the error message, then give up.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return Task{}, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, msg)
+	}
+	var t Task
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1&lt;&lt;20)).Decode(&amp;t); err != nil {
+		return Task{}, fmt.Errorf("decoding: %w", err)
+	}
+	return t, nil
+}
+
+func main() {
+	// httptest.NewServer starts a real server on a random local port.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/1":
+			w.Write([]byte(`{"id":1,"title":"from the server"}`))
+		case "/slow":
+			time.Sleep(300 * time.Millisecond)
+			w.Write([]byte(`{"id":2}`))
+		default:
+			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// Never use http.DefaultClient in production: it has NO timeout.
+	client := &amp;http.Client{Timeout: 2 * time.Second}
+
+	t, err := fetchTask(context.Background(), client, srv.URL+"/tasks/1")
+	fmt.Printf("ok:       %+v err=%v\n", t, err)
+
+	_, err = fetchTask(context.Background(), client, srv.URL+"/tasks/9")
+	fmt.Println("404:     ", err)
+
+	// A per-call deadline via context, shorter than the client timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = fetchTask(ctx, client, srv.URL+"/slow")
+	fmt.Println("ctx:     ", err)
+	fmt.Println("is DeadlineExceeded:", errors.Is(err, context.DeadlineExceeded))
+
+	// Client.Timeout covers the whole exchange, including reading the body.
+	short := &amp;http.Client{Timeout: 50 * time.Millisecond}
+	_, err = fetchTask(context.Background(), short, srv.URL+"/slow")
+	fmt.Println("timeout: ", err)
+}</code></pre></div>
+  <div class="output" data-label="Output (the random port is shown as PORT)"><pre>ok:       {ID:1 Title:from the server} err=&lt;nil&gt;
+404:      unexpected status 404: {"error":"task not found"}
+
+ctx:      request failed: Get "http://127.0.0.1:PORT/slow": context deadline exceeded
+is DeadlineExceeded: true
+timeout:  request failed: Get "http://127.0.0.1:PORT/slow": context deadline exceeded (Client.Timeout exceeded while awaiting headers)</pre></div>
+  <p>Rules for every client call:</p>
+  <ul>
+    <li><strong>Close the body</strong> with <code>defer resp.Body.Close()</code>, even on non-200 responses. An unclosed body keeps the TCP connection busy and it can't be reused.</li>
+    <li><strong>Check the status code.</strong> A 404 or 500 is <em>not</em> an error from <code>Do</code>: <code>err</code> is only for network-level failures.</li>
+    <li><strong>Limit what you read</strong>, just like on the server.</li>
+    <li><strong>Reuse one client.</strong> <code>http.Client</code> is safe for concurrent use and holds a connection pool. Creating one per request throws the pool away.</li>
+  </ul>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>For high-traffic service-to-service calls, tune the <code>http.Transport</code>: <code>MaxIdleConnsPerHost</code> defaults to only 2, which causes constant reconnects when you make many parallel calls to one host. Set it to match your concurrency. Add retries only for idempotent requests (GET, PUT, DELETE), with exponential backoff and jitter, and always under an overall deadline.</p></div>
+
+  <h2>database/sql: talking to a real database</h2>
+  <p>Most APIs store data in a SQL database. Go's <code>database/sql</code> package is a generic interface; a <strong>driver</strong> package teaches it a specific database (PostgreSQL via <code>pgx</code>, MySQL, SQLite...). You import the driver for its side effect of registering itself, then only use <code>database/sql</code> types in your code.</p>
+  <p>The most important fact: <strong><code>*sql.DB</code> is not a connection, it's a connection pool</strong>. Create it once at startup, share it everywhere (it's safe for concurrent use), and close it at shutdown. Each query borrows a connection and gives it back when done.</p>
+  <p>Here's our task store written against SQL. It needs a driver and a database to actually run, but it was compiled and checked with <code>go vet</code>:</p>
+  <div class="code" data-file="sqlstore.go"><pre><code class="language-go">package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+	// The driver registers itself in an init function. Pick one, e.g.:
+	// _ "github.com/jackc/pgx/v5/stdlib"   // PostgreSQL, driver name "pgx"
+	// _ "modernc.org/sqlite"               // SQLite (pure Go), driver name "sqlite"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Task struct {
+	ID        int64
+	Title     string
+	Done      bool
+	CreatedAt time.Time
+}
+
+type SQLStore struct {
+	db *sql.DB
+}
+
+// Open creates the pool and checks that the database is reachable.
+func Open(ctx context.Context, driver, dsn string) (*SQLStore, error) {
+	db, err := sql.Open(driver, dsn) // does NOT connect yet
+	if err != nil {
+		return nil, err
+	}
+	// Pool tuning: *sql.DB is a pool of connections, safe for concurrent use.
+	db.SetMaxOpenConns(25)                  // hard cap on connections to the DB
+	db.SetMaxIdleConns(25)                  // keep them warm between requests
+	db.SetConnMaxLifetime(30 * time.Minute) // recycle (load balancers, failover)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil { // the first real connection
+		db.Close()
+		return nil, fmt.Errorf("ping: %w", err)
+	}
+	return &amp;SQLStore{db: db}, nil
+}
+
+func (s *SQLStore) Close() error { return s.db.Close() }
+
+// Get reads one row. Placeholders ($1) keep user input out of the SQL text.
+func (s *SQLStore) Get(ctx context.Context, id int64) (Task, error) {
+	var t Task
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, title, done, created_at FROM tasks WHERE id = $1`, id,
+	).Scan(&amp;t.ID, &amp;t.Title, &amp;t.Done, &amp;t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrNotFound // translate to the app's own error
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("get task %d: %w", id, err)
+	}
+	return t, nil
+}
+
+// List reads many rows. Note the three things you must always do.
+func (s *SQLStore) List(ctx context.Context, limit int) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title, done, created_at FROM tasks ORDER BY id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() // 1. close, or the connection never returns to the pool
+
+	var out []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&amp;t.ID, &amp;t.Title, &amp;t.Done, &amp;t.CreatedAt); err != nil {
+			return nil, err // 2. check Scan errors
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err() // 3. check the error that ended the loop
+}
+
+// Create inserts a row and returns it (RETURNING is PostgreSQL/SQLite syntax).
+func (s *SQLStore) Create(ctx context.Context, title string) (Task, error) {
+	t := Task{Title: title}
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO tasks (title) VALUES ($1) RETURNING id, done, created_at`, title,
+	).Scan(&amp;t.ID, &amp;t.Done, &amp;t.CreatedAt)
+	return t, err
+}
+
+// Complete marks a task done; ExecContext is for statements without rows.
+func (s *SQLStore) Complete(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET done = true WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MoveTasks shows a transaction: all statements succeed together or not at all.
+func (s *SQLStore) MoveTasks(ctx context.Context, fromUser, toUser int64) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	// Rollback is a no-op after a successful Commit, so always defer it.
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET owner_id = $1 WHERE owner_id = $2`, toUser, fromUser); err != nil {
+		return fmt.Errorf("move: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit (action, from_user, to_user) VALUES ('move', $1, $2)`, fromUser, toUser); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	return tx.Commit()
+}
+
+// BulkInsert shows a prepared statement: parsed once, executed many times.
+func (s *SQLStore) BulkInsert(ctx context.Context, titles []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO tasks (title) VALUES ($1)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, title := range titles {
+		if _, err := stmt.ExecContext(ctx, title); err != nil {
+			return fmt.Errorf("insert %q: %w", title, err)
+		}
+	}
+	return tx.Commit()
+}</code></pre></div>
+  <p>And what happens if you forget the driver import:</p>
+  <div class="output" data-label="go run ."><pre>sql: unknown driver "pgx" (forgotten import?)</pre></div>
+
+  <table>
+    <thead><tr><th>Method</th><th>Use for</th><th>Must remember</th></tr></thead>
+    <tbody>
+      <tr><td><code>QueryRowContext</code></td><td>Exactly one row</td><td>Error comes from <code>Scan</code>; check <code>sql.ErrNoRows</code></td></tr>
+      <tr><td><code>QueryContext</code></td><td>Many rows</td><td><code>defer rows.Close()</code> and check <code>rows.Err()</code></td></tr>
+      <tr><td><code>ExecContext</code></td><td>INSERT / UPDATE / DELETE without rows</td><td><code>RowsAffected()</code> to detect "nothing matched"</td></tr>
+      <tr><td><code>BeginTx</code></td><td>Several statements as one unit</td><td><code>defer tx.Rollback()</code>, then <code>Commit()</code>; use <code>tx</code>, not <code>db</code>, inside</td></tr>
+      <tr><td><code>PrepareContext</code></td><td>Same statement many times</td><td><code>defer stmt.Close()</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout danger"><div class="callout-title">Danger: SQL injection</div><p>Never build SQL with string formatting: <code>fmt.Sprintf("SELECT ... WHERE title = '%s'", title)</code>. A title of <code>'; DROP TABLE tasks; --</code> becomes part of your SQL. Always use placeholders (<code>$1</code> for PostgreSQL, <code>?</code> for MySQL/SQLite) and pass values as arguments. The driver sends them separately from the SQL text, so they can never be executed as code.</p></div>
+  <div class="callout warn"><div class="callout-title">Gotchas</div><p><strong>NULL columns</strong> can't be scanned into a plain <code>string</code>; use <code>sql.NullString</code>, <code>sql.Null[T]</code> (Go 1.22+) or a pointer. <strong>Leaked rows</strong>: returning early from a <code>rows.Next()</code> loop without <code>rows.Close()</code> keeps a connection checked out; leak enough and every query blocks waiting for the pool. <strong>Inside a transaction</strong>, using <code>s.db</code> instead of <code>tx</code> runs that query on a different connection, outside the transaction.</p></div>
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Always use the <code>...Context</code> variants and pass <code>r.Context()</code> from the handler. When a client disconnects or a deadline passes, the driver cancels the query on the database side too, instead of letting an expensive query run for nobody. Set <code>SetMaxOpenConns</code> deliberately: total connections = instances × max open, and that has to fit under your database's connection limit. Libraries like <code>sqlc</code> (generate type-safe Go from SQL) or <code>sqlx</code> remove most of the <code>Scan</code> boilerplate while staying close to plain SQL.</p></div>
+
+  <h3>Practice</h3>
+  <details class="exercise">
+    <summary>Exercise 1: add pagination to GET /tasks</summary>
+    <p>Support <code>GET /tasks?limit=10&amp;offset=20</code>. Default limit 20, maximum 100. Reject negative or non-numeric values with a 400 and our usual error shape. Hint: read with <code>r.URL.Query().Get</code>, parse with <code>strconv.Atoi</code>, and slice the sorted list with bounds checks (<code>min</code> is your friend).</p>
+    <div class="solution-label">Solution</div>
+  <div class="live" data-title="Trace four paginated requests through the mux">
+    <pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+)
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// intParam reads a non-negative integer query parameter with a default.
+func intParam(r *http.Request, name string, def int) (int, error) {
+	s := r.URL.Query().Get(name)
+	if s == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n &lt; 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", name)
+	}
+	return n, nil
+}
+
+func listTasks(all []int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, err := intParam(r, "limit", 20)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		offset, err := intParam(r, "offset", 0)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		limit = min(limit, 100)
+		start := min(offset, len(all))
+		end := min(start+limit, len(all))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": all[start:end], "offset": offset, "limit": limit, "total": len(all),
+		})
+	}
+}
+
+func main() {
+	ids := make([]int, 25)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /tasks", listTasks(ids))
+
+	for _, url := range []string{"/tasks?limit=5", "/tasks?limit=5&amp;offset=22", "/tasks?offset=100", "/tasks?limit=-1"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		fmt.Printf("GET %-26s %d %s", url, rec.Code, rec.Body)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="52-57" data-state="ids=[1..25]; route=&quot;GET /tasks&quot;"><code>listTasks(ids)</code> returns a closure that captures the 25 IDs, and the mux routes <code>GET /tasks</code> to it.</li>
+      <li data-lines="59-61,31-32" data-state="url=/tasks?limit=5">Request 1 goes into the mux, which ignores the query string when matching and calls our handler.</li>
+      <li data-lines="18-27" data-state="limit=5">In <code>intParam</code>, <code>Query().Get("limit")</code> returns <code>"5"</code>, which parses fine and isn't negative.</li>
+      <li data-lines="37,19-21" data-state="limit=5; offset=0">There is no <code>offset</code> in the URL, so <code>Get</code> returns <code>""</code> and we use the default 0.</li>
+      <li data-lines="42-44" data-state="limit=5; start=0; end=5">Clamp everything with <code>min</code>: limit to 100, start to the length, end to the length. These clamps mean slicing can never panic.</li>
+      <li data-lines="45-47,11-14,62" data-state="items=[1 2 3 4 5]" data-out="GET /tasks?limit=5             200 {&quot;items&quot;:[1,2,3,4,5],&quot;limit&quot;:5,&quot;offset&quot;:0,&quot;total&quot;:25}"><code>writeJSON</code> sets the header, sends 200, and encodes. The keys come out sorted because it's a map.</li>
+      <li data-lines="43-44,62" data-state="offset=22; start=22; end=min(27,25)=25" data-out="GET /tasks?limit=5&amp;offset=22   200 {&quot;items&quot;:[23,24,25],&quot;limit&quot;:5,&quot;offset&quot;:22,&quot;total&quot;:25}">Request 2: the last page. <code>start+limit</code> would be 27, past the end, and <code>min</code> trims it to 25, so only 3 items come back.</li>
+      <li data-lines="43-46,62" data-state="limit=20; offset=100; start=25; end=25; items=all[25:25]" data-out="GET /tasks?offset=100          200 {&quot;items&quot;:[],&quot;limit&quot;:20,&quot;offset&quot;:100,&quot;total&quot;:25}">Request 3: offset beyond the end. <code>start</code> clamps to 25, so we get the empty slice <code>all[25:25]</code>. It is empty but <strong>not nil</strong>, so it encodes as <code>[]</code>, not <code>null</code>. Clients will thank you.</li>
+      <li data-lines="32-35,23-25" data-state="s=&quot;-1&quot;; n=-1; err=limit must be a non-negative integer">Request 4: <code>Atoi("-1")</code> succeeds, but <code>n &lt; 0</code> fails our rule. The handler writes 400 and <strong>returns</strong>, so the success code below never runs.</li>
+      <li data-lines="62" data-state="rec.Code=400" data-out="GET /tasks?limit=-1            400 {&quot;error&quot;:&quot;limit must be a non-negative integer&quot;}">The client gets a clear, structured error.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="Terminal"><pre>GET /tasks?limit=5             200 {"items":[1,2,3,4,5],"limit":5,"offset":0,"total":25}
+GET /tasks?limit=5&amp;offset=22   200 {"items":[23,24,25],"limit":5,"offset":22,"total":25}
+GET /tasks?offset=100          200 {"items":[],"limit":20,"offset":100,"total":25}
+GET /tasks?limit=-1            400 {"error":"limit must be a non-negative integer"}</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: an API-key auth middleware</summary>
+    <p>Write <code>func requireKey(key string) Middleware</code> that rejects requests without the header <code>Authorization: Bearer &lt;key&gt;</code> with a 401 JSON error, except for <code>GET /healthz</code>. Compare keys with <code>crypto/subtle.ConstantTimeCompare</code> so an attacker can't guess the key from response timing. Test it with <code>httptest</code>.</p>
+    <div class="solution-label">Solution</div>
+  <div class="code" data-file="auth.go"><pre><code class="language-go">package auth
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+type Middleware func(http.Handler) http.Handler
+
+func requireKey(key string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet &amp;&amp; r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r) // public endpoint
+				return
+			}
+			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]string{"error": "missing or invalid API key"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}</code></pre></div>
+  <div class="live" data-title="Run the auth middleware's test table">
+    <pre><code class="language-go">package auth
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestRequireKey(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := requireKey("s3cret")(ok)
+
+	tests := []struct {
+		name, method, path, auth string
+		want                     int
+	}{
+		{"health is public", "GET", "/healthz", "", 200},
+		{"no header", "GET", "/tasks", "", 401},
+		{"wrong scheme", "GET", "/tasks", "Basic s3cret", 401},
+		{"wrong key", "GET", "/tasks", "Bearer nope", 401},
+		{"right key", "POST", "/tasks", "Bearer s3cret", 200},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.auth != "" {
+				req.Header.Set("Authorization", tc.auth)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Errorf("got %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10-13" data-state="h=requireKey(&quot;s3cret&quot;)(ok)">The innermost handler just returns 200. We wrap it with the middleware under test. <code>requireKey("s3cret")</code> returns a <code>Middleware</code>, and calling that with <code>ok</code> returns the wrapped handler.</li>
+      <li data-lines="25-32" data-state="tc=health is public; auth=&quot;&quot;" data-out="=== RUN   TestRequireKey\n=== RUN   TestRequireKey/health_is_public">First case: <code>GET /healthz</code> with no header. The middleware's early exit for the health path calls <code>next</code> straight away.</li>
+      <li data-lines="33-35" data-state="rec.Code=200; want=200">The response is 200 from <code>ok</code>, which matches, so the subtest passes.</li>
+      <li data-lines="25-32" data-state="tc=no header; rec.Code=401" data-out="=== RUN   TestRequireKey/no_header"><code>/tasks</code> with no <code>Authorization</code> header: <code>CutPrefix</code> reports <code>ok=false</code>, the middleware writes 401 and <strong>never calls next</strong>.</li>
+      <li data-lines="25-32" data-state="tc=wrong scheme; header=&quot;Basic s3cret&quot;; rec.Code=401" data-out="=== RUN   TestRequireKey/wrong_scheme">The right secret with the wrong scheme still fails, because the prefix must be exactly <code>"Bearer "</code>.</li>
+      <li data-lines="25-32" data-state="tc=wrong key; got=&quot;nope&quot;; rec.Code=401" data-out="=== RUN   TestRequireKey/wrong_key">The prefix is fine, but <code>ConstantTimeCompare</code> returns 0 for the wrong key. For keys of equal length it takes the same time no matter which byte differs, so response timing doesn't reveal how much of a guess was right.</li>
+      <li data-lines="25-32" data-state="tc=right key; method=POST; rec.Code=200" data-out="=== RUN   TestRequireKey/right_key">The correct key passes, so the middleware calls <code>next</code> and <code>ok</code> writes 200. Every case matched.</li>
+      <li data-lines="37-38" data-state="failures=0" data-out="--- PASS: TestRequireKey (0.00s)\n    --- PASS: TestRequireKey/health_is_public (0.00s)\n    --- PASS: TestRequireKey/no_header (0.00s)\n    --- PASS: TestRequireKey/wrong_scheme (0.00s)\n    --- PASS: TestRequireKey/wrong_key (0.00s)\n    --- PASS: TestRequireKey/right_key (0.00s)\nPASS\nok  	example.com/ch17/ex2	0.455s">The parent's PASS line prints after all its subtests, followed by the package summary.</li>
+    </ol>
+  </div>
+  <div class="output" data-label="go test -v"><pre>=== RUN   TestRequireKey
+=== RUN   TestRequireKey/health_is_public
+=== RUN   TestRequireKey/no_header
+=== RUN   TestRequireKey/wrong_scheme
+=== RUN   TestRequireKey/wrong_key
+=== RUN   TestRequireKey/right_key
+--- PASS: TestRequireKey (0.00s)
+    --- PASS: TestRequireKey/health_is_public (0.00s)
+    --- PASS: TestRequireKey/no_header (0.00s)
+    --- PASS: TestRequireKey/wrong_scheme (0.00s)
+    --- PASS: TestRequireKey/wrong_key (0.00s)
+    --- PASS: TestRequireKey/right_key (0.00s)
+PASS
+ok  	example.com/ch17/ex2	0.455s</pre></div>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>Everything is a <code>Handler</code>: <code>ServeHTTP(w, r)</code>. <code>HandlerFunc</code> adapts plain functions; routers and middleware are Handlers too.</li>
+      <li>Write responses in order: headers → status → body. Each request runs in its own goroutine, so protect shared state.</li>
+      <li>Go 1.22 <code>ServeMux</code> patterns (<code>GET /tasks/{id}</code>, <code>{path...}</code>, <code>{$}</code>) plus <code>r.PathValue</code> cover most routing; the most specific pattern wins and 405s are automatic.</li>
+      <li>Centralize JSON: <code>MaxBytesReader</code>, <code>DisallowUnknownFields</code>, friendly errors, one error shape, deliberate status codes, validation that reports all problems.</li>
+      <li>Middleware is <code>func(http.Handler) http.Handler</code>; the first in the chain is the outermost. Use it for request IDs, logging, recovery and CORS.</li>
+      <li>Never ship the zero-timeout defaults: set <code>ReadHeaderTimeout</code>, <code>ReadTimeout</code>, <code>WriteTimeout</code>, <code>IdleTimeout</code> on the server and <code>Timeout</code> on every client.</li>
+      <li>Graceful shutdown = <code>signal.NotifyContext</code> + <code>srv.Shutdown(ctxWithTimeout)</code>; wait for Shutdown, not ListenAndServe.</li>
+      <li>On the client side: reuse one client, pass contexts, close bodies, check status codes.</li>
+      <li><code>*sql.DB</code> is a pool: open once, use <code>...Context</code> methods with placeholders, handle <code>sql.ErrNoRows</code>, always close rows, and use <code>defer tx.Rollback()</code> + <code>Commit()</code> for transactions.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

@@ -1,0 +1,1465 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 10 · Error Handling — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="10">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part III · Chapter 10</div>
+  <h1>Error Handling</h1>
+  <p class="lead">In Go, an error is not an exception that flies up the stack. It is a plain value that a function hands back, and you decide what to do with it. This chapter shows you why Go made that choice, and how to build errors that are easy to read, easy to check and easy to debug at 3 a.m.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Intermediate</span>
+    <span class="pill">▶ 14 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>What "errors are values" means, and the tiny <code>error</code> interface behind it</li>
+      <li>Creating errors with <code>errors.New</code> and <code>fmt.Errorf</code>, and why <code>if err != nil</code> is everywhere</li>
+      <li>Wrapping with <code>%w</code>, and checking with <code>errors.Is</code>, <code>errors.As</code>, <code>errors.AsType</code> and <code>errors.Unwrap</code></li>
+      <li>Sentinel errors, custom error types with fields, <code>errors.Join</code> and multi-<code>%w</code></li>
+      <li>How to add context at each layer without repeating yourself, and "handle errors once"</li>
+      <li>When to <code>panic</code>, how <code>recover</code> works, and why a panic in a goroutine kills the whole program</li>
+      <li>Real-world gotchas: the typed-nil error, ignoring <code>Close</code>, and mapping errors to HTTP status codes</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Why Go treats errors as values</h2>
+  <p>Most languages you may know (Java, Python, JavaScript) use <strong>exceptions</strong>. When something fails, the code "throws", and the error jumps up through function after function until some <code>try/catch</code> grabs it. That is convenient to write, but hard to read: by looking at a line of code you cannot tell whether it can fail, or where the failure will land.</p>
+  <p>Go's designers chose a different path. In Go, a function that can fail simply <strong>returns an extra value</strong> that describes the failure. That value is called an <em>error</em>. It is not magic. It is a normal value, just like an <code>int</code> or a <code>string</code>, so you can store it, compare it, pass it to functions, put it in a slice, or wrap it inside another error.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>An exception is a fire alarm: it goes off and everyone runs, and you are not sure who will deal with it. A Go error is a <strong>receipt</strong> the function hands you saying "this did not work, here is why". You hold it in your hand. You decide: fix it, retry, add a note and pass it to your boss, or throw it away (on purpose).</p></div>
+
+  <p>This gives you three big benefits:</p>
+  <ul>
+    <li><strong>Visible failure points.</strong> If a call returns <code>(T, error)</code>, you can see right there that it can fail.</li>
+    <li><strong>Explicit control flow.</strong> There are no hidden jumps. The code runs top to bottom, and failure handling is ordinary <code>if</code> and <code>return</code>.</li>
+    <li><strong>Errors are programmable.</strong> Because they are values, you can attach data (which field was invalid, which HTTP status, how long to wait before retrying).</li>
+  </ul>
+  <p>The price is that you type <code>if err != nil</code> a lot. We will see why that is less painful than it looks, and how seniors make every one of those checks useful.</p>
+
+  <!-- ============================================================ -->
+  <h2>The error interface, errors.New and fmt.Errorf</h2>
+  <p>Here is the complete definition of <code>error</code>, built into the language:</p>
+  <div class="code" data-file="builtin"><pre><code class="language-go">type error interface {
+	Error() string
+}</code></pre></div>
+  <p>That is all. An <strong>interface</strong> (Chapter 8) is a set of methods. Any type that has a method <code>Error() string</code> <em>is</em> an error. The zero value of an interface is <code>nil</code>, so "no error" is written <code>nil</code>.</p>
+  <p>There are two everyday ways to make one:</p>
+  <ul>
+    <li><code>errors.New("text")</code> makes an error with a fixed message.</li>
+    <li><code>fmt.Errorf("format %d", x)</code> makes an error with a formatted message, using the same verbs as <code>fmt.Printf</code>.</li>
+  </ul>
+  <p>By convention, the error is the <strong>last</strong> return value, and when the error is non-nil the other return values should be treated as meaningless (usually zero values).</p>
+  <div class="live" data-title="Errors are just values you check">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+)
+
+// divide returns an error value instead of crashing.
+func divide(a, b int) (int, error) {
+	if b == 0 {
+		return 0, errors.New("division by zero")
+	}
+	return a / b, nil
+}
+
+func main() {
+	// 1. A standard library function that can fail.
+	n, err := strconv.Atoi("42x")
+	if err != nil {
+		fmt.Println("Atoi failed:", err)
+	} else {
+		fmt.Println("parsed:", n)
+	}
+
+	// 2. Our own function.
+	q, err := divide(10, 2)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("10 / 2 =", q)
+
+	_, err = divide(1, 0)
+	fmt.Println("err is nil?", err == nil)
+	fmt.Println("err message:", err.Error())
+
+	// 3. fmt.Errorf builds a message with formatting.
+	user := "sharad"
+	err = fmt.Errorf("user %q: quota exceeded (%d/%d)", user, 11, 10)
+	fmt.Println(err)
+	fmt.Printf("type: %T\n", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="19" data-state="n=0; err=*strconv.NumError"><code>strconv.Atoi("42x")</code> cannot parse the trailing <code>x</code>. It returns <code>0</code> and a non-nil error instead of crashing.</li>
+      <li data-lines="20-21" data-state="n=0; err=*strconv.NumError" data-out="Atoi failed: strconv.Atoi: parsing &quot;42x&quot;: invalid syntax">We check <code>err</code> first. Its message already says who failed and why.</li>
+      <li data-lines="27,10-14" data-state="a=10; b=2">Now our own <code>divide(10, 2)</code>. <code>b</code> is not zero, so we skip the guard and return <code>5, nil</code>.</li>
+      <li data-lines="28-32" data-state="q=5; err=nil" data-out="10 / 2 = 5"><code>err</code> is nil, so the early <code>return</code> is skipped and we print the result.</li>
+      <li data-lines="34,11-12" data-state="a=1; b=0; err=*errors.errorString"><code>divide(1, 0)</code> hits the guard and returns <code>errors.New("division by zero")</code>. We discard the int with <code>_</code>.</li>
+      <li data-lines="35-36" data-state="err=division by zero" data-out="err is nil? false\nerr message: division by zero">An error is an ordinary value: you can compare it with <code>nil</code> and call its <code>Error()</code> method.</li>
+      <li data-lines="39-41" data-state="user=&quot;sharad&quot;; err=user &quot;sharad&quot;: quota exceeded (11/10)" data-out="user &quot;sharad&quot;: quota exceeded (11/10)"><code>fmt.Errorf</code> builds the message with <code>Printf</code> verbs. <code>%q</code> adds the quotes.</li>
+      <li data-lines="42" data-state="err=*errors.errorString" data-out="type: *errors.errorString">Without <code>%w</code>, <code>Errorf</code> returns the same simple type as <code>errors.New</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Atoi failed: strconv.Atoi: parsing "42x": invalid syntax
+10 / 2 = 5
+err is nil? false
+err message: division by zero
+user "sharad": quota exceeded (11/10)
+type: *errors.errorString</pre></div>
+  <p>Notice a few things:</p>
+  <ul>
+    <li><code>strconv.Atoi</code>'s message already says who failed and why: <code>strconv.Atoi: parsing "42x": invalid syntax</code>. Good errors read like a sentence.</li>
+    <li>The concrete type behind <code>errors.New</code> is <code>*errors.errorString</code>, a tiny struct with one string field. You never use that type directly; you only see it through the <code>error</code> interface.</li>
+    <li>Calling <code>err.Error()</code> gives the text. <code>fmt.Println(err)</code> calls it for you.</li>
+  </ul>
+
+  <div class="callout tip"><div class="callout-title">Style rule: how to word messages</div><p>Error strings start with a <strong>lowercase</strong> letter and have <strong>no trailing punctuation</strong>, because they usually get glued into a bigger message: <code>"open config: permission denied"</code> reads well, while <code>"Open config.: Permission denied."</code> does not. <code>go vet</code>'s friends (staticcheck ST1005) will flag this.</p></div>
+
+  <p>You cannot "forget" that a function returns an error, because Go makes you deal with every return value:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n := strconv.Atoi("5")
+	fmt.Println(n)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre>./main.go:9:7: assignment mismatch: 1 variable but strconv.Atoi returns 2 values</pre></div>
+  <p>You can still explicitly throw an error away with the blank identifier, <code>n, _ := strconv.Atoi("5")</code>, but now the decision is visible in code review.</p>
+
+  <!-- ============================================================ -->
+  <h2>The if err != nil pattern, and why it is fine</h2>
+  <p>Every Go programmer writes this shape thousands of times:</p>
+  <div class="code" data-file="pattern"><pre><code class="language-go">v, err := doSomething()
+if err != nil {
+	return fmt.Errorf("do something: %w", err)
+}
+// happy path continues here, using v</code></pre></div>
+  <p>Why not something shorter? A few reasons the Go team (and most experienced Go developers) like it:</p>
+  <ul>
+    <li><strong>The happy path stays on the left.</strong> Errors are handled early and the function returns. The normal logic is never buried in nested <code>else</code> blocks. This is called the <em>guard clause</em> or "line of sight" style.</li>
+    <li><strong>Each check is a chance to add context.</strong> The <code>return fmt.Errorf("do something: %w", err)</code> line is where you write <em>what you were doing</em>. Exceptions give you a stack trace; Go gives you a human sentence.</li>
+    <li><strong>It is obvious.</strong> A new teammate can read it on day one.</li>
+  </ul>
+  <p>Proposals for shorter syntax (<code>try</code>, <code>?</code>) have been debated for years. In 2025 the Go team officially said they will stop pursuing syntax changes for error handling, so this pattern is here to stay. Learn to love it.</p>
+
+  <p>Let's trace one function that has two different ways to fail.</p>
+  <div class="live" data-title="Guard clauses: following err through a loop">
+    <pre><code class="language-go">func parsePort(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("parse port %q: %w", s, err)
+	}
+	if n &lt; 1 || n &gt; 65535 {
+		return 0, fmt.Errorf("port %d out of range", n)
+	}
+	return n, nil
+}
+
+func main() {
+	for _, s := range []string{"8080", "http", "99999"} {
+		p, err := parsePort(s)
+		if err != nil {
+			fmt.Println("error:", err)
+			continue
+		}
+		fmt.Println("port:", p)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-14" data-state="s=&quot;8080&quot;">The loop starts with <code>s = "8080"</code> and calls <code>parsePort</code>.</li>
+      <li data-lines="2-3" data-state="s=&quot;8080&quot;; n=8080; err=nil"><code>Atoi</code> succeeds. <code>err</code> is <code>nil</code>, so the first guard is skipped.</li>
+      <li data-lines="6,9" data-state="n=8080; err=nil">8080 is in range, so the second guard is skipped too. We return <code>8080, nil</code>.</li>
+      <li data-lines="14-15,19" data-state="p=8080; err=nil" data-out="port: 8080">Back in <code>main</code>, <code>err == nil</code>, so we fall through to the happy path and print the port.</li>
+      <li data-lines="2-4" data-state="s=&quot;http&quot;; n=0; err=*strconv.NumError">Next value <code>"http"</code>: <code>Atoi</code> fails. We <strong>wrap</strong> its error with context (which input) and return immediately.</li>
+      <li data-lines="15-17" data-state="p=0; err=parse port..." data-out="error: parse port &quot;http&quot;: strconv.Atoi: parsing &quot;http&quot;: invalid syntax"><code>main</code> sees a non-nil error, prints it, and <code>continue</code>s. Notice <code>p</code> is 0: never trust the other values when err != nil.</li>
+      <li data-lines="6-7" data-state="s=&quot;99999&quot;; n=99999">Third value parses fine, but the second guard catches it. This error is new (nothing to wrap), so we use <code>Errorf</code> without <code>%w</code>.</li>
+      <li data-lines="15-17" data-state="err=port 99999 out of range" data-out="error: port 99999 out of range">Printed, and the loop ends.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>port: 8080
+error: parse port "http": strconv.Atoi: parsing "http": invalid syntax
+error: port 99999 out of range</pre></div>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid: happy path drifts right"><pre><code class="language-go">func load(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err == nil {
+		defer f.Close()
+		cfg, err := parse(f)
+		if err == nil {
+			if cfg.Valid() {
+				return cfg, nil
+			} else {
+				return nil, errors.New("invalid")
+			}
+		} else {
+			return nil, err
+		}
+	} else {
+		return nil, err
+	}
+}</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer: guard clauses"><pre><code class="language-go">func load(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	defer f.Close()
+
+	cfg, err := parse(f)
+	if err != nil {
+		return nil, fmt.Errorf("load config %s: %w", path, err)
+	}
+	if !cfg.Valid() {
+		return nil, fmt.Errorf("load config %s: invalid", path)
+	}
+	return cfg, nil
+}</code></pre></div></div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Wrapping with %w, and errors.Is / As / Unwrap</h2>
+  <p>When a low-level error bubbles up, you usually want two things at once:</p>
+  <ol>
+    <li>A message for <strong>humans</strong> that explains the whole story ("read config app.yaml: open app.yaml: no such file").</li>
+    <li>The original error kept intact for <strong>code</strong> to inspect ("was it a not-exist error? then create a default file").</li>
+  </ol>
+  <p><code>fmt.Errorf</code> with the special verb <code>%w</code> ("wrap") gives you both. It formats the message like <code>%v</code>, <em>and</em> it stores the original error inside the new one. The new error has an <code>Unwrap() error</code> method that returns the inner error. Errors that wrap errors that wrap errors form an <strong>error chain</strong>.</p>
+  <div class="live" data-title="%w keeps the cause, %v throws it away">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+)
+
+func readConfig(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// %w wraps: the original error stays inside, reachable later.
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	return data, nil
+}
+
+func readConfigV(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// %v only copies the text: the original error is gone.
+		return nil, fmt.Errorf("read config %s: %v", path, err)
+	}
+	return data, nil
+}
+
+func main() {
+	_, err := readConfig("/no/such/app.yaml")
+	fmt.Println("message:   ", err)
+	fmt.Println("Is NotExist:", errors.Is(err, fs.ErrNotExist))
+
+	inner := errors.Unwrap(err)
+	fmt.Printf("unwrapped:  %v (%T)\n", inner, inner)
+
+	_, errV := readConfigV("/no/such/app.yaml")
+	fmt.Println("with %v, Is NotExist:", errors.Is(errV, fs.ErrNotExist))
+	fmt.Println("with %v, Unwrap:", errors.Unwrap(errV))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="29,10-11" data-state="path=&quot;/no/such/app.yaml&quot;">We call <code>readConfig</code>. Inside, <code>os.ReadFile</code> fails because the file does not exist.</li>
+      <li data-lines="11-12" data-state="err=*fs.PathError">The error it returns is a <code>*fs.PathError</code> whose own cause is the sentinel <code>fs.ErrNotExist</code>. So the guard fires.</li>
+      <li data-lines="14" data-state="err=*fmt.wrapError → *fs.PathError → fs.ErrNotExist"><code>%w</code> builds a <code>*fmt.wrapError</code>: new text <strong>plus</strong> a pointer to the original error. The chain is now three links long.</li>
+      <li data-lines="30" data-state="err=*fmt.wrapError" data-out="message:    read config /no/such/app.yaml: open /no/such/app.yaml: no such file or directory">Printing shows every layer's text joined by <code>": "</code>, outermost first.</li>
+      <li data-lines="31" data-state="errors.Is=true" data-out="Is NotExist: true"><code>errors.Is</code> walks the chain link by link and finds <code>fs.ErrNotExist</code> at the bottom.</li>
+      <li data-lines="33-34" data-state="inner=*fs.PathError" data-out="unwrapped:  open /no/such/app.yaml: no such file or directory (*fs.PathError)"><code>errors.Unwrap</code> peels exactly <strong>one</strong> layer, giving back the <code>*fs.PathError</code> we wrapped.</li>
+      <li data-lines="36,19-23" data-state="errV=*errors.errorString">Now the <code>%v</code> version. Same failure, but <code>%v</code> just formats the text into a brand-new error. Nothing points back at the cause.</li>
+      <li data-lines="37" data-state="errors.Is=false" data-out="with %v, Is NotExist: false">The text still says "no such file", but <code>errors.Is</code> has no chain to walk, so it says <strong>false</strong>. Callers can no longer react to the cause.</li>
+      <li data-lines="38" data-state="errors.Unwrap(errV)=nil" data-out="with %v, Unwrap: &lt;nil&gt;"><code>Unwrap</code> returns <code>nil</code>: there is no inner error. Use <code>%w</code> whenever callers might need the cause.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>message:    read config /no/such/app.yaml: open /no/such/app.yaml: no such file or directory
+Is NotExist: true
+unwrapped:  open /no/such/app.yaml: no such file or directory (*fs.PathError)
+with %v, Is NotExist: false
+with %v, Unwrap: &lt;nil&gt;</pre></div>
+  <p>The text looks identical with <code>%v</code> and <code>%w</code>. The difference is invisible until code asks "is this a not-found error?". With <code>%v</code> the chain is cut, and the answer is a wrong <code>false</code>.</p>
+
+  <p>The three inspection tools in the <code>errors</code> package:</p>
+  <table><thead><tr><th>Function</th><th>Question it answers</th><th>Typical use</th></tr></thead><tbody>
+    <tr><td><code>errors.Is(err, target)</code></td><td>Is <em>any</em> error in the chain equal to this specific value?</td><td>Sentinels: <code>io.EOF</code>, <code>fs.ErrNotExist</code>, <code>sql.ErrNoRows</code>, your <code>ErrNotFound</code></td></tr>
+    <tr><td><code>errors.As(err, &amp;target)</code></td><td>Is any error in the chain of this <em>type</em>? If so, give it to me.</td><td>Custom types with fields: <code>*fs.PathError</code>, <code>*ValidationError</code></td></tr>
+    <tr><td><code>errors.AsType[T](err)</code></td><td>Same as <code>As</code>, but generic: returns <code>(T, bool)</code>. New in Go 1.26.</td><td>Shorter, type-safe <code>As</code> with no pointer-to-pointer</td></tr>
+    <tr><td><code>errors.Unwrap(err)</code></td><td>What is the one error directly inside this one?</td><td>Rarely needed directly; <code>Is</code>/<code>As</code> call it for you</td></tr>
+  </tbody></table>
+
+  <h3>Seeing the chain</h3>
+  <p>Let's build a chain of four errors and walk it by hand, which is exactly what <code>errors.Is</code> does internally:</p>
+  <div class="live" data-title="Building a chain, then walking it with Unwrap">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func main() {
+	base := errors.New("disk full")
+	l1 := fmt.Errorf("write block 7: %w", base)
+	l2 := fmt.Errorf("save photo.jpg: %w", l1)
+	l3 := fmt.Errorf("upload album: %w", l2)
+
+	// Walk the chain by hand, exactly like errors.Is does.
+	for e := error(l3); e != nil; e = errors.Unwrap(e) {
+		fmt.Printf("%-22T %v\n", e, e)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9" data-state="base=&quot;disk full&quot;">The root cause: a plain <code>*errors.errorString</code>. It has no <code>Unwrap</code> method, so it will end the chain.</li>
+      <li data-lines="10-12" data-state="l3 → l2 → l1 → base">Each <code>%w</code> adds a layer that points at the one below. <code>l3</code> is the outermost; it knows about <code>l2</code>, which knows about <code>l1</code>, and so on.</li>
+      <li data-lines="15-16" data-state="e=l3" data-out="*fmt.wrapError         upload album: save photo.jpg: write block 7: disk full">The loop starts at <code>l3</code>. Its text already contains every message below it, because <code>Errorf</code> formatted them in.</li>
+      <li data-lines="15-16" data-state="e=l2" data-out="*fmt.wrapError         save photo.jpg: write block 7: disk full"><code>errors.Unwrap(e)</code> calls <code>e.Unwrap()</code> and moves one link down, to <code>l2</code>.</li>
+      <li data-lines="15-16" data-state="e=l1" data-out="*fmt.wrapError         write block 7: disk full">One more link down: <code>l1</code>.</li>
+      <li data-lines="15-16" data-state="e=base" data-out="*errors.errorString    disk full">Now we reach <code>base</code>. Note the type changed: this is the original error, not a wrapper.</li>
+      <li data-lines="15" data-state="e=nil"><code>base</code> has no <code>Unwrap</code>, so <code>errors.Unwrap</code> returns <code>nil</code> and the loop stops. <code>errors.Is</code> does this same walk, comparing each link to the target.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>*fmt.wrapError         upload album: save photo.jpg: write block 7: disk full
+*fmt.wrapError         save photo.jpg: write block 7: disk full
+*fmt.wrapError         write block 7: disk full
+*errors.errorString    disk full</pre></div>
+
+  <figure class="diagram"><svg viewBox="0 0 760 270" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+    <rect width="760" height="270" fill="#262624"/>
+    <text x="20" y="28" fill="#a8a49a" font-size="13">err (what the caller receives)</text>
+    <!-- boxes -->
+    <rect x="20" y="44" width="170" height="92" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="2"/>
+    <text x="34" y="66" fill="#d97757" font-size="12" font-family="JetBrains Mono, monospace">*fmt.wrapError</text>
+    <text x="34" y="88" fill="#ece9e1" font-size="12">msg: "upload album: ..."</text>
+    <text x="34" y="110" fill="#a8a49a" font-size="12">err ──────────▶</text>
+    <rect x="205" y="44" width="170" height="92" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="219" y="66" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">*fmt.wrapError</text>
+    <text x="219" y="88" fill="#ece9e1" font-size="12">msg: "save photo.jpg: ..."</text>
+    <text x="219" y="110" fill="#a8a49a" font-size="12">err ──────────▶</text>
+    <rect x="390" y="44" width="170" height="92" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="2"/>
+    <text x="404" y="66" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">*fmt.wrapError</text>
+    <text x="404" y="88" fill="#ece9e1" font-size="12">msg: "write block 7: ..."</text>
+    <text x="404" y="110" fill="#a8a49a" font-size="12">err ──────────▶</text>
+    <rect x="575" y="44" width="165" height="92" rx="8" fill="#2e2d2a" stroke="#8fbf7f" stroke-width="2"/>
+    <text x="589" y="66" fill="#8fbf7f" font-size="12" font-family="JetBrains Mono, monospace">*errors.errorString</text>
+    <text x="589" y="88" fill="#ece9e1" font-size="12">"disk full"</text>
+    <text x="589" y="110" fill="#a8a49a" font-size="12">Unwrap() → nil</text>
+    <!-- Is arrow -->
+    <text x="20" y="170" fill="#e0b45c" font-size="13" font-family="JetBrains Mono, monospace">errors.Is(err, ErrDiskFull)</text>
+    <line x1="40" y1="186" x2="700" y2="186" stroke="#e0b45c" stroke-width="2" stroke-dasharray="6 4"/>
+    <polygon points="700,180 712,186 700,192" fill="#e0b45c"/>
+    <text x="100" y="208" fill="#a8a49a" font-size="12">== ? no</text>
+    <text x="285" y="208" fill="#a8a49a" font-size="12">== ? no</text>
+    <text x="470" y="208" fill="#a8a49a" font-size="12">== ? no</text>
+    <text x="640" y="208" fill="#8fbf7f" font-size="12">== ? YES → true</text>
+    <text x="20" y="246" fill="#ece9e1" font-size="13">Each layer adds a few words of context and points to the error inside it.</text>
+    <text x="20" y="264" fill="#a8a49a" font-size="12">Is / As start at the outside and call Unwrap() until they find a match or hit nil.</text>
+  </svg><figcaption>An error chain. <code>err.Error()</code> prints all the messages joined; <code>errors.Is</code> and <code>errors.As</code> walk the links.</figcaption></figure>
+
+  <div class="live" data-title="errors.Is walks the chain, == does not">
+    <pre><code class="language-go">func main() {
+	ErrNotFound := errors.New("not found")
+	e1 := fmt.Errorf("query users: %w", ErrNotFound)
+	e2 := fmt.Errorf("find user 7: %w", e1)
+	e3 := fmt.Errorf("send welcome: %w", e2)
+
+	fmt.Println(e3 == ErrNotFound)
+	fmt.Println(errors.Is(e3, ErrNotFound))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="2" data-state="ErrNotFound=&amp;errorString{&quot;not found&quot;}">We create one sentinel value. Remember: it is a <em>pointer</em>, so equality means "the very same object".</li>
+      <li data-lines="3" data-state="e1 → ErrNotFound"><code>e1</code> is a new <code>*fmt.wrapError</code> whose inner error is <code>ErrNotFound</code>.</li>
+      <li data-lines="4-5" data-state="e3 → e2 → e1 → ErrNotFound">Two more layers. <code>e3</code> is the outermost box.</li>
+      <li data-lines="7" data-state="e3 == ErrNotFound? different pointers" data-out="false"><code>==</code> only compares the outer box with the sentinel. They are different objects, so <code>false</code>. This is why you must stop using <code>==</code> on errors once anyone wraps them.</li>
+      <li data-lines="8" data-state="check e3 ✗ → e2 ✗ → e1 ✗ → ErrNotFound ✓" data-out="true"><code>errors.Is</code> compares <code>e3</code>, then unwraps to <code>e2</code>, then <code>e1</code>, then finds <code>ErrNotFound</code>. Match: <code>true</code>.</li>
+    </ol>
+  </div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: wrapping is part of your API</div><p>Once you write <code>%w</code>, callers can (and will) check the inner error with <code>errors.Is</code>. If you later swap Postgres for SQLite, code that checked for a Postgres-specific error breaks. Use <code>%w</code> when you <em>want</em> callers to see the cause. Use <code>%v</code> when the cause is an implementation detail you want to hide. A common middle ground: translate low-level errors into your own sentinel (<code>sql.ErrNoRows</code> becomes <code>ErrNotFound</code>) at the boundary.</p></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q"><code>err := fmt.Errorf("load: %v", fs.ErrNotExist)</code>. What is <code>errors.Is(err, fs.ErrNotExist)</code>?</div>
+    <div class="quiz-opts"><button>true, because the text contains "file does not exist"</button><button>true, because Errorf always wraps</button><button>false, because %v copies only the text</button><button>It does not compile</button></div>
+    <div class="quiz-explain"><code>%v</code> formats the error as a string and forgets the original value. Only <code>%w</code> stores the inner error so <code>Unwrap</code> (and therefore <code>Is</code>/<code>As</code>) can find it. <code>errors.Is</code> never compares text.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Sentinel errors</h2>
+  <p>A <strong>sentinel error</strong> is a package-level variable holding one specific error value that callers can test for. The standard library is full of them: <code>io.EOF</code> ("the stream ended normally"), <code>sql.ErrNoRows</code>, <code>fs.ErrNotExist</code>, <code>context.Canceled</code>, <code>http.ErrServerClosed</code>. The name comes from the old idea of a "sentinel value" that signals a special condition.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Sentinel errors: package-level values callers can compare against.
+var (
+	ErrNotFound     = errors.New("not found")
+	ErrOutOfStock   = errors.New("out of stock")
+	ErrInvalidQuant = errors.New("quantity must be positive")
+)
+
+var stock = map[string]int{"apple": 3, "pear": 0}
+
+func reserve(item string, qty int) error {
+	if qty &lt;= 0 {
+		return ErrInvalidQuant
+	}
+	have, ok := stock[item]
+	if !ok {
+		return fmt.Errorf("reserve %q: %w", item, ErrNotFound)
+	}
+	if have &lt; qty {
+		return fmt.Errorf("reserve %d x %q (have %d): %w", qty, item, have, ErrOutOfStock)
+	}
+	stock[item] -= qty
+	return nil
+}
+
+func main() {
+	tries := []struct {
+		item string
+		qty  int
+	}{{"apple", 2}, {"kiwi", 1}, {"pear", 1}, {"apple", 0}}
+
+	for _, t := range tries {
+		err := reserve(t.item, t.qty)
+		switch {
+		case err == nil:
+			fmt.Println("ok:", t.item)
+		case errors.Is(err, ErrNotFound):
+			fmt.Println("404 -&gt;", err)
+		case errors.Is(err, ErrOutOfStock):
+			fmt.Println("409 -&gt;", err)
+		default:
+			fmt.Println("400 -&gt;", err)
+		}
+	}
+
+	// Why == is not enough once errors are wrapped:
+	err := reserve("kiwi", 1)
+	fmt.Println("err == ErrNotFound:", err == ErrNotFound)
+	fmt.Println("errors.Is:         ", errors.Is(err, ErrNotFound))
+}</code></pre></div>
+  <div class="output"><pre>ok: apple
+404 -&gt; reserve "kiwi": not found
+409 -&gt; reserve 1 x "pear" (have 0): out of stock
+400 -&gt; quantity must be positive
+err == ErrNotFound: false
+errors.Is:          true</pre></div>
+  <p>The pattern: create the sentinel once with <code>errors.New</code>, wrap it with details where it happens (<code>fmt.Errorf("reserve %q: %w", item, ErrNotFound)</code>), and check it with <code>errors.Is</code> where it is handled. The <code>switch { case errors.Is(...) }</code> shape is the idiomatic way to branch on several kinds.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Keep sentinels few and meaningful. Export one only if callers need to <em>behave differently</em> because of it (return 404 instead of 500, stop reading, retry). If no caller would ever branch on it, a plain <code>fmt.Errorf</code> is enough. Every exported sentinel is a promise you have to keep across versions.</p></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: io.EOF is never wrapped</div><p>A few old sentinels, most famously <code>io.EOF</code>, are compared with <code>==</code> by lots of existing code. If you implement an <code>io.Reader</code>, return <code>io.EOF</code> itself, never <code>fmt.Errorf("...: %w", io.EOF)</code>, or you will break callers that do <code>err == io.EOF</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Custom error types with fields</h2>
+  <p>A sentinel is just "a kind of failure". Sometimes callers need <strong>data</strong>: which field failed validation, which file, which HTTP status, how long to wait. Then you define your own type and give it an <code>Error() string</code> method. Because <code>error</code> is an interface, your struct is now an error.</p>
+  <div class="live" data-title="errors.As pulls the structured error back out">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// ValidationError carries structured data, not just a string.
+type ValidationError struct {
+	Field  string
+	Value  any
+	Reason string
+}
+
+// Error makes *ValidationError satisfy the error interface.
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid %s=%v: %s", e.Field, e.Value, e.Reason)
+}
+
+type User struct {
+	Name string
+	Age  int
+}
+
+func validate(u User) error {
+	if u.Name == "" {
+		return &amp;ValidationError{Field: "name", Value: `""`, Reason: "required"}
+	}
+	if u.Age &lt; 0 || u.Age &gt; 150 {
+		return &amp;ValidationError{Field: "age", Value: u.Age, Reason: "must be 0..150"}
+	}
+	return nil
+}
+
+func createUser(u User) error {
+	if err := validate(u); err != nil {
+		return fmt.Errorf("create user: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	err := createUser(User{Name: "Ana", Age: 200})
+	fmt.Println(err)
+
+	// errors.As walks the chain looking for a *ValidationError
+	// and, if found, stores it in ve.
+	var ve *ValidationError
+	if errors.As(err, &amp;ve) {
+		fmt.Println("field: ", ve.Field)
+		fmt.Println("value: ", ve.Value)
+		fmt.Println("reason:", ve.Reason)
+	}
+
+	// Go 1.26+: errors.AsType is the generic, type-safe version.
+	if ve2, ok := errors.AsType[*ValidationError](err); ok {
+		fmt.Println("AsType found field:", ve2.Field)
+	}
+
+	fmt.Println(createUser(User{Name: "Bo", Age: 30}))
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="43,36,25" data-state="u={Ana 200}"><code>createUser</code> calls <code>validate</code>. The name is fine, so the first guard is skipped.</li>
+      <li data-lines="29-30" data-state="u.Age=200; err=*ValidationError{age 200 ...}">Age 200 is out of range. We return a <code>*ValidationError</code> with the field, value and reason as real data.</li>
+      <li data-lines="36-37" data-state="err=create user: → *ValidationError">Back in <code>createUser</code>, the error is wrapped with <code>%w</code>. The struct is now one link down the chain.</li>
+      <li data-lines="44,16-17" data-state="err=*fmt.wrapError" data-out="create user: invalid age=200: must be 0..150">Printing calls <code>Error()</code> on the wrapper, which includes the struct's own <code>Error()</code> text.</li>
+      <li data-lines="48-49" data-state="ve=nil → *ValidationError"><code>errors.As</code> walks the chain. The second link has type <code>*ValidationError</code>, so it stores it in <code>ve</code> and returns true. Note we pass <code>&amp;ve</code>, a pointer to the variable.</li>
+      <li data-lines="50-52" data-state="ve.Field=age; ve.Value=200; ve.Reason=must be 0..150" data-out="field:  age\nvalue:  200\nreason: must be 0..150">Now we can read the fields directly instead of parsing the message text.</li>
+      <li data-lines="56-57" data-state="ve2.Field=age; ok=true" data-out="AsType found field: age"><code>errors.AsType</code> (Go 1.26+) does the same thing generically: it returns the value and a bool, no pointer variable needed.</li>
+      <li data-lines="60,32,39" data-state="u={Bo 30}; err=nil" data-out="&lt;nil&gt;">A valid user passes every check, so <code>createUser</code> returns <code>nil</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>create user: invalid age=200: must be 0..150
+field:  age
+value:  200
+reason: must be 0..150
+AsType found field: age
+&lt;nil&gt;</pre></div>
+  <p>How <code>errors.As(err, &amp;ve)</code> works: you declare a variable of the type you are looking for (<code>var ve *ValidationError</code>) and pass its <em>address</em>. <code>As</code> walks the chain; the first error that can be assigned to that type is stored in <code>ve</code>, and it returns <code>true</code>. Since Go 1.26 there is also <code>errors.AsType[*ValidationError](err)</code>, which returns the value and a bool directly. It reads better and cannot be misused with the wrong pointer level.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: pointer or value receiver must match</div><p>We defined <code>Error()</code> on <code>*ValidationError</code> (pointer receiver) and returned <code>&amp;ValidationError{...}</code>. So the target must be <code>*ValidationError</code>. If you use <code>var ve ValidationError</code> with <code>errors.As</code>, you get a <strong>panic</strong> at run time: <code>panic: errors: *target must be interface or implement error</code>. <code>go vet</code> catches it before you run: <code>second argument to errors.As must be a non-nil pointer to either a type that implements error, or to any interface type</code>. Pick pointer receivers for error types and stick to it.</p></div>
+
+  <h3>Making a type decide what it "is": Is and behaviour interfaces</h3>
+  <p>Two more tricks used in real libraries:</p>
+  <ul>
+    <li>A type can define <code>Is(target error) bool</code>. <code>errors.Is</code> calls it, so one type can "match" a sentinel based on its fields (any 429 response "is" <code>ErrRateLimited</code>).</li>
+    <li>Callers can check for a <strong>behaviour</strong> instead of a concrete type, by passing a pointer to an anonymous interface into <code>errors.As</code>. This keeps packages decoupled: the caller does not need to import your type.</li>
+  </ul>
+  <div class="live" data-title="Custom Is and behaviour checks, one status code at a time">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// A custom error can decide what it "is" via an Is method,
+// and expose behaviour via small interfaces.
+type HTTPError struct {
+	Code  int
+	Retry time.Duration
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("http %d", e.Code) }
+
+var ErrRateLimited = errors.New("rate limited")
+
+// Is lets errors.Is(err, ErrRateLimited) match any 429.
+func (e *HTTPError) Is(target error) bool {
+	return target == ErrRateLimited &amp;&amp; e.Code == 429
+}
+
+// Temporary is a behaviour other packages can check for
+// without importing our concrete type.
+func (e *HTTPError) Temporary() bool { return e.Code == 429 || e.Code &gt;= 500 }
+
+func call(code int) error {
+	if code == 200 {
+		return nil
+	}
+	return fmt.Errorf("call payments API: %w", &amp;HTTPError{Code: code, Retry: 2 * time.Second})
+}
+
+func main() {
+	for _, code := range []int{200, 429, 503, 404} {
+		err := call(code)
+		if err == nil {
+			fmt.Println(code, "ok")
+			continue
+		}
+		var tmp interface{ Temporary() bool }
+		retry := errors.As(err, &amp;tmp) &amp;&amp; tmp.Temporary()
+		fmt.Printf("%d %-28v rateLimited=%-5v retry=%v\n",
+			code, err, errors.Is(err, ErrRateLimited), retry)
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="37-38,29-31" data-state="code=200; err=nil">First code is 200. <code>call</code> returns <code>nil</code>, meaning success.</li>
+      <li data-lines="39-41" data-state="code=200; err=nil" data-out="200 ok">Nil error, so we print <code>ok</code> and <code>continue</code>.</li>
+      <li data-lines="38,33" data-state="code=429; err=wrapError → *HTTPError{429}">Code 429: <code>call</code> wraps a <code>*HTTPError</code> with <code>%w</code>. The concrete type sits one link down the chain.</li>
+      <li data-lines="43-44,27" data-state="code=429; tmp=*HTTPError; retry=true"><code>errors.As</code> walks the chain looking for anything with a <code>Temporary() bool</code> method. The <code>*HTTPError</code> has one, so <code>tmp</code> is set and <code>Temporary()</code> says true for 429.</li>
+      <li data-lines="46,21-22" data-state="code=429; rateLimited=true"><code>errors.Is</code> first compares each link with <code>==</code>. No link <em>is</em> <code>ErrRateLimited</code>, but it also calls each link's <code>Is</code> method. Ours returns true for a 429.</li>
+      <li data-lines="45-46" data-state="code=429; rateLimited=true; retry=true" data-out="429 call payments API: http 429  rateLimited=true  retry=true">The line is printed. <code>%-28v</code> pads the message so the columns line up.</li>
+      <li data-lines="38,44,22" data-state="code=503; rateLimited=false; retry=true" data-out="503 call payments API: http 503  rateLimited=false retry=true">503: <code>Temporary()</code> is true (5xx), but our <code>Is</code> only matches 429, so <code>rateLimited</code> is false.</li>
+      <li data-lines="38,44,27" data-state="code=404; rateLimited=false; retry=false" data-out="404 call payments API: http 404  rateLimited=false retry=false">404: neither rule matches. A client error is not worth retrying. The caller decided all this <strong>without</strong> importing <code>HTTPError</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>200 ok
+429 call payments API: http 429  rateLimited=true  retry=true
+503 call payments API: http 503  rateLimited=false retry=true
+404 call payments API: http 404  rateLimited=false retry=false</pre></div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: sentinel or type?</div><p>Start with a sentinel. Upgrade to a custom type only when callers need fields. If you need both, do what <code>e13</code> does: a type with fields plus an <code>Is</code> method so simple callers can still use <code>errors.Is(err, ErrRateLimited)</code>. Prefer checking <em>behaviour</em> (<code>interface{ Temporary() bool }</code>) across package boundaries; it avoids tight coupling.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Several errors at once: errors.Join and multi-%w</h2>
+  <p>Validating a form? You do not want to tell the user only the first problem, fix, resubmit, see the next one. <code>errors.Join</code> (Go 1.20) combines several errors into one. Its message is each error on its own line, and <code>errors.Is</code>/<code>As</code> look inside all of them. A handy detail: <code>errors.Join</code> returns <code>nil</code> if every argument is nil (or there are none), so you can always <code>return errors.Join(errs...)</code>.</p>
+  <p><code>fmt.Errorf</code> also accepts <strong>more than one</strong> <code>%w</code> in the same format string.</p>
+  <div class="live" data-title="errors.Join and multiple %w: trees, not chains">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var (
+	ErrNameMissing  = errors.New("name is required")
+	ErrEmailInvalid = errors.New("email is invalid")
+	ErrTimeout      = errors.New("timeout")
+	ErrDB           = errors.New("database unavailable")
+)
+
+func validateForm(name, email string) error {
+	var errs []error
+	if name == "" {
+		errs = append(errs, ErrNameMissing)
+	}
+	if email == "" || email[0] == '@' {
+		errs = append(errs, ErrEmailInvalid)
+	}
+	return errors.Join(errs...) // nil if errs is empty
+}
+
+func main() {
+	err := validateForm("", "@nope")
+	fmt.Println(err)
+	fmt.Println("---")
+	fmt.Println("name missing?", errors.Is(err, ErrNameMissing))
+	fmt.Println("email bad?   ", errors.Is(err, ErrEmailInvalid))
+	fmt.Println("all good =&gt;  ", validateForm("Ana", "ana@x.io"))
+
+	// Several %w verbs in one Errorf (Go 1.20+).
+	both := fmt.Errorf("save order: %w (while retrying after %w)", ErrDB, ErrTimeout)
+	fmt.Println(both)
+	fmt.Println("is DB?     ", errors.Is(both, ErrDB))
+	fmt.Println("is Timeout?", errors.Is(both, ErrTimeout))
+	fmt.Println("Unwrap() on multi:", errors.Unwrap(both)) // nil! see text
+
+	// Multi-errors expose Unwrap() []error instead.
+	if m, ok := both.(interface{ Unwrap() []error }); ok {
+		fmt.Println("children:", len(m.Unwrap()))
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="27,15-16" data-state="name=&quot;&quot;; email=&quot;@nope&quot;; errs=[]">We validate a form with an empty name and a bad email. <code>errs</code> starts as a nil slice.</li>
+      <li data-lines="17-18" data-state="errs=[ErrNameMissing]">The name is empty, so the first problem is appended.</li>
+      <li data-lines="20-21" data-state="errs=[ErrNameMissing ErrEmailInvalid]">The email starts with <code>@</code>, so we append a second problem instead of stopping. The user sees every mistake at once.</li>
+      <li data-lines="23,28" data-state="err=*errors.joinError (2 children)" data-out="name is required\nemail is invalid"><code>errors.Join</code> bundles both. Its message puts each child on its own line.</li>
+      <li data-lines="29-31" data-state="err=*errors.joinError" data-out="---\nname missing? true\nemail bad?    true"><code>errors.Is</code> searches <strong>every</strong> child of a joined error, so both checks are true.</li>
+      <li data-lines="32,23" data-state="errs=[]" data-out="all good =&gt;   &lt;nil&gt;">Valid input: nothing is appended, and <code>errors.Join()</code> with no non-nil errors returns <code>nil</code>. That is why returning it directly is safe.</li>
+      <li data-lines="35-36" data-state="both=*fmt.wrapErrors" data-out="save order: database unavailable (while retrying after timeout)">Two <code>%w</code> verbs in one <code>Errorf</code> (Go 1.20+) wrap two errors at once.</li>
+      <li data-lines="37-38" data-state="both=*fmt.wrapErrors" data-out="is DB?      true\nis Timeout? true">Both causes are findable with <code>errors.Is</code>.</li>
+      <li data-lines="39" data-state="errors.Unwrap(both)=nil" data-out="Unwrap() on multi: &lt;nil&gt;"><strong>Gotcha:</strong> <code>errors.Unwrap</code> only follows a single <code>Unwrap() error</code> method. A multi-error has <code>Unwrap() []error</code> instead, so you get <code>nil</code>.</li>
+      <li data-lines="42-43" data-state="ok=true; len(children)=2" data-out="children: 2">To see the branches yourself, assert to <code>interface{ Unwrap() []error }</code>. There are two children.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>name is required
+email is invalid
+---
+name missing? true
+email bad?    true
+all good =&gt;   &lt;nil&gt;
+save order: database unavailable (while retrying after timeout)
+is DB?      true
+is Timeout? true
+Unwrap() on multi: &lt;nil&gt;
+children: 2</pre></div>
+  <p>One surprise: <code>errors.Unwrap</code> returns <code>nil</code> for joined or multi-<code>%w</code> errors. That is because those types implement <code>Unwrap() []error</code> (a slice) instead of <code>Unwrap() error</code>. <code>errors.Is</code> and <code>errors.As</code> understand both shapes and search the whole tree, depth first. Just use those and you will be fine.</p>
+
+  <!-- ============================================================ -->
+  <h2>Adding context at each layer, and handling errors once</h2>
+  <p>Real programs have layers: a handler calls a service, which calls a repository, which calls the database. When something fails at the bottom, each layer above should add <strong>what it was doing</strong>, in a few words, and pass it up. The top layer, which actually knows what to do (return a 404, retry the job, exit), <strong>handles</strong> it.</p>
+  <div class="live" data-title="Each layer adds context on the way up">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"os"
+)
+
+var ErrNotFound = errors.New("not found")
+
+// --- storage layer: knows about rows and SQL ---
+func queryUserRow(id int) (string, error) {
+	if id != 1 {
+		return "", ErrNotFound
+	}
+	return "Ana", nil
+}
+
+// --- repository layer: adds WHICH record ---
+func findUser(id int) (string, error) {
+	name, err := queryUserRow(id)
+	if err != nil {
+		return "", fmt.Errorf("find user %d: %w", id, err)
+	}
+	return name, nil
+}
+
+// --- service layer: adds WHAT we were trying to do ---
+func sendWelcome(id int) error {
+	name, err := findUser(id)
+	if err != nil {
+		return fmt.Errorf("send welcome email: %w", err)
+	}
+	fmt.Println("hello,", name)
+	return nil
+}
+
+func main() {
+	logger := log.New(os.Stdout, "", 0)
+
+	// --- top layer: the ONE place that handles (logs) the error ---
+	for _, id := range []int{1, 7} {
+		if err := sendWelcome(id); err != nil {
+			logger.Printf("ERROR job failed: %v", err)
+			if errors.Is(err, ErrNotFound) {
+				logger.Println("  -&gt; user is gone; dropping job instead of retrying")
+			}
+		}
+	}
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="43-44,31,22" data-state="id=1">First job, <code>id=1</code>. The call goes down three layers: <code>sendWelcome</code> → <code>findUser</code> → <code>queryUserRow</code>.</li>
+      <li data-lines="14,17" data-state="id=1; name=&quot;Ana&quot;; err=nil">The row exists, so the storage layer returns <code>"Ana", nil</code>. Each layer's guard is skipped on the way back up.</li>
+      <li data-lines="35-36" data-state="name=&quot;Ana&quot;" data-out="hello, Ana">The service layer does its work and returns nil, so <code>main</code> has nothing to handle.</li>
+      <li data-lines="43-44,14-15" data-state="id=7; err=ErrNotFound">Second job, <code>id=7</code>. The storage layer returns the bare sentinel <code>ErrNotFound</code>. It does not know which user or why we asked.</li>
+      <li data-lines="23-24" data-state="err=find user 7: not found">The repository layer adds <strong>which record</strong> and wraps with <code>%w</code>. It does not log: it just passes the error up.</li>
+      <li data-lines="32-33" data-state="err=send welcome email: find user 7: not found">The service layer adds <strong>what we were doing</strong>. The message now reads like a sentence, outermost context first.</li>
+      <li data-lines="44-45" data-state="err=send welcome email: find user 7: not found" data-out="ERROR job failed: send welcome email: find user 7: not found">The top layer is the <strong>one</strong> place that handles the error, so it is logged exactly once.</li>
+      <li data-lines="46-47" data-state="errors.Is=true" data-out="  -> user is gone; dropping job instead of retrying">Because every layer used <code>%w</code>, <code>errors.Is</code> still finds <code>ErrNotFound</code> at the bottom and the top can decide what to do.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>hello, Ana
+ERROR job failed: send welcome email: find user 7: not found
+  -&gt; user is gone; dropping job instead of retrying</pre></div>
+  <p>Read the final message: <code>send welcome email: find user 7: not found</code>. It is a breadcrumb trail from the top down to the cause, with no stack trace needed. Each layer wrote only its own part.</p>
+
+  <h3>Rules for good context</h3>
+  <ul>
+    <li><strong>Add what the caller does not know.</strong> The callee already said "not found"; the repository adds "find user 7". Do not repeat the callee's words.</li>
+    <li><strong>Do not start with "failed to" / "error".</strong> Every message in the chain is a failure; those words just pile up: <code>failed to send: failed to find: failed to query: ...</code>. Name the operation instead.</li>
+    <li><strong>Include the identifying data</strong> (id, file name, key) but never secrets (passwords, tokens) or huge payloads.</li>
+    <li><strong>Do not add the function's own arguments twice.</strong> <code>os.Open</code> already puts the path in its error (<code>open /x: no such file</code>), so wrapping with <code>"open %s: %w"</code> duplicates it. Say <code>"load config: %w"</code>.</li>
+  </ul>
+
+  <h3>Handle errors once: log OR return, never both</h3>
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid: log and return"><pre><code class="language-go">func findUser(id int) (*User, error) {
+	u, err := db.Get(id)
+	if err != nil {
+		log.Printf("error finding user: %v", err)
+		return nil, err
+	}
+	return u, nil
+}
+// the service logs it again, the handler logs
+// it again... one failure = 3 log lines with
+// less context each time</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer: wrap and return; top handles"><pre><code class="language-go">func findUser(id int) (*User, error) {
+	u, err := db.Get(id)
+	if err != nil {
+		return nil, fmt.Errorf("find user %d: %w", id, err)
+	}
+	return u, nil
+}
+// only the HTTP handler / job runner / main
+// logs, once, with the full chain</code></pre></div></div>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>"Handling" an error means making a <em>decision</em>: return it, retry it, degrade gracefully, or log it and move on. Logging <em>is</em> handling. If you log, do not also return; if you return, do not also log. Duplicate log lines are the number one source of noise in production dashboards, and they make one incident look like three.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q">Your repository calls <code>os.ReadFile("users.json")</code> and it fails. Which wrap is best?</div>
+    <div class="quiz-opts"><button><code>fmt.Errorf("failed to read file users.json: error: %w", err)</code></button><button><code>fmt.Errorf("load users: %w", err)</code></button><button><code>log.Println(err); return err</code></button><button><code>return errors.New("could not read")</code></button></div>
+    <div class="quiz-explain"><code>os.ReadFile</code>'s error already contains the path, so repeating it duplicates text, and "failed to"/"error" add nothing. Option 4 throws away the cause. Option 3 handles the error twice. "load users: %w" adds only what is new: what this layer was trying to do.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>panic, recover, and when not to use them</h2>
+  <p>Go does have something exception-like: <code>panic</code>. A panic stops the normal flow of the current goroutine, runs its deferred functions on the way up, and if nobody stops it, prints a stack trace and <strong>kills the whole program</strong> with exit code 2. The runtime panics on its own for bugs: nil map writes, index out of range, nil pointer dereference, integer divide by zero.</p>
+
+  <table><thead><tr><th></th><th>error</th><th>panic</th></tr></thead><tbody>
+    <tr><td>Meaning</td><td>"This can happen; caller, decide what to do"</td><td>"This should never happen; the program is broken"</td></tr>
+    <tr><td>Examples</td><td>File missing, network down, bad user input, record not found</td><td>Nil map write, impossible <code>switch</code> case, invalid hard-coded regex at startup</td></tr>
+    <tr><td>Visible in signature?</td><td>Yes, <code>(T, error)</code></td><td>No</td></tr>
+    <tr><td>Handled with</td><td><code>if err != nil</code></td><td><code>recover()</code> in a deferred function (rarely)</td></tr>
+    <tr><td>Cross package boundaries?</td><td>Yes, that is the point</td><td>No. A library should not panic at its users for normal failures.</td></tr>
+  </tbody></table>
+
+  <h3>recover</h3>
+  <p><code>recover()</code> stops a panic, but only when called <strong>directly inside a deferred function</strong> on the <strong>same goroutine</strong> that is panicking. It returns the value passed to <code>panic</code> (or <code>nil</code> if there is no panic). Combined with a <em>named result</em> (Chapter 4), the deferred function can turn the panic into a normal error:</p>
+  <div class="live" data-title="recover in a deferred func rewrites the named result">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// safeDivide turns a panic into an ordinary error.
+// The named result err lets the deferred func change what we return.
+func safeDivide(a, b int) (q int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil // panics when b == 0
+}
+
+func getItem(items []string, i int) (s string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// r is `any`; runtime errors also implement error.
+			if re, ok := r.(error); ok {
+				err = fmt.Errorf("getItem(%d): %w", i, re)
+				return
+			}
+			err = fmt.Errorf("getItem(%d): %v", i, r)
+		}
+	}()
+	return items[i], nil
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2))
+	fmt.Println(safeDivide(1, 0))
+
+	_, err := getItem([]string{"a", "b"}, 5)
+	fmt.Println(err)
+
+	var re interface{ RuntimeError() }
+	fmt.Println("is a runtime.Error:", errors.As(err, &amp;re))
+
+	fmt.Println("program keeps running")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="34,10-11" data-state="a=10; b=2; q=0; err=nil"><code>safeDivide(10, 2)</code> registers its deferred closure first. It can see the named results <code>q</code> and <code>err</code>.</li>
+      <li data-lines="16" data-state="q=5; err=nil"><code>10 / 2</code> is fine. <code>return</code> stores 5 and nil into the named results.</li>
+      <li data-lines="12,34" data-state="q=5; err=nil" data-out="5 &lt;nil&gt;">The defer runs, <code>recover()</code> returns nil (no panic), so nothing changes. <code>Println</code> prints both results.</li>
+      <li data-lines="35,16" data-state="a=1; b=0; q=0; err=nil"><code>safeDivide(1, 0)</code>: integer division by zero <strong>panics</strong> before the return values are set.</li>
+      <li data-lines="12-13" data-state="r=runtime error: integer divide by zero; q=0; err=recovered: ...">The panic unwinds to the deferred closure. <code>recover()</code> stops it and returns the panic value, and we assign a new error to the named <code>err</code>.</li>
+      <li data-lines="35" data-state="q=0; err=recovered: ..." data-out="0 recovered: runtime error: integer divide by zero">The function returns normally with <code>q=0</code> and our error. The caller never sees a panic.</li>
+      <li data-lines="37,30" data-state="i=5; len(items)=2">In <code>getItem</code>, index 5 is out of range for a 2-element slice, so the runtime panics.</li>
+      <li data-lines="21-25" data-state="re=runtime.boundsError; err=getItem(5): ...">The panic value is a <code>runtime.Error</code>, which also implements <code>error</code>. So the type assertion succeeds and we wrap it with <code>%w</code>, keeping it in the chain.</li>
+      <li data-lines="38" data-state="err=getItem(5): ..." data-out="getItem(5): runtime error: index out of range [5] with length 2">The wrapped message names the call and the cause.</li>
+      <li data-lines="40-41" data-state="errors.As=true" data-out="is a runtime.Error: true">Because we used <code>%w</code>, <code>errors.As</code> finds a value with a <code>RuntimeError()</code> method in the chain.</li>
+      <li data-lines="43" data-out="program keeps running">Both panics were contained. The program carries on.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>5 &lt;nil&gt;
+0 recovered: runtime error: integer divide by zero
+getItem(5): runtime error: index out of range [5] with length 2
+is a runtime.Error: true
+program keeps running</pre></div>
+
+  <div class="live" data-title="A panic becomes an error">
+    <pre><code class="language-go">func risky(n int) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("risky(%d): %v", n, r)
+		}
+	}()
+	if n &gt; 2 {
+		panic("n too big")
+	}
+	return fmt.Sprint("ok ", n), nil
+}
+
+func main() {
+	fmt.Println(risky(1))
+	fmt.Println(risky(5))
+	fmt.Println("still alive")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="14,1-2" data-state="n=1; result=&quot;&quot;; err=nil"><code>risky(1)</code> starts. The <code>defer</code> registers the anonymous function; it will run when <code>risky</code> exits, however it exits.</li>
+      <li data-lines="7,10" data-state="n=1; result=&quot;ok 1&quot;; err=nil">1 is not &gt; 2, so we reach <code>return</code>, which assigns the named results.</li>
+      <li data-lines="3" data-state="recover()=nil">The deferred func runs. There is no panic, so <code>recover()</code> returns <code>nil</code> and nothing changes.</li>
+      <li data-lines="14" data-out="ok 1 &lt;nil&gt;">Printed: the result and a nil error.</li>
+      <li data-lines="15,7-8" data-state="n=5; result=&quot;&quot;; panicking=&quot;n too big&quot;"><code>risky(5)</code>: we hit <code>panic</code>. Normal execution stops right here; line 10 never runs. Go starts unwinding and runs deferred functions.</li>
+      <li data-lines="3-4" data-state="r=&quot;n too big&quot;; err=risky(5): n too big"><code>recover()</code> returns the panic value and <strong>stops the panic</strong>. We set the named result <code>err</code>.</li>
+      <li data-lines="15" data-state="result=&quot;&quot;; err=risky(5): n too big" data-out=" risky(5): n too big"><code>risky</code> returns normally with <code>result</code> still at its zero value <code>""</code>. That is why the output starts with a space: Println prints the empty string, a space, then the error.</li>
+      <li data-lines="16" data-out="still alive">The program continues as if nothing happened.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>ok 1 &lt;nil&gt;
+ risky(5): n too big
+still alive</pre></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: recover must be called by the deferred function itself</div><p><code>defer recover()</code> does nothing useful, and neither does calling a helper that calls <code>recover</code> from inside a non-deferred path. The rule is exact: <code>recover</code> works only when called directly by a function that was deferred.</p></div>
+
+  <h3>Panics in goroutines crash the whole program</h3>
+  <p>This one surprises everyone once. A <code>recover</code> in <code>main</code> cannot catch a panic that happens in <em>another</em> goroutine. Each goroutine has its own stack of deferred calls, and an unrecovered panic in <em>any</em> goroutine terminates the entire process, skipping every other goroutine's defers.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	defer fmt.Println("main's defer: never printed!")
+
+	// This recover is useless: it runs on main's goroutine,
+	// but the panic happens on a different goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("caught:", r)
+		}
+	}()
+
+	go func() {
+		var m map[string]int
+		m["boom"] = 1 // panic: assignment to entry in nil map
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("unreachable")
+}</code></pre></div>
+  <div class="output error" data-label="Runtime panic (exit status 2, paths shortened)"><pre>panic: assignment to entry in nil map
+
+goroutine 19 [running]:
+main.main.func2()
+	/home/you/errors/e08/main.go:21 +0x34
+created by main.main in goroutine 1
+	/home/you/errors/e08/main.go:19 +0x74
+exit status 2</pre></div>
+  <p>Look at what did <em>not</em> print: neither "caught:" nor "main's defer". The trace even tells you which goroutine (19) and where it was created (<code>created by main.main in goroutine 1</code>).</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>In long-running servers, any goroutine you start "fire-and-forget" should have its own <code>defer func(){ if r := recover(); r != nil { log... } }()</code> at the top, or be started through a helper that adds one. <code>net/http</code> already does this for each request handler, which is why one buggy handler does not take your server down, but <em>goroutines your handler spawns</em> are not protected. Libraries like <code>errgroup</code> (Chapter 13) help collect errors from goroutines properly.</p></div>
+
+  <h3>The Must pattern</h3>
+  <p>Some failures can only come from a programmer mistake, like a typo in a regular expression written in the source code. Waiting until runtime to return an error for that is silly. The standard library offers <code>Must</code> versions that <strong>panic</strong> instead of returning an error: <code>regexp.MustCompile</code>, <code>template.Must</code>. They are meant for package-level variables initialized at startup, so a bad pattern crashes the program on launch, during development, not in front of a customer.</p>
+  <div class="live" data-title="Must: turning startup errors into panics">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"regexp"
+	"text/template"
+)
+
+// Package-level values built once at startup. If the pattern
+// is wrong, the program dies immediately at launch — which is
+// what we want for a programmer bug.
+var (
+	slugRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	tmpl   = template.Must(template.New("hi").Parse("Hi {{.}}!\n"))
+)
+
+// Must is a tiny generic helper in the same spirit.
+func Must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func main() {
+	fmt.Println(slugRE.MatchString("go-handbook"), slugRE.MatchString("Go Handbook"))
+	_ = tmpl.Execute(fmtWriter{}, "Gopher")
+
+	re := Must(regexp.Compile(`\d+`))
+	fmt.Println(re.FindAllString("a1 b22 c333", -1))
+
+	defer func() { fmt.Println("panic:", recover()) }()
+	_ = Must(regexp.Compile(`(unclosed`))
+}
+
+type fmtWriter struct{}
+
+func (fmtWriter) Write(p []byte) (int, error) { return fmt.Print(string(p)) }</code></pre>
+    <ol class="live-steps">
+      <li data-lines="12-14" data-state="slugRE=compiled; tmpl=parsed">Before <code>main</code> even starts, package-level vars are initialized. <code>MustCompile</code> and <code>template.Must</code> would panic right here if the pattern or template were broken.</li>
+      <li data-lines="26" data-state="slugRE=compiled" data-out="true false"><code>"go-handbook"</code> fits the slug pattern; <code>"Go Handbook"</code> has capitals and a space, so it does not.</li>
+      <li data-lines="27,38" data-state="tmpl data=&quot;Gopher&quot;" data-out="Hi Gopher!">The template writes through our tiny <code>fmtWriter</code>, which just prints the bytes.</li>
+      <li data-lines="29,18-22" data-state="T=*regexp.Regexp; err=nil">Generic <code>Must</code> infers <code>T</code> from the two return values. <code>err</code> is nil, so it returns the compiled regexp.</li>
+      <li data-lines="30" data-state="re=\d+" data-out="[1 22 333]">The regexp finds every run of digits.</li>
+      <li data-lines="32" data-state="deferred: print recover()">We register a deferred func that will <code>recover</code>. It does nothing yet.</li>
+      <li data-lines="33,19-20" data-state="err=missing closing )">The pattern <code>(unclosed</code> is invalid, so <code>Compile</code> returns an error and <code>Must</code> <strong>panics</strong> with it.</li>
+      <li data-lines="32" data-state="recover()=*syntax.Error" data-out="panic: error parsing regexp: missing closing ): `(unclosed`">The panic unwinds <code>main</code>, the defer fires, and <code>recover()</code> hands back the error. Only use <code>Must</code> where a failure means a programmer bug, like a constant pattern.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>true false
+Hi Gopher!
+[1 22 333]
+panic: error parsing regexp: missing closing ): `(unclosed`</pre></div>
+  <div class="callout tip"><p>Rule of thumb: <code>MustX</code> is fine with <strong>constant</strong> inputs at <strong>init time</strong> or in tests. Never call <code>regexp.MustCompile(userInput)</code>: that lets a user crash your server.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Naming conventions and gotchas seniors watch for</h2>
+  <h3>Naming conventions</h3>
+  <table><thead><tr><th>Thing</th><th>Convention</th><th>Examples</th></tr></thead><tbody>
+    <tr><td>Sentinel error variable</td><td><code>Err</code> prefix (unexported: <code>err</code> prefix)</td><td><code>io.ErrUnexpectedEOF</code>, <code>ErrNotFound</code>, <code>errClosed</code></td></tr>
+    <tr><td>Error type</td><td><code>Error</code> suffix</td><td><code>*fs.PathError</code>, <code>*json.SyntaxError</code>, <code>ValidationError</code></td></tr>
+    <tr><td>Error variable in code</td><td>Just <code>err</code>; for a second one nearby, a short descriptive name</td><td><code>err</code>, <code>cerr</code> (close error), <code>werr</code></td></tr>
+    <tr><td>Error message text</td><td>lowercase, no final period, "operation: cause"</td><td><code>"parse port \"http\": invalid syntax"</code></td></tr>
+    <tr><td>Panicking helper</td><td><code>Must</code> prefix</td><td><code>regexp.MustCompile</code>, <code>template.Must</code></td></tr>
+  </tbody></table>
+
+
+  <h3>1. Checking errors in defer (Close)</h3>
+  <p><code>defer f.Close()</code> is perfect for files you only <em>read</em>. For files you <em>write</em>, the operating system may buffer data and report "disk full" or "I/O error" only when you close. Ignoring that error means you can tell the user "saved!" when nothing was saved. The fix uses a named result and <code>errors.Join</code> so neither error is lost:</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// writeReport writes a file and does NOT lose the Close error.
+// For files you write, Close can be where the real failure shows up
+// (e.g. disk full when the OS flushes buffers).
+func writeReport(path string, lines []string) (err error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create report: %w", err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close report: %w", cerr))
+		}
+	}()
+
+	for _, l := range lines {
+		if _, err := fmt.Fprintln(f, l); err != nil {
+			return fmt.Errorf("write report: %w", err)
+		}
+	}
+	return nil
+}
+
+func main() {
+	dir, _ := os.MkdirTemp("", "report")
+	defer os.RemoveAll(dir)
+
+	p := filepath.Join(dir, "r.txt")
+	fmt.Println("write ok:", writeReport(p, []string{"a", "b"}))
+	b, _ := os.ReadFile(p)
+	fmt.Printf("contents: %q\n", b)
+
+	err := writeReport(filepath.Join(dir, "missing", "r.txt"), nil)
+	fmt.Println("write err:", err != nil)
+}</code></pre></div>
+  <div class="output"><pre>write ok: &lt;nil&gt;
+contents: "a\nb\n"
+write err: true</pre></div>
+
+  <div class="live" data-title="How the deferred Close changes the returned error">
+    <pre><code class="language-go">func save(path string) (err error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
+	_, err = f.WriteString("hello")
+	return err
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="err=nil (named result)"><code>err</code> is a <strong>named result</strong>: a real variable that lives until the function finishes, and that deferred functions can see.</li>
+      <li data-lines="2-5" data-state="f=*os.File; err=nil">The file opens fine.</li>
+      <li data-lines="6-10" data-state="deferred: close-and-join">We register the deferred closure. It does not run yet.</li>
+      <li data-lines="11-12" data-state="err=nil">The write appears to succeed (the data is sitting in OS buffers). <code>return err</code> sets the result to <code>nil</code>.</li>
+      <li data-lines="7-8" data-state="cerr=&quot;disk full&quot;; err=disk full">Now the deferred func runs. Suppose <code>Close</code> fails. We join it into <code>err</code>. Because <code>err</code> is the named result, we just changed what the caller receives.</li>
+      <li data-lines="12" data-state="returned: disk full">The caller gets the close error instead of a false success. Without the named result, there would be no way to report it.</li>
+    </ol>
+  </div>
+
+  <h3>2. Returning a typed nil error</h3>
+  <p>This is the most famous Go error trap. An interface value is a pair: <em>(dynamic type, value)</em>. It is <code>nil</code> only when <strong>both</strong> parts are nil. If you return a nil <code>*MyErr</code> pointer as an <code>error</code>, the interface holds <em>(type=*MyErr, value=nil)</em>, which is <strong>not</strong> nil.</p>
+  <div class="live" data-title="The typed-nil trap: a nil pointer in a non-nil error">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type MyErr struct{ Msg string }
+
+func (e *MyErr) Error() string { return e.Msg }
+
+// BUG: returns a typed nil pointer inside a non-nil interface.
+func doBad(fail bool) error {
+	var p *MyErr // nil pointer of type *MyErr
+	if fail {
+		p = &amp;MyErr{"boom"}
+	}
+	return p // interface = (type=*MyErr, value=nil) -&gt; NOT nil
+}
+
+// FIX: return the literal nil for the success path.
+func doGood(fail bool) error {
+	if fail {
+		return &amp;MyErr{"boom"}
+	}
+	return nil
+}
+
+func main() {
+	err := doBad(false)
+	fmt.Println("doBad(false) == nil:", err == nil)
+	fmt.Printf("  dynamic type=%T value=%v\n", err, err == (*MyErr)(nil))
+
+	err = doGood(false)
+	fmt.Println("doGood(false) == nil:", err == nil)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="27,10-11" data-state="fail=false; p=(*MyErr)(nil)"><code>doBad(false)</code> declares <code>p</code>, a <strong>nil pointer</strong> of type <code>*MyErr</code>.</li>
+      <li data-lines="12" data-state="fail=false; p=(*MyErr)(nil)"><code>fail</code> is false, so <code>p</code> stays nil.</li>
+      <li data-lines="15" data-state="err=(type=*MyErr, value=nil)">Returning <code>p</code> as an <code>error</code> boxes it into an interface. The box records the type <code>*MyErr</code> and the nil value. A box with a type inside is <strong>not</strong> nil.</li>
+      <li data-lines="28" data-state="err=(type=*MyErr, value=nil)" data-out="doBad(false) == nil: false"><code>err == nil</code> is only true when <em>both</em> type and value are empty. Here the type is set, so the success path looks like a failure.</li>
+      <li data-lines="29" data-state="err=(type=*MyErr, value=nil)" data-out="  dynamic type=*main.MyErr value=true"><code>%T</code> reveals the hidden type, and comparing against <code>(*MyErr)(nil)</code> confirms the pointer inside is nil.</li>
+      <li data-lines="31,19-23" data-state="err=nil"><code>doGood(false)</code> skips the <code>if</code> and returns the literal <code>nil</code>: an empty interface with no type.</li>
+      <li data-lines="32" data-state="err=nil" data-out="doGood(false) == nil: true">Now the check works. Rule: on success, write <code>return nil</code>, never a typed variable that happens to be nil.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>doBad(false) == nil: false
+  dynamic type=*main.MyErr value=true
+doGood(false) == nil: true</pre></div>
+  <div class="callout warn"><div class="callout-title">Gotcha</div><p>The function "succeeded" but the caller sees <code>err != nil</code> and reports a failure with message... calling <code>Error()</code> on a nil <code>*MyErr</code> may even panic. Rule: <strong>always write <code>return nil</code> literally for the no-error case</strong>, and declare variables that hold errors as type <code>error</code>, never as a concrete error pointer type.</p></div>
+
+  <h3>3. Shadowing err in an inner scope</h3>
+  <p>Writing <code>v, err := f()</code> inside an <code>if</code> or <code>for</code> block creates a <em>new</em> <code>err</code> that hides the outer one. If you meant to set the outer error (for example, the named result used in a defer), use <code>=</code> instead of <code>:=</code>. The <code>shadow</code> analyzer from <code>golang.org/x/tools</code> and careful review catch this.</p>
+
+  <h3>4. Comparing error strings</h3>
+  <p><code>if err.Error() == "not found"</code> or <code>strings.Contains(err.Error(), "timeout")</code> breaks the moment someone adds context or fixes a typo. Use <code>errors.Is</code> / <code>errors.As</code>. Error text is for humans; error values are for code.</p>
+
+  <!-- ============================================================ -->
+  <h2>Designing errors for an API: mapping to HTTP status codes</h2>
+  <p>Let's put it all together in the shape real services use. The <strong>domain</strong> (business logic) returns domain errors: sentinels and types that know nothing about HTTP. The <strong>HTTP edge</strong> has exactly one function that translates them into status codes and safe messages. Internal errors (500) are logged with full detail but the client only sees "internal error", because leaking database messages to users is both confusing and a security risk.</p>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+)
+
+// ---- domain errors (no HTTP knowledge here) ----
+var (
+	ErrNotFound     = errors.New("not found")
+	ErrConflict     = errors.New("conflict")
+	ErrUnauthorized = errors.New("unauthorized")
+)
+
+type ValidationError struct{ Field, Msg string }
+
+func (e *ValidationError) Error() string { return e.Field + ": " + e.Msg }
+
+// ---- service ----
+func getOrder(id string) (string, error) {
+	switch id {
+	case "1":
+		return "order #1: 2 x coffee", nil
+	case "2":
+		return "", fmt.Errorf("get order %s: %w", id, ErrNotFound)
+	case "3":
+		return "", &amp;ValidationError{Field: "id", Msg: "must be numeric"}
+	case "4":
+		return "", fmt.Errorf("get order %s: %w", id, ErrUnauthorized)
+	}
+	return "", fmt.Errorf("get order %s: db: connection refused", id)
+}
+
+// ---- HTTP edge: the ONE place that maps errors to status codes ----
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
+	status, msg := http.StatusInternalServerError, "internal error"
+	var ve *ValidationError
+	switch {
+	case errors.As(err, &amp;ve):
+		status, msg = http.StatusBadRequest, ve.Error()
+	case errors.Is(err, ErrNotFound):
+		status, msg = http.StatusNotFound, "order not found"
+	case errors.Is(err, ErrConflict):
+		status, msg = http.StatusConflict, "conflict"
+	case errors.Is(err, ErrUnauthorized):
+		status, msg = http.StatusUnauthorized, "login required"
+	}
+	if status &gt;= 500 {
+		// Log full detail; NEVER leak internals to the client.
+		slog.Error("request failed", "path", r.URL.Path, "err", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func handleOrder(w http.ResponseWriter, r *http.Request) {
+	o, err := getOrder(r.PathValue("id"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"order": o})
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout,
+		&amp;slog.HandlerOptions{ReplaceAttr: dropTime})))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orders/{id}", handleOrder)
+
+	for _, id := range []string{"1", "2", "3", "4", "5"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/orders/"+id, nil))
+		fmt.Printf("GET /orders/%s -&gt; %d %s", id, rec.Code, rec.Body.String())
+	}
+}
+
+func dropTime(_ []string, a slog.Attr) slog.Attr {
+	if a.Key == slog.TimeKey {
+		return slog.Attr{}
+	}
+	return a
+}</code></pre></div>
+  <div class="output"><pre>GET /orders/1 -&gt; 200 {"order":"order #1: 2 x coffee"}
+GET /orders/2 -&gt; 404 {"error":"order not found"}
+GET /orders/3 -&gt; 400 {"error":"id: must be numeric"}
+GET /orders/4 -&gt; 401 {"error":"login required"}
+level=ERROR msg="request failed" path=/orders/5 err="get order 5: db: connection refused"
+GET /orders/5 -&gt; 500 {"error":"internal error"}</pre></div>
+  <p>This example uses Go 1.22's method-and-path patterns (<code>"GET /orders/{id}"</code> with <code>r.PathValue("id")</code>) and <code>httptest.NewRecorder</code> to drive the handler without opening a network port. Notice that only the 500 produced a log line, and it contains the full chain; the client response does not.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip: an error checklist for a new package</div><p>Before you ship a package, write down: (1) which failures callers may need to branch on, as exported sentinels or types; (2) which errors you wrap with <code>%w</code> (part of your API) versus format with <code>%v</code> (hidden detail); (3) a single translation point at each boundary (HTTP, gRPC, CLI exit codes); (4) where logging happens (exactly one place). Document sentinels in the function's doc comment: "returns ErrNotFound if no such order exists".</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Practice</h2>
+
+  <details class="exercise">
+    <summary>Exercise 1: a config parser that reports every bad line</summary>
+    <p>Write <code>parseConfig(src string) (map[string]int, error)</code> for lines like <code>port=8080</code>. Skip blank lines and <code>#</code> comments. Collect <strong>all</strong> problems (not just the first) and return them joined. Each problem should be a <code>*LineError</code> with a <code>Line</code> number and a wrapped cause, so callers can use both <code>errors.As</code> (to get the line) and <code>errors.Is</code> (to check for <code>strconv.ErrSyntax</code> or your own <code>ErrSyntax</code>).</p>
+    <p>Hint: give <code>LineError</code> an <code>Unwrap() error</code> method, and use <code>strings.Cut</code> to split on <code>=</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+var ErrSyntax = errors.New("syntax error")
+
+type LineError struct {
+	Line int
+	Err  error
+}
+
+func (e *LineError) Error() string { return fmt.Sprintf("line %d: %v", e.Line, e.Err) }
+func (e *LineError) Unwrap() error { return e.Err }
+
+// parseConfig parses "key=int" lines and reports EVERY bad line.
+func parseConfig(src string) (map[string]int, error) {
+	cfg := map[string]int{}
+	var errs []error
+	for i, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			errs = append(errs, &amp;LineError{i + 1, fmt.Errorf("missing '=': %w", ErrSyntax)})
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			errs = append(errs, &amp;LineError{i + 1, err})
+			continue
+		}
+		cfg[strings.TrimSpace(k)] = n
+	}
+	return cfg, errors.Join(errs...)
+}
+
+func main() {
+	cfg, err := parseConfig("port=8080\n# comment\nworkers\ntimeout=3s\nretries=5")
+	fmt.Println(cfg)
+	fmt.Println(err)
+
+	var le *LineError
+	fmt.Println("first LineError:", errors.As(err, &amp;le), le.Line)
+	fmt.Println("has syntax err: ", errors.Is(err, ErrSyntax))
+	fmt.Println("has NumError:   ", errors.Is(err, strconv.ErrSyntax))
+}</code></pre></div>
+    <div class="output"><pre>map[port:8080 retries:5]
+line 3: missing '=': syntax error
+line 4: strconv.Atoi: parsing "3s": invalid syntax
+first LineError: true 3
+has syntax err:  true
+has NumError:    true</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: a retry helper that understands "retryable" errors</summary>
+    <p>Write <code>Do(attempts int, fn func(try int) error) error</code>. It calls <code>fn</code> until it succeeds, but gives up immediately on errors that are not marked retryable. Provide <code>Retryable(err) error</code> to mark an error and <code>IsRetryable(err) bool</code> to check (even through wrapping). When all attempts fail, return an error that wraps the last one.</p>
+    <p>Hint: a tiny unexported struct type that wraps an error, plus <code>errors.As</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+// retryable marks errors that are worth trying again.
+type retryable struct{ err error }
+
+func (r retryable) Error() string { return r.err.Error() }
+func (r retryable) Unwrap() error { return r.err }
+
+func Retryable(err error) error { return retryable{err} }
+
+func IsRetryable(err error) bool {
+	var r retryable
+	return errors.As(err, &amp;r)
+}
+
+// Do runs fn up to attempts times, stopping early on a
+// non-retryable error.
+func Do(attempts int, fn func(try int) error) error {
+	var err error
+	for try := 1; try &lt;= attempts; try++ {
+		err = fn(try)
+		if err == nil || !IsRetryable(err) {
+			return err
+		}
+		fmt.Printf("  try %d failed (%v), retrying\n", try, err)
+	}
+	return fmt.Errorf("gave up after %d attempts: %w", attempts, err)
+}
+
+func main() {
+	fmt.Println("flaky:")
+	err := Do(5, func(try int) error {
+		if try &lt; 3 {
+			return fmt.Errorf("fetch: %w", Retryable(errors.New("timeout")))
+		}
+		return nil
+	})
+	fmt.Println("result:", err)
+
+	fmt.Println("permanent:")
+	err = Do(5, func(int) error { return errors.New("401 unauthorized") })
+	fmt.Println("result:", err)
+
+	fmt.Println("always failing:")
+	err = Do(2, func(int) error { return Retryable(errors.New("503")) })
+	fmt.Println("result:", err)
+}</code></pre></div>
+    <div class="output"><pre>flaky:
+  try 1 failed (fetch: timeout), retrying
+  try 2 failed (fetch: timeout), retrying
+result: &lt;nil&gt;
+permanent:
+result: 401 unauthorized
+always failing:
+  try 1 failed (503), retrying
+  try 2 failed (503), retrying
+result: gave up after 2 attempts: 503</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: spot the bug</summary>
+    <p>This function sometimes reports failure even though everything worked. Why, and how do you fix it?</p>
+    <div class="code"><pre><code class="language-go">func check(items []string) error {
+	var verr *ValidationError
+	for _, it := range items {
+		if it == "" {
+			verr = &amp;ValidationError{Field: "item", Reason: "empty"}
+		}
+	}
+	return verr
+}</code></pre></div>
+    <div class="solution-label">Solution</div>
+    <p>It returns a typed nil: when no item is empty, <code>verr</code> is a nil <code>*ValidationError</code>, and converting it to <code>error</code> produces a non-nil interface. Fix: <code>if verr != nil { return verr }; return nil</code>, or declare <code>var err error</code> instead of a concrete pointer type.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>An error is any value with an <code>Error() string</code> method. Return it last; <code>nil</code> means success.</li>
+      <li><code>if err != nil { return fmt.Errorf("doing X: %w", err) }</code> keeps the happy path on the left and adds context at every step.</li>
+      <li><code>%w</code> wraps (keeps the cause for code); <code>%v</code> only copies text. Wrapping makes the cause part of your API.</li>
+      <li>Check with <code>errors.Is</code> (specific value), <code>errors.As</code> / <code>errors.AsType</code> (specific type). Never compare strings, and stop using <code>==</code> once errors are wrapped.</li>
+      <li>Sentinels (<code>ErrX</code>) for kinds of failure; custom types (<code>XError</code>) when callers need fields; <code>errors.Join</code> for several at once.</li>
+      <li>Handle each error once: wrap and return, or log and stop. Translate to HTTP codes in one place at the edge.</li>
+      <li><code>panic</code> is for bugs. <code>recover</code> only works in a deferred func on the same goroutine; a panic in any goroutine kills the program.</li>
+      <li>Watch for typed nil errors, ignored <code>Close</code> errors on writes, and <code>err</code> shadowing.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>

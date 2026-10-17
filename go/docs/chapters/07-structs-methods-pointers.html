@@ -1,0 +1,1662 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chapter 07 · Structs, Methods &amp; Pointers — The Go Handbook</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <script>window.Prism = { manual: true };</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-docker.min.js" defer></script>
+  <script src="../assets/app.js" defer></script>
+</head>
+<!-- data-chapter must match the "n" in assets/app.js CHAPTERS -->
+<body data-root="../" data-chapter="07">
+<article class="content">
+
+  <div class="chapter-eyebrow">Part II · Chapter 07</div>
+  <h1>Structs, Methods &amp; Pointers</h1>
+  <p class="lead">Ints and strings get you a long way, but real programs talk about <em>things</em>: an order, a customer, a delivery address. Go models things with <strong>structs</strong>, gives them behaviour with <strong>methods</strong>, and lets you share them without copying using <strong>pointers</strong>. Get these three right and the rest of Go falls into place.</p>
+  <div class="meta">
+    <span class="pill">⏱ 45 min read</span>
+    <span class="pill">◆ Beginner → Intermediate</span>
+    <span class="pill">▶ 16 live walkthroughs</span>
+  </div>
+
+  <div class="objectives">
+    <h4>What you'll learn</h4>
+    <ul>
+      <li>How to define structs, build them with literals, and why Go's zero values make them useful out of the box</li>
+      <li>Anonymous structs, comparing structs, and using structs as map keys</li>
+      <li>Pointers from scratch: <code>&amp;</code>, <code>*</code>, <code>new()</code>, <code>nil</code>, and when a pointer is the right tool</li>
+      <li>Methods, and the most important decision you'll make with them: value vs pointer receivers</li>
+      <li>Constructors (<code>NewOrder</code>), the functional options pattern, and encapsulation with unexported fields</li>
+      <li>Embedding: Go's composition tool, and why it is <em>not</em> inheritance</li>
+      <li>Struct tags and JSON, the shallow-copy trap with slices and maps, and memory layout / padding</li>
+    </ul>
+  </div>
+
+  <p>Throughout this chapter we'll build a tiny e-commerce domain: <code>Order</code>, <code>Customer</code> and <code>Address</code>. It's the same shape you've already been sketching in your own learning code, so every example should feel familiar.</p>
+
+  <!-- ============================================================ -->
+  <h2>Why structs exist</h2>
+  <p>Imagine tracking an order with loose variables: <code>orderID</code>, <code>orderPrice</code>, <code>orderStatus</code>, <code>orderCreatedAt</code>… Now imagine a function that needs an order. You'd pass four arguments. Ten orders? Forty variables. It falls apart fast.</p>
+  <p>A <strong>struct</strong> (short for "structure") is a type that <em>groups named values together</em>. Each value is called a <strong>field</strong>. Once grouped, the whole bundle travels as one thing: you can pass it, return it, store it in a slice, or put it in a map.</p>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A struct is a <strong>form with labelled boxes</strong>. The struct <em>type</em> is the blank form template ("Name: ___, Phone: ___"). A struct <em>value</em> is one filled-in copy of that form. You can photocopy the form (copy the value) and scribble on the copy without changing the original.</p></div>
+
+  <p>Here's how you declare struct types and build values of them:</p>
+
+  <div class="live" data-title="Build and print a struct">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Address is where an order gets delivered.
+type Address struct {
+	Street  string
+	City    string
+	State   string
+	ZipCode string
+}
+
+// Customer is a person who places orders.
+type Customer struct {
+	ID        int
+	Name      string
+	Phone     string
+	Address   Address // a struct inside a struct
+	CreatedAt time.Time
+}
+
+func main() {
+	// 1. Named-field literal: the recommended way.
+	c := Customer{
+		ID:    42,
+		Name:  "Asha",
+		Phone: "+91-98000-00000",
+		Address: Address{
+			City:  "Bengaluru",
+			State: "KA",
+		},
+	}
+
+	// 2. Read and write fields with a dot.
+	c.Address.ZipCode = "560001"
+	fmt.Println(c.Name, "lives in", c.Address.City, c.Address.ZipCode)
+
+	// 3. Fields you leave out get their zero value.
+	fmt.Printf("street=%q created=%v\n", c.Address.Street, c.CreatedAt.IsZero())
+
+	// 4. Three ways to print a struct.
+	a := Address{"MG Road", "Pune", "MH", "411001"} // positional literal
+	fmt.Printf("%v\n", a)
+	fmt.Printf("%+v\n", a)
+	fmt.Printf("%#v\n", a)
+
+	// 5. The zero value of a whole struct.
+	var empty Customer
+	fmt.Printf("%+v\n", empty.Address)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="9-14,17-23">Two type declarations, no code runs yet. <code>Customer</code> holds a whole <code>Address</code> value in its <code>Address</code> field (a real nested struct, not a pointer).</li>
+      <li data-lines="27-35" data-state="c.ID=42; c.Name=&quot;Asha&quot;; c.Address.City=&quot;Bengaluru&quot;; c.Address.ZipCode=&quot;&quot;">The named-field literal builds <code>c</code>. Every field we did not mention, like <code>ZipCode</code> and <code>CreatedAt</code>, silently gets its <strong>zero value</strong>.</li>
+      <li data-lines="38" data-state="c.ID=42; c.Name=&quot;Asha&quot;; c.Address.City=&quot;Bengaluru&quot;; c.Address.ZipCode=&quot;560001&quot;">Dots chain through nested structs: <code>c.Address.ZipCode</code> writes straight into the inner <code>Address</code> stored inside <code>c</code>.</li>
+      <li data-lines="39" data-state="c.Name=&quot;Asha&quot;; c.Address.City=&quot;Bengaluru&quot;; c.Address.ZipCode=&quot;560001&quot;" data-out="Asha lives in Bengaluru 560001"><code>Println</code> separates its arguments with spaces.</li>
+      <li data-lines="42" data-state="c.Address.Street=&quot;&quot;; c.CreatedAt=zero time" data-out="street=&quot;&quot; created=true">We never set <code>Street</code> or <code>CreatedAt</code>. <code>%q</code> shows the empty string as <code>""</code>, and <code>IsZero()</code> confirms the time is the zero time.</li>
+      <li data-lines="45" data-state="a={MG Road Pune MH 411001}">A <strong>positional</strong> literal: values must be in field order and every field must be given. Fine for tiny types, fragile if fields are ever reordered.</li>
+      <li data-lines="46" data-state="a={MG Road Pune MH 411001}" data-out="{MG Road Pune MH 411001}"><code>%v</code> prints just the values, in order.</li>
+      <li data-lines="47" data-state="a={MG Road Pune MH 411001}" data-out="{Street:MG Road City:Pune State:MH ZipCode:411001}"><code>%+v</code> adds field names. This is the one you want in logs and debugging.</li>
+      <li data-lines="48" data-state="a={MG Road Pune MH 411001}" data-out="main.Address{Street:&quot;MG Road&quot;, City:&quot;Pune&quot;, State:&quot;MH&quot;, ZipCode:&quot;411001&quot;}"><code>%#v</code> prints Go syntax, including the package-qualified type name and quoted strings.</li>
+      <li data-lines="51-52" data-state="empty.Address={Street: City: State: ZipCode:}" data-out="{Street: City: State: ZipCode:}"><code>var empty Customer</code> is fully usable: every field, all the way down into the nested <code>Address</code>, is zeroed. No nil, no crash.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>Asha lives in Bengaluru 560001
+street="" created=true
+{MG Road Pune MH 411001}
+{Street:MG Road City:Pune State:MH ZipCode:411001}
+main.Address{Street:"MG Road", City:"Pune", State:"MH", ZipCode:"411001"}
+{Street: City: State: ZipCode:}</pre></div>
+
+  <p>A few things to notice:</p>
+  <ul>
+    <li><strong><code>type Customer struct { ... }</code></strong> declares a new named type. The fields go one per line: name first, then type (just like variable declarations).</li>
+    <li><strong>Named-field literals</strong> (<code>Customer{ID: 42, Name: "Asha"}</code>) let you set fields in any order and skip the ones you don't care about.</li>
+    <li><strong>Positional literals</strong> (<code>Address{"MG Road", "Pune", "MH", "411001"}</code>) must list <em>every</em> field in declaration order. They compile, but they're fragile: add a field to the struct later and every positional literal breaks (or worse, silently shifts meaning if two fields share a type).</li>
+    <li>Fields can themselves be structs (<code>Address</code> inside <code>Customer</code>). You reach in with more dots: <code>c.Address.City</code>.</li>
+    <li>Capitalised field names (<code>Name</code>) are <strong>exported</strong>: visible outside the package. Lower-case ones (<code>name</code>) are private to the package. We'll come back to this under encapsulation.</li>
+  </ul>
+
+  <table>
+    <thead><tr><th>Verb</th><th>Prints</th><th>Use it for</th></tr></thead>
+    <tbody>
+      <tr><td><code>%v</code></td><td><code>{MG Road Pune MH 411001}</code></td><td>Compact output, values only</td></tr>
+      <tr><td><code>%+v</code></td><td><code>{Street:MG Road City:Pune ...}</code></td><td>Debug logs: shows field names</td></tr>
+      <tr><td><code>%#v</code></td><td><code>main.Address{Street:"MG Road", ...}</code></td><td>Go syntax: great for test failure messages</td></tr>
+      <tr><td><code>%T</code></td><td><code>main.Address</code></td><td>Just the type name</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Always use named-field literals for structs from <em>other</em> packages. <code>go vet</code> actually warns about unkeyed literals of imported struct types ("composite literal uses unkeyed fields") because the library author may add a field in a minor release. Positional literals are fine only for tiny, stable, local types like a <code>Point{X, Y}</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Zero values make structs useful immediately</h2>
+  <p>Every type in Go has a <strong>zero value</strong>: what a variable holds before you assign anything. For a struct, the zero value is simply "every field at its own zero value": <code>0</code> for numbers, <code>""</code> for strings, <code>false</code> for bools, <code>nil</code> for pointers/slices/maps, and so on, recursively.</p>
+  <p>Good Go types are designed so that the zero value is <em>already useful</em>. That means no mandatory <code>init()</code> call, no "forgot to construct it" crashes. The Go proverb is: <em>make the zero value useful</em>.</p>
+
+  <div class="live" data-title="Zero-value Cart in action">
+    <pre><code class="language-go">package main
+
+import (
+	"bytes"
+	"fmt"
+	"strings"
+	"sync"
+)
+
+// Cart is useful with zero setup: a nil slice can be appended to,
+// and a zero sync.Mutex is an unlocked mutex.
+type Cart struct {
+	mu    sync.Mutex
+	items []string
+}
+
+func (c *Cart) Add(item string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = append(c.items, item)
+}
+
+func (c *Cart) Count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.items)
+}
+
+func main() {
+	var cart Cart // no constructor needed
+	cart.Add("keyboard")
+	cart.Add("mouse")
+	fmt.Println("items in cart:", cart.Count())
+
+	// The standard library follows the same idea.
+	var buf bytes.Buffer // ready to use
+	buf.WriteString("hello ")
+	buf.WriteString("buffer")
+	fmt.Println(buf.String())
+
+	var sb strings.Builder // also ready to use
+	sb.WriteString("zero values rock")
+	fmt.Println(sb.String())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="30" data-state="cart.mu=unlocked; cart.items=nil; len=0"><code>var cart Cart</code> with no constructor. The mutex's zero value is an <strong>unlocked</strong> mutex and the slice is <code>nil</code>. Both are ready to use.</li>
+      <li data-lines="31,17-18" data-state="cart.mu=locked; cart.items=nil; len=0">We call <code>cart.Add</code>. It has a pointer receiver, so Go passes <code>&amp;cart</code> for us. <code>Lock()</code> grabs the mutex.</li>
+      <li data-lines="19-20" data-state="cart.mu=locked; cart.items=[keyboard]; len=1"><code>append</code> on a nil slice just allocates a fresh backing array. No "make it first" step needed.</li>
+      <li data-lines="21" data-state="cart.mu=unlocked; cart.items=[keyboard]; len=1">The function returns, so the <strong>deferred</strong> <code>Unlock()</code> fires now.</li>
+      <li data-lines="32,17-21" data-state="cart.mu=unlocked; cart.items=[keyboard mouse]; len=2">Same dance for <code>"mouse"</code>: lock, append, deferred unlock.</li>
+      <li data-lines="33,23-26" data-state="cart.items=[keyboard mouse]; len=2" data-out="items in cart: 2"><code>Count()</code> locks, returns <code>len(c.items)</code>, then the deferred unlock runs after the return value is computed.</li>
+      <li data-lines="36-39" data-state="buf=&quot;hello buffer&quot;" data-out="hello buffer">The standard library follows the same rule: a zero <code>bytes.Buffer</code> is an empty buffer you can write to immediately.</li>
+      <li data-lines="41-43" data-state="buf=&quot;hello buffer&quot;; sb=&quot;zero values rock&quot;" data-out="zero values rock">Same for <code>strings.Builder</code>. Design your own types this way and callers never need a <code>NewX()</code> just to get started.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>items in cart: 2
+hello buffer
+zero values rock</pre></div>
+
+  <p>Our <code>Cart</code> works with no constructor because:</p>
+  <ul>
+    <li>a <code>nil</code> slice behaves like an empty slice: <code>len</code> is 0 and <code>append</code> allocates for you;</li>
+    <li>a zero <code>sync.Mutex</code> is an unlocked mutex, ready to use.</li>
+  </ul>
+  <p>The standard library leans on this everywhere: <code>bytes.Buffer</code>, <code>strings.Builder</code>, <code>sync.WaitGroup</code>, <code>sync.Once</code> and <code>http.Client</code> are all usable as <code>var x T</code>.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: nil maps are not writable</div><p>A nil slice is safe to append to, but a <strong>nil map panics on write</strong> (<code>assignment to entry in nil map</code>). If your struct has a map field, either initialise it in a constructor or lazily create it inside the method: <code>if c.counts == nil { c.counts = map[string]int{} }</code>.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Anonymous structs, comparison, and structs as map keys</h2>
+  <h3>Anonymous structs</h3>
+  <p>Sometimes you need a struct shape exactly once and naming it would be noise. An <strong>anonymous struct</strong> is a struct type written inline, without a <code>type</code> declaration. You'll see them most in table-driven tests and for one-off config or JSON payloads.</p>
+
+  <div class="live" data-title="Anonymous structs and a test table">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+func main() {
+	// A one-off struct type with no name.
+	point := struct {
+		X, Y int
+	}{X: 3, Y: 4}
+	fmt.Printf("%+v\n", point)
+
+	// Very common in table-driven tests.
+	tests := []struct {
+		name  string
+		price float64
+		qty   int
+		want  float64
+	}{
+		{"single item", 100, 1, 100},
+		{"three items", 50, 3, 150},
+		{"nothing", 99, 0, 0},
+	}
+	for _, tt := range tests {
+		got := tt.price * float64(tt.qty)
+		fmt.Printf("%-12s got=%v want=%v ok=%v\n", tt.name, got, tt.want, got == tt.want)
+	}
+
+	// Handy for grouping related config in one variable.
+	var config struct {
+		Port    int
+		Debug   bool
+		Version string
+	}
+	config.Port = 8080
+	config.Version = "1.4.0"
+	fmt.Printf("%+v\n", config)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="7-9" data-state="point={X:3 Y:4}">An <strong>anonymous struct</strong>: we declare the type and build a value of it in one expression. The type has no name, so nothing else can reuse it.</li>
+      <li data-lines="10" data-state="point={X:3 Y:4}" data-out="{X:3 Y:4}"><code>%+v</code> prints the field names, just like a named struct.</li>
+      <li data-lines="13-22" data-state="len(tests)=3">A slice of anonymous structs, the classic table-driven test shape. Each row is a positional literal of the four fields.</li>
+      <li data-lines="23-24" data-state="tt.name=&quot;single item&quot;; tt.price=100; tt.qty=1; got=100">Iteration 1: <code>tt</code> is a <em>copy</em> of row 0. <code>float64(tt.qty)</code> is needed because Go never mixes <code>int</code> and <code>float64</code> implicitly.</li>
+      <li data-lines="25" data-state="tt.name=&quot;single item&quot;; got=100; tt.want=100" data-out="single item  got=100 want=100 ok=true"><code>%-12s</code> left-aligns the name in a 12-wide column so the results line up.</li>
+      <li data-lines="23-25" data-state="tt.name=&quot;three items&quot;; tt.price=50; tt.qty=3; got=150" data-out="three items  got=150 want=150 ok=true">Iteration 2: 50 × 3 = 150, matches <code>want</code>.</li>
+      <li data-lines="23-25" data-state="tt.name=&quot;nothing&quot;; tt.price=99; tt.qty=0; got=0" data-out="nothing      got=0 want=0 ok=true">Iteration 3: zero quantity gives 0. Loop ends.</li>
+      <li data-lines="29-33" data-state="config={Port:0 Debug:false Version:}"><code>var config struct{...}</code> declares a one-off variable whose fields all start at zero values.</li>
+      <li data-lines="34-36" data-state="config={Port:8080 Debug:false Version:1.4.0}" data-out="{Port:8080 Debug:false Version:1.4.0}">We set two fields; <code>Debug</code> keeps its zero value <code>false</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>{X:3 Y:4}
+single item  got=100 want=100 ok=true
+three items  got=150 want=150 ok=true
+nothing      got=0 want=0 ok=true
+{Port:8080 Debug:false Version:1.4.0}</pre></div>
+
+  <div class="callout tip"><p>If the same anonymous struct shape appears in two places, give it a name. Anonymous structs are for "here and only here".</p></div>
+
+  <h3>Comparing structs with <code>==</code></h3>
+  <p>Two struct values are equal when <em>every field</em> is equal. That only works if every field type is <strong>comparable</strong>: numbers, strings, bools, pointers, channels, arrays of comparable things, and other comparable structs. Comparable structs can also be used as <strong>map keys</strong>, which is a neat trick for composite keys.</p>
+
+  <div class="live" data-title="Struct equality and struct map keys">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Address struct {
+	City    string
+	ZipCode string
+}
+
+type OrderKey struct {
+	CustomerID int
+	OrderID    int
+}
+
+func main() {
+	a := Address{"Pune", "411001"}
+	b := Address{"Pune", "411001"}
+	c := Address{"Delhi", "110001"}
+
+	// == compares field by field.
+	fmt.Println("a == b:", a == b)
+	fmt.Println("a == c:", a == c)
+
+	// Comparable structs can be map keys.
+	totals := map[OrderKey]float64{}
+	totals[OrderKey{CustomerID: 1, OrderID: 100}] = 499.0
+	totals[OrderKey{CustomerID: 1, OrderID: 101}] = 129.5
+	fmt.Println(totals[OrderKey{1, 100}])
+	fmt.Println(len(totals), "orders tracked")
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="16-18" data-state="a={Pune 411001}; b={Pune 411001}; c={Delhi 110001}">Three separate <code>Address</code> values. <code>a</code> and <code>b</code> are different variables that happen to hold the same field values.</li>
+      <li data-lines="21" data-state="a={Pune 411001}; b={Pune 411001}; c={Delhi 110001}" data-out="a == b: true"><code>==</code> on structs compares <strong>field by field</strong>. Every field matches, so it's <code>true</code>. Identity doesn't matter, only contents.</li>
+      <li data-lines="22" data-state="a={Pune 411001}; b={Pune 411001}; c={Delhi 110001}" data-out="a == c: false"><code>City</code> differs, so the comparison stops there: <code>false</code>.</li>
+      <li data-lines="25" data-state="totals=map[]; len(totals)=0">Because <code>OrderKey</code> has only comparable fields (two ints), it can be a <strong>map key</strong>. A struct with a slice or map field could not.</li>
+      <li data-lines="26-27" data-state="totals=map[{1 100}:499 {1 101}:129.5]; len(totals)=2">Two entries, keyed by a composite (customer, order) pair. No string concatenation hacks like <code>"1:100"</code> needed.</li>
+      <li data-lines="28" data-state="totals=map[{1 100}:499 {1 101}:129.5]; len(totals)=2" data-out="499">Lookup builds a brand-new key <code>OrderKey{1, 100}</code>. It's equal to the stored key field by field, so the lookup hits.</li>
+      <li data-lines="29" data-state="len(totals)=2" data-out="2 orders tracked">Two distinct keys, two entries.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>a == b: true
+a == c: false
+499
+2 orders tracked</pre></div>
+
+  <p>Slices, maps and functions are <em>not</em> comparable. Put one in a struct and <code>==</code> stops compiling:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct {
+	ID    int
+	Items []string // slices are not comparable
+}
+
+func main() {
+	a := Order{ID: 1, Items: []string{"pen"}}
+	b := Order{ID: 1, Items: []string{"pen"}}
+	fmt.Println(a == b)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:13:14: invalid operation: a == b (struct containing []string cannot be compared)</pre></div>
+
+  <div class="callout tip"><p>To compare structs with slice fields, write an <code>Equal</code> method that uses <code>slices.Equal</code> for the slice field, or in tests use <code>reflect.DeepEqual</code> / <code>github.com/google/go-cmp</code>. Keep <code>reflect.DeepEqual</code> out of hot production code: it's slow and has surprising rules (a nil slice is not "deep equal" to an empty one).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Pointers from scratch</h2>
+  <p>Every variable lives somewhere in memory, and that "somewhere" has an <strong>address</strong>, a number like <code>0xc000012080</code>. A <strong>pointer</strong> is just a variable whose value is an address. It says "the thing you want is over <em>there</em>".</p>
+  <p>Two operators are all you need:</p>
+  <ul>
+    <li><strong><code>&amp;x</code></strong> ("address of x") gives you a pointer to <code>x</code>.</li>
+    <li><strong><code>*p</code></strong> ("the value at p", also called <em>dereferencing</em>) follows the pointer to read or write the value it points to.</li>
+  </ul>
+  <p>The type of a pointer to an <code>int</code> is written <code>*int</code>. Yes, <code>*</code> does double duty: in a <em>type</em> (<code>*int</code>) it means "pointer to", in an <em>expression</em> (<code>*p</code>) it means "follow".</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 640 230" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="640" height="230" rx="10" fill="#262624"/>
+      <text x="20" y="28" fill="#a8a49a" font-size="12">MEMORY (simplified)</text>
+      <!-- price -->
+      <rect x="60" y="60" width="200" height="90" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="1.5"/>
+      <text x="76" y="84" fill="#a8a49a" font-size="12">variable</text>
+      <text x="76" y="104" fill="#ece9e1" font-size="16" font-family="JetBrains Mono, monospace">price  int</text>
+      <text x="76" y="135" fill="#8fbf7f" font-size="22" font-family="JetBrains Mono, monospace" font-weight="700">250</text>
+      <text x="60" y="172" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">address 0xc000012080</text>
+      <!-- p -->
+      <rect x="380" y="60" width="220" height="90" rx="8" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="396" y="84" fill="#a8a49a" font-size="12">variable</text>
+      <text x="396" y="104" fill="#ece9e1" font-size="16" font-family="JetBrains Mono, monospace">p  *int</text>
+      <text x="396" y="135" fill="#7fa6d9" font-size="16" font-family="JetBrains Mono, monospace" font-weight="700">0xc000012080</text>
+      <text x="380" y="172" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">address 0xc000014038</text>
+      <!-- arrow -->
+      <defs><marker id="arr7a" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <path d="M380 128 C 330 128, 320 128, 264 112" stroke="#d97757" stroke-width="2" fill="none" marker-end="url(#arr7a)"/>
+      <text x="282" y="60" fill="#e0b45c" font-size="12" font-family="JetBrains Mono, monospace">*p follows the arrow</text>
+      <text x="60" y="206" fill="#a8a49a" font-size="13"><tspan fill="#e0b45c" font-family="JetBrains Mono, monospace">p := &amp;price</tspan> stores price's address in p. <tspan fill="#e0b45c" font-family="JetBrains Mono, monospace">*p = 250</tspan> writes into price.</text>
+    </svg>
+    <figcaption>A pointer is a box holding an address. Following it (<code>*p</code>) lands you on the original variable. (Real addresses differ every run.)</figcaption>
+  </figure>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+func doubleValue(n int) {
+	n = n * 2 // changes the local copy only
+}
+
+func doublePointer(n *int) {
+	*n = *n * 2 // changes the value at that address
+}
+
+func main() {
+	price := 100
+
+	p := &amp;price // p holds the ADDRESS of price
+	fmt.Println("price:", price)
+	fmt.Println("*p   :", *p) // read through the pointer
+
+	*p = 250 // write through the pointer
+	fmt.Println("price after *p = 250:", price)
+
+	doubleValue(price)
+	fmt.Println("after doubleValue:  ", price)
+
+	doublePointer(&amp;price)
+	fmt.Println("after doublePointer:", price)
+
+	var q *int // zero value of a pointer is nil
+	fmt.Println("q is nil:", q == nil)
+	fmt.Printf("type of p: %T\n", p)
+}</code></pre></div>
+  <div class="output"><pre>price: 100
+*p   : 100
+price after *p = 250: 250
+after doubleValue:   250
+after doublePointer: 500
+q is nil: true
+type of p: *int</pre></div>
+
+  <p>Why did <code>doubleValue</code> do nothing? Because <strong>Go passes everything by value</strong>: a function always receives a <em>copy</em> of its arguments. <code>doubleValue</code> doubled its own private copy and threw it away. <code>doublePointer</code> also received a copy, but a copy of an <em>address</em>. Both addresses point to the same <code>price</code>, so writing through it changes the original.</p>
+
+  <div class="live" data-title="Follow a pointer step by step">
+    <pre><code class="language-go">func doublePointer(n *int) {
+	*n = *n * 2
+}
+
+func main() {
+	price := 100
+	p := &amp;price
+	fmt.Println(*p)
+	*p = 250
+	fmt.Println(price)
+	doublePointer(&amp;price)
+	fmt.Println(price)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="6" data-state="price=100">We create <code>price</code> holding <strong>100</strong>. It lives at some address in memory, say <code>0xc080</code>.</li>
+      <li data-lines="7" data-state="price=100; p=0xc080 (→ price)"><code>&amp;price</code> asks "where does price live?" and stores that address in <code>p</code>. Type of <code>p</code> is <code>*int</code>.</li>
+      <li data-lines="8" data-state="price=100; p=0xc080 (→ price)" data-out="100"><code>*p</code> follows the arrow and reads what's there: 100.</li>
+      <li data-lines="9" data-state="price=250; p=0xc080 (→ price)"><code>*p = 250</code> writes through the pointer. We never mentioned <code>price</code>, yet <code>price</code> changed.</li>
+      <li data-lines="10" data-state="price=250; p=0xc080 (→ price)" data-out="250">Printing <code>price</code> confirms it: 250.</li>
+      <li data-lines="11,1" data-state="price=250; n=0xc080 (→ price)">We call <code>doublePointer(&amp;price)</code>. Go copies the <em>address</em> into the parameter <code>n</code>. Now <code>n</code> and <code>p</code> both point at <code>price</code>.</li>
+      <li data-lines="2" data-state="price=500; n=0xc080 (→ price)"><code>*n = *n * 2</code> reads 250 through the pointer, doubles it, and writes 500 back to the same spot.</li>
+      <li data-lines="12" data-state="price=500" data-out="500">Back in <code>main</code>, <code>price</code> is 500. The change "escaped" the function because we shared an address, not a value.</li>
+    </ol>
+  </div>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>A value is <strong>the house</strong>. A pointer is <strong>the house's street address written on a sticky note</strong>. Copying a sticky note is cheap and both copies lead to the same house. Repainting the house via either note changes the one real house.</p></div>
+
+  <h3><code>new()</code>, <code>&amp;T{}</code>, and automatic dereferencing</h3>
+  <p><code>new(T)</code> allocates a zeroed <code>T</code> and returns a <code>*T</code>. For structs, people almost always write <code>&amp;Order{...}</code> instead, because it lets you set fields at the same time. Both are equivalent for the zero case.</p>
+  <p>Go also saves you some typing: when <code>o</code> is a <em>pointer</em> to a struct, <code>o.Status</code> automatically means <code>(*o).Status</code>. There's no <code>-&gt;</code> operator like in C. You just use a dot.</p>
+
+  <div class="live" data-title="new, &amp;T{}, and two pointers to one struct">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct {
+	ID     int
+	Status string
+	Total  float64
+}
+
+func main() {
+	// new(T) allocates a zeroed T and returns *T.
+	n := new(int)
+	*n = 7
+	fmt.Println("*n =", *n)
+
+	o := new(Order) // same as &amp;Order{}
+	fmt.Printf("%+v\n", *o)
+
+	// &amp;T{...} is the idiomatic way for structs.
+	o2 := &amp;Order{ID: 2, Status: "pending", Total: 999}
+
+	// Auto-dereference: o2.Status means (*o2).Status
+	o2.Status = "paid"
+	(*o2).Total = 899 // legal, but nobody writes this
+	fmt.Printf("%+v\n", *o2)
+
+	// Two pointers can point at the same struct.
+	alias := o2
+	alias.Status = "shipped"
+	fmt.Println("o2.Status:", o2.Status)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="13" data-state="n=0xc010 (→ 0)"><code>new(int)</code> allocates a zeroed <code>int</code> somewhere and hands back its address. <code>n</code> is a <code>*int</code>, never nil here.</li>
+      <li data-lines="14-15" data-state="n=0xc010 (→ 7)" data-out="*n = 7">Writing <code>*n = 7</code> stores through the pointer; reading <code>*n</code> follows it back.</li>
+      <li data-lines="17-18" data-state="o=0xc020 (→ {ID:0 Status: Total:0})" data-out="{ID:0 Status: Total:0}"><code>new(Order)</code> gives a pointer to a zero <code>Order</code>. We print <code>*o</code> (the struct), not <code>o</code>, so we see fields instead of <code>&amp;{...}</code>.</li>
+      <li data-lines="21" data-state="o2=0xc040 (→ {ID:2 Status:pending Total:999})"><code>&amp;Order{...}</code> allocates and fills fields in one go. This is what real Go code uses for structs.</li>
+      <li data-lines="24" data-state="o2=0xc040 (→ {ID:2 Status:paid Total:999})"><code>o2.Status</code> on a pointer is <strong>auto-dereferenced</strong>: Go treats it as <code>(*o2).Status</code>. No <code>-&gt;</code> operator.</li>
+      <li data-lines="25-26" data-state="o2=0xc040 (→ {ID:2 Status:paid Total:899})" data-out="{ID:2 Status:paid Total:899}">The explicit <code>(*o2).Total</code> form does the same thing. Legal, but noisy.</li>
+      <li data-lines="29" data-state="o2=0xc040 (→ {ID:2 Status:paid Total:899}); alias=0xc040">Copying a pointer copies the <strong>address</strong>, not the struct. <code>alias</code> and <code>o2</code> now lead to the same <code>Order</code>.</li>
+      <li data-lines="30-31" data-state="o2=0xc040 (→ {ID:2 Status:shipped Total:899}); alias=0xc040" data-out="o2.Status: shipped">Writing via <code>alias</code> is visible via <code>o2</code>: there is only one order.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>*n = 7
+{ID:0 Status: Total:0}
+{ID:2 Status:paid Total:899}
+o2.Status: shipped</pre></div>
+
+  <div class="callout info"><div class="callout-title">Where does the memory live? (escape analysis)</div><p>In C you'd worry that <code>&amp;Order{}</code> inside a function returns a pointer to dead stack memory. Not in Go. The compiler runs <strong>escape analysis</strong>: if a value's address outlives the function, the value is placed on the <em>heap</em> (managed by the garbage collector) instead of the stack. Returning <code>&amp;Order{}</code> is completely safe. You can peek at the compiler's decisions with <code>go build -gcflags=-m</code>; we dig into this in Chapter 18.</p></div>
+
+  <h3>nil pointers</h3>
+  <p>The zero value of any pointer type is <code>nil</code>: "points at nothing". Dereferencing a nil pointer, including reading a field through it, crashes the program with a <strong>panic</strong>. It's the Go flavour of the famous "null pointer exception".</p>
+
+  <div class="live" data-title="A nil pointer: fine to hold, fatal to follow">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Customer struct {
+	Name string
+}
+
+func find(id int) *Customer {
+	if id == 1 {
+		return &amp;Customer{Name: "Asha"}
+	}
+	return nil // not found
+}
+
+func main() {
+	if c := find(1); c != nil {
+		fmt.Println("found:", c.Name)
+	}
+
+	c := find(2)
+	fmt.Println("is nil?", c == nil)
+	fmt.Println(c.Name) // boom
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="17,9-11" data-state="id=1">The <code>if</code> calls <code>find(1)</code>. <code>id == 1</code>, so it returns a pointer to a fresh <code>Customer</code>.</li>
+      <li data-lines="17-18" data-state="c=0xc010 (→ {Name:Asha})" data-out="found: Asha">The <code>c != nil</code> guard passes, so reading <code>c.Name</code> is safe. This <code>c</code> only exists inside the <code>if</code>.</li>
+      <li data-lines="21,9-13" data-state="id=2">Now <code>find(2)</code>: the <code>if</code> fails and it returns <code>nil</code> meaning "not found".</li>
+      <li data-lines="22" data-state="c=nil" data-out="is nil? true">A nil pointer is a perfectly valid value to hold, compare, or pass around.</li>
+      <li data-lines="23" data-state="c=nil">But <code>c.Name</code> must follow the pointer to read the field, and there is nothing there. The program <strong>panics</strong> with a nil pointer dereference (printed on stderr) and exits with status 2.</li>
+    </ol>
+  </div>
+  <div class="output error" data-label="Runtime panic"><pre>found: Asha
+is nil? true
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x1040bb604]
+
+goroutine 1 [running]:
+main.main()
+	/home/you/shop/main.go:23 +0xd4
+exit status 2</pre></div>
+
+  <p>The rule is simple: <strong>if a function can return a nil pointer, the caller must check before using it</strong>. A common Go idiom is to avoid returning a bare nil-or-pointer altogether and return <code>(*Customer, error)</code> or <code>(Customer, bool)</code>, so the "not found" case is impossible to ignore.</p>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: Go has no pointer arithmetic</div><p>You cannot do <code>p++</code> to walk through memory like in C. That's deliberate: it keeps Go memory-safe and lets the garbage collector move on with confidence. (The <code>unsafe</code> package can do it, and the name is the warning.)</p></div>
+
+  <h3>When should you use a pointer?</h3>
+  <table>
+    <thead><tr><th>Situation</th><th>Use</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Function must modify the caller's value</td><td>Pointer</td><td>Otherwise it changes a copy</td></tr>
+      <tr><td>Struct is large (many fields, big arrays)</td><td>Pointer</td><td>Avoid copying lots of bytes on every call</td></tr>
+      <tr><td>Struct contains a <code>sync.Mutex</code> or must not be copied</td><td>Pointer</td><td>Copying a mutex copies its lock state (vet flags this)</td></tr>
+      <tr><td>You need "absent" vs "present but zero" (e.g. optional JSON field)</td><td>Pointer</td><td><code>nil</code> means absent; <code>*int</code> pointing to 0 means zero</td></tr>
+      <tr><td>Small, immutable data: <code>Point</code>, <code>Money</code>, <code>time.Time</code></td><td>Value</td><td>Copies are cheap and can't be mutated behind your back</td></tr>
+      <tr><td>Slices, maps, channels, funcs</td><td>Usually value</td><td>They already contain pointers internally; <code>*[]T</code> is rarely needed</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Don't reach for pointers "for performance" by reflex. A pointer can force a value onto the heap, which means more garbage-collector work, and it adds a nil case every reader must think about. For small structs (a few words) passing by value is often <em>faster</em>. Choose pointers for <strong>semantics</strong> (shared, mutable, identity) first, and for performance only once a benchmark tells you to.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Methods: giving types behaviour</h2>
+  <p>A <strong>method</strong> is a function attached to a type. You write it like a function, but with an extra parameter in front of the name called the <strong>receiver</strong>:</p>
+  <div class="code" data-file="syntax"><pre><code class="language-go">func (o Order) Summary() string { ... }
+//    ^^^^^^^^ receiver: "o" is the Order this method was called on</code></pre></div>
+  <p>Then you call it with a dot: <code>order.Summary()</code>. That's really all a method is: <code>order.Summary()</code> is sugar for "call <code>Summary</code> with <code>order</code> as its first argument". You can attach methods to any named type you declare in your package (structs, but also <code>type Status string</code> or <code>type Celsius float64</code>), but not to types from other packages like <code>int</code> or <code>time.Time</code>.</p>
+
+  <h3>Value receivers vs pointer receivers</h3>
+  <p>Remember "Go passes everything by value"? The receiver is just a parameter, so the same rule applies:</p>
+  <ul>
+    <li>A <strong>value receiver</strong> <code>(o Order)</code> gets a <em>copy</em> of the order. Changes inside the method vanish when it returns.</li>
+    <li>A <strong>pointer receiver</strong> <code>(o *Order)</code> gets the <em>address</em> of the order. Changes stick.</li>
+  </ul>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct {
+	ID     int
+	Total  float64
+	Status string
+}
+
+// Value receiver: gets a COPY of the order. Good for reading.
+func (o Order) Summary() string {
+	return fmt.Sprintf("#%d %s ₹%.2f", o.ID, o.Status, o.Total)
+}
+
+// Value receiver that tries to modify: changes the copy only!
+func (o Order) MarkPaidBroken() {
+	o.Status = "paid"
+}
+
+// Pointer receiver: gets the ADDRESS. Changes stick.
+func (o *Order) MarkPaid() {
+	o.Status = "paid"
+}
+
+func (o *Order) ApplyDiscount(percent float64) {
+	o.Total -= o.Total * percent / 100
+}
+
+func main() {
+	o := Order{ID: 7, Total: 1000, Status: "pending"}
+	fmt.Println(o.Summary())
+
+	o.MarkPaidBroken()
+	fmt.Println("after MarkPaidBroken:", o.Status)
+
+	o.MarkPaid() // Go rewrites this to (&amp;o).MarkPaid()
+	o.ApplyDiscount(10)
+	fmt.Println("after MarkPaid:      ", o.Summary())
+
+	p := &amp;o
+	fmt.Println("via pointer:         ", p.Summary()) // Go rewrites to (*p).Summary()
+}</code></pre></div>
+  <div class="output"><pre>#7 pending ₹1000.00
+after MarkPaidBroken: pending
+after MarkPaid:       #7 paid ₹900.00
+via pointer:          #7 paid ₹900.00</pre></div>
+
+  <p>Notice that we called the pointer method <code>o.MarkPaid()</code> on a plain variable <code>o</code>, and the value method <code>p.Summary()</code> on a pointer. Go quietly inserts the <code>&amp;</code> or <code>*</code> for you, as long as the variable is <strong>addressable</strong> (a named variable, a slice element, a field of an addressable struct, etc.).</p>
+
+  <div class="live" data-title="Why the broken method doesn't stick">
+    <pre><code class="language-go">func (o Order) MarkPaidBroken() {
+	o.Status = "paid"
+}
+
+func (o *Order) MarkPaid() {
+	o.Status = "paid"
+}
+
+func main() {
+	o := Order{ID: 7, Status: "pending"}
+	o.MarkPaidBroken()
+	fmt.Println(o.Status)
+	o.MarkPaid()
+	fmt.Println(o.Status)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="main.o={7 pending}">We build an order in <code>main</code>. Its status is <code>pending</code>.</li>
+      <li data-lines="11,1" data-state="main.o={7 pending}; copy={7 pending}">Calling a <strong>value-receiver</strong> method: Go copies the whole struct into the receiver. The method now has its own private <code>Order</code>.</li>
+      <li data-lines="2" data-state="main.o={7 pending}; copy={7 paid}">The method sets <code>Status</code> on <em>its copy</em>. <code>main.o</code> is untouched.</li>
+      <li data-lines="3,12" data-state="main.o={7 pending}" data-out="pending">The method returns and the copy is thrown away. Printing shows <code>pending</code>. This is the #1 struct bug new Gophers write.</li>
+      <li data-lines="13,5" data-state="main.o={7 pending}; o=&amp;main.o">Now the <strong>pointer-receiver</strong> method. Go rewrites the call to <code>(&amp;o).MarkPaid()</code>; the receiver holds the address of <code>main.o</code>.</li>
+      <li data-lines="6" data-state="main.o={7 paid}"><code>o.Status = "paid"</code> auto-dereferences and writes into the real order.</li>
+      <li data-lines="14" data-state="main.o={7 paid}" data-out="paid">This time the change survived: <code>paid</code>.</li>
+    </ol>
+  </div>
+
+  <h3>The rules for choosing a receiver</h3>
+  <p>Use a <strong>pointer receiver</strong> if <em>any</em> of these are true:</p>
+  <ol>
+    <li>The method needs to modify the receiver.</li>
+    <li>The struct is large enough that copying it on every call is wasteful.</li>
+    <li>The struct contains something that must not be copied (a <code>sync.Mutex</code>, a <code>bytes.Buffer</code>, a "no-copy" field).</li>
+    <li><strong>Consistency:</strong> some other method on the type already uses a pointer receiver.</li>
+  </ol>
+  <p>Use a <strong>value receiver</strong> for small, immutable, value-like types: <code>time.Time</code>, a <code>Money</code> type, a <code>Point</code>, an enum like <code>type Status string</code>.</p>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Don't mix receiver kinds on one type. If <em>any</em> method on <code>Order</code> needs <code>*Order</code>, make them <em>all</em> <code>*Order</code>. Mixed receivers confuse readers ("is this one safe to call on a copy?"), cause subtle interface-satisfaction surprises (next section), and invite data races where a value method copies the struct while another goroutine mutates it. Most real-world domain types (services, repositories, orders with state) end up all-pointer.</p></div>
+
+  <h3>Method sets: the rule behind the magic</h3>
+  <p>The automatic <code>&amp;</code> trick only works when Go can take an address. When you store a value inside an <strong>interface</strong> (Chapter 08), there's nothing addressable to point to, so Go uses a stricter rule called the <strong>method set</strong>:</p>
+  <ul>
+    <li>The method set of <code>T</code> contains only methods with <strong>value</strong> receivers.</li>
+    <li>The method set of <code>*T</code> contains methods with value <strong>and</strong> pointer receivers.</li>
+  </ul>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct{ Status string }
+
+func (o *Order) Cancel() { o.Status = "cancelled" }
+
+type Canceller interface {
+	Cancel()
+}
+
+func main() {
+	o := Order{Status: "pending"}
+	var c Canceller = o // a plain Order does not have Cancel in its method set
+	c.Cancel()
+	fmt.Println(o.Status)
+}</code></pre></div>
+  <div class="output error" data-label="Compile error"><pre># command-line-arguments
+./main.go:15:20: cannot use o (variable of struct type Order) as Canceller value in variable declaration: Order does not implement Canceller (method Cancel has pointer receiver)</pre></div>
+
+  <p>The compiler even tells you why: "method Cancel has pointer receiver". Store a pointer instead:</p>
+
+  <div class="live" data-title="Storing &amp;o in an interface">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct{ Status string }
+
+func (o *Order) Cancel() { o.Status = "cancelled" }
+
+type Canceller interface {
+	Cancel()
+}
+
+func main() {
+	o := Order{Status: "pending"}
+	var c Canceller = &amp;o // *Order has Cancel in its method set
+	c.Cancel()
+	fmt.Println(o.Status)
+
+	// Calling directly on an addressable variable is fine either way:
+	o2 := Order{Status: "pending"}
+	o2.Cancel() // Go takes &amp;o2 for you
+	fmt.Println(o2.Status)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="14" data-state="o.Status=&quot;pending&quot;"><code>o</code> is a plain <code>Order</code> value. <code>Cancel</code> has a <strong>pointer receiver</strong>, so only <code>*Order</code> has it in its method set.</li>
+      <li data-lines="15" data-state="o.Status=&quot;pending&quot;; c=(*Order → o)">We store <code>&amp;o</code> in the interface. That satisfies <code>Canceller</code>, and the interface now holds the address of <code>o</code>, not a copy.</li>
+      <li data-lines="16,7" data-state="o.Status=&quot;cancelled&quot;; c=(*Order → o)"><code>c.Cancel()</code> dispatches to <code>(*Order).Cancel</code> with that address, so the write lands on the original <code>o</code>.</li>
+      <li data-lines="17" data-state="o.Status=&quot;cancelled&quot;" data-out="cancelled">Proof: <code>o.Status</code> changed.</li>
+      <li data-lines="20-21,7" data-state="o.Status=&quot;cancelled&quot;; o2.Status=&quot;cancelled&quot;">Calling a pointer method <em>directly</em> on an addressable variable is fine: Go rewrites <code>o2.Cancel()</code> to <code>(&amp;o2).Cancel()</code>. That convenience does <strong>not</strong> apply to interface assignment.</li>
+      <li data-lines="22" data-state="o2.Status=&quot;cancelled&quot;" data-out="cancelled">The direct call mutated <code>o2</code> too.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>cancelled
+cancelled</pre></div>
+
+  <div class="callout mental"><div class="callout-title">Why the rule exists</div><p>If Go let you put a plain <code>Order</code> into the interface and then call <code>Cancel</code>, it would have to cancel a <em>hidden copy</em> stored inside the interface. You'd think you cancelled your order; you'd actually cancel a clone nobody can see. The method-set rule turns that silent bug into a compile error.</p></div>
+
+  <h3>A very common loop bug</h3>
+  <p>The same "copy" rule bites in <code>for ... range</code> loops. The loop variable is a <em>copy</em> of each element:</p>
+
+  <div class="live" data-title="Why range-value edits vanish">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Order struct {
+	ID     int
+	Status string
+}
+
+func main() {
+	orders := []Order{{1, "pending"}, {2, "pending"}}
+
+	// BUG: o is a copy of each element.
+	for _, o := range orders {
+		o.Status = "shipped"
+	}
+	fmt.Println("range value:", orders)
+
+	// FIX 1: index into the slice.
+	for i := range orders {
+		orders[i].Status = "shipped"
+	}
+	fmt.Println("range index:", orders)
+
+	// FIX 2: take a pointer to the element.
+	for i := range orders {
+		o := &amp;orders[i]
+		o.Status = "delivered"
+	}
+	fmt.Println("pointer:    ", orders)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="11" data-state="orders=[{1 pending} {2 pending}]">A slice of two <code>Order</code> <strong>values</strong> (not pointers).</li>
+      <li data-lines="14-15" data-state="orders=[{1 pending} {2 pending}]; o={1 shipped}">Iteration 1 of the buggy loop: <code>o</code> is a <em>copy</em> of <code>orders[0]</code>. We set the copy's status; the slice element is untouched.</li>
+      <li data-lines="14-15" data-state="orders=[{1 pending} {2 pending}]; o={2 shipped}">Iteration 2: same thing with a copy of <code>orders[1]</code>. The copy is thrown away at the end of each iteration.</li>
+      <li data-lines="17" data-state="orders=[{1 pending} {2 pending}]" data-out="range value: [{1 pending} {2 pending}]">Nothing changed. This is one of the most common Go bugs, and it compiles without a warning.</li>
+      <li data-lines="20-21" data-state="orders=[{1 shipped} {2 pending}]; i=0">Fix 1, iteration 1: <code>orders[i].Status</code> writes into the slice's backing array directly.</li>
+      <li data-lines="20-21" data-state="orders=[{1 shipped} {2 shipped}]; i=1">Iteration 2 does the same for index 1.</li>
+      <li data-lines="23" data-state="orders=[{1 shipped} {2 shipped}]" data-out="range index: [{1 shipped} {2 shipped}]">Both changes stuck.</li>
+      <li data-lines="26-28" data-state="orders=[{1 delivered} {2 shipped}]; i=0; o=&amp;orders[0]">Fix 2: <code>&amp;orders[i]</code> is a pointer <em>into</em> the slice, so <code>o.Status</code> edits the real element. Handy when you touch many fields.</li>
+      <li data-lines="26-28" data-state="orders=[{1 delivered} {2 delivered}]; i=1; o=&amp;orders[1]">Second iteration, second element.</li>
+      <li data-lines="30" data-state="orders=[{1 delivered} {2 delivered}]" data-out="pointer:     [{1 delivered} {2 delivered}]">Both delivered. Remember: <code>range</code> hands you copies of values; reach for the index when you need to mutate.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>range value: [{1 pending} {2 pending}]
+range index: [{1 shipped} {2 shipped}]
+pointer:     [{1 delivered} {2 delivered}]</pre></div>
+
+  <div class="quiz" data-answer="2">
+    <div class="quiz-q">Type <code>Order</code> has <code>func (o Order) Total() float64</code> and <code>func (o *Order) Ship()</code>. Which of these compiles?</div>
+    <div class="quiz-opts">
+      <button><code>var s interface{ Ship() } = Order{}</code></button>
+      <button><code>Order{}.Ship()</code></button>
+      <button><code>var t interface{ Total() float64 } = &amp;Order{}</code></button>
+    </div>
+    <div class="quiz-explain">The method set of <code>*Order</code> includes both value and pointer methods, so <code>&amp;Order{}</code> has <code>Total</code>. Option A fails because <code>Order</code>'s method set lacks <code>Ship</code>. Option B fails because a composite literal <code>Order{}</code> is not addressable, so Go can't take <code>&amp;</code> to call a pointer method on it.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Constructors and the functional options pattern</h2>
+  <h3>NewX constructors</h3>
+  <p>Go has no special constructor syntax. By convention, a plain function named <code>NewX</code> builds and returns an <code>X</code> (often a <code>*X</code>). Write one when the zero value <em>isn't</em> enough: you need to validate input, fill defaults, open a connection, or initialise a map.</p>
+
+  <div class="live" data-title="A validating constructor">
+    <pre><code class="language-go">package main
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+type Status string
+
+const (
+	Pending   Status = "pending"
+	Completed Status = "completed"
+	Failed    Status = "failed"
+)
+
+type Order struct {
+	ID        int
+	Name      string
+	Price     float64
+	Status    Status
+	CreatedAt time.Time
+}
+
+// NewOrder is a constructor: it validates input and fills defaults.
+func NewOrder(id int, name string, price float64) (*Order, error) {
+	if name == "" {
+		return nil, errors.New("order name is required")
+	}
+	if price &lt;= 0 {
+		return nil, fmt.Errorf("invalid price %.2f: must be positive", price)
+	}
+	return &amp;Order{
+		ID:        id,
+		Name:      name,
+		Price:     price,
+		Status:    Pending, // sensible default
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func main() {
+	o, err := NewOrder(1, "Mechanical keyboard", 4999)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println(o.ID, o.Name, o.Price, o.Status, !o.CreatedAt.IsZero())
+
+	_, err = NewOrder(2, "Mouse", -5)
+	fmt.Println("error:", err)
+
+	_, err = NewOrder(3, "", 100)
+	fmt.Println("error:", err)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="43,26-29" data-state="id=1; name=&quot;Mechanical keyboard&quot;; price=4999"><code>main</code> calls the constructor. The name isn't empty, so the first guard passes.</li>
+      <li data-lines="30" data-state="id=1; name=&quot;Mechanical keyboard&quot;; price=4999">4999 is positive, so the price guard passes too.</li>
+      <li data-lines="33-39" data-state="o=&amp;{ID:1 Name:Mechanical keyboard Price:4999 Status:pending CreatedAt:now}; err=nil">Valid input: build the order with defaults (<code>Status: Pending</code>, <code>CreatedAt: time.Now()</code>) and return it with a nil error.</li>
+      <li data-lines="44,48" data-state="o.ID=1; o.Status=pending; err=nil" data-out="1 Mechanical keyboard 4999 pending true">Back in <code>main</code>, <code>err</code> is nil so we skip the early return. <code>!o.CreatedAt.IsZero()</code> is <code>true</code> because the constructor stamped it.</li>
+      <li data-lines="50,26-31" data-state="id=2; name=&quot;Mouse&quot;; price=-5">Second call with price -5. Name is fine, but <code>price &lt;= 0</code> is true.</li>
+      <li data-lines="31,51" data-state="err=&quot;invalid price -5.00: must be positive&quot;" data-out="error: invalid price -5.00: must be positive">The constructor returns <code>nil</code> and an error built with <code>fmt.Errorf</code>. We discard the order with <code>_</code> and print the error.</li>
+      <li data-lines="53,27-28" data-state="id=3; name=&quot;&quot;; price=100">Third call: an empty name fails the very first guard, so the price is never checked.</li>
+      <li data-lines="54" data-state="err=&quot;order name is required&quot;" data-out="error: order name is required">A constructor is the one place that guarantees every <code>*Order</code> your code sees is valid.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>1 Mechanical keyboard 4999 pending true
+error: invalid price -5.00: must be positive
+error: order name is required</pre></div>
+
+  <p>Conventions worth copying:</p>
+  <ul>
+    <li>If construction can fail, return <code>(*Order, error)</code>. Never return a half-built object and hope the caller notices.</li>
+    <li>If the package is named after the type, shorten the name: <code>order.New(...)</code> reads better than <code>order.NewOrder(...)</code>.</li>
+    <li>Return a pointer when the type has pointer methods or identity (an order you'll mutate). Return a value for small value types (<code>money.New(100, "INR")</code>).</li>
+  </ul>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: constructors are optional</div><p>Nothing stops a caller from writing <code>Order{}</code> and skipping <code>NewOrder</code>. Either make the zero value safe, or hide the fields (unexported) so the constructor is the only way in. We'll do the latter shortly.</p></div>
+
+  <h3>Functional options</h3>
+  <p>What if an order has a handful of <em>optional</em> settings: a coupon, express shipping, a delivery note? A constructor with seven parameters (<code>NewOrder(1, 499, "", false, "", 0, nil)</code>) is unreadable. The <strong>functional options pattern</strong> fixes that: each option is a small function that tweaks the struct, and the constructor accepts any number of them via a variadic parameter.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Order struct {
+	ID       int
+	Total    float64
+	Coupon   string
+	Express  bool
+	Note     string
+	Deadline time.Duration
+}
+
+// Option is a function that tweaks an Order while it is being built.
+type Option func(*Order)
+
+func WithCoupon(code string) Option {
+	return func(o *Order) { o.Coupon = code }
+}
+
+func WithExpressShipping() Option {
+	return func(o *Order) {
+		o.Express = true
+		o.Deadline = 24 * time.Hour
+	}
+}
+
+func WithNote(note string) Option {
+	return func(o *Order) { o.Note = note }
+}
+
+// NewOrder takes the required args normally, optional ones as Options.
+func NewOrder(id int, total float64, opts ...Option) *Order {
+	o := &amp;Order{ // defaults first
+		ID:       id,
+		Total:    total,
+		Deadline: 5 * 24 * time.Hour,
+	}
+	for _, opt := range opts {
+		opt(o) // each option mutates the order
+	}
+	return o
+}
+
+func main() {
+	basic := NewOrder(1, 499)
+	fmt.Printf("%+v\n", *basic)
+
+	fancy := NewOrder(2, 4999,
+		WithCoupon("DIWALI10"),
+		WithExpressShipping(),
+		WithNote("leave at door"),
+	)
+	fmt.Printf("%+v\n", *fancy)
+}</code></pre></div>
+  <div class="output"><pre>{ID:1 Total:499 Coupon: Express:false Note: Deadline:120h0m0s}
+{ID:2 Total:4999 Coupon:DIWALI10 Express:true Note:leave at door Deadline:24h0m0s}</pre></div>
+
+  <div class="live" data-title="How options get applied">
+    <pre><code class="language-go">func NewOrder(id int, opts ...Option) *Order {
+	o := &amp;Order{ID: id, Deadline: 120 * time.Hour}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}
+
+func main() {
+	o := NewOrder(2, WithCoupon("DIWALI10"), WithExpressShipping())
+	fmt.Println(o.Coupon, o.Express, o.Deadline)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="10" data-state="opts=[couponFn expressFn]">First, the arguments are evaluated. <code>WithCoupon("DIWALI10")</code> doesn't change anything yet: it <em>returns a closure</em> that remembers <code>code</code>. Same for <code>WithExpressShipping()</code>. Both closures land in the <code>opts</code> slice.</li>
+      <li data-lines="2" data-state="Coupon=&quot;&quot;; Express=false; Deadline=120h">The constructor sets <strong>defaults</strong> first: standard 5-day (120h) delivery.</li>
+      <li data-lines="3-4" data-state="Coupon=DIWALI10; Express=false; Deadline=120h">First loop iteration: calling the coupon closure with <code>o</code> sets <code>o.Coupon</code>.</li>
+      <li data-lines="3-4" data-state="Coupon=DIWALI10; Express=true; Deadline=24h">Second iteration: the express closure flips <code>Express</code> and <strong>overrides</strong> the default deadline. Later options win.</li>
+      <li data-lines="6,11" data-state="Coupon=DIWALI10; Express=true; Deadline=24h" data-out="DIWALI10 true 24h0m0s">The finished order comes back and we print it.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Functional options shine for <strong>library APIs</strong> that will grow (gRPC's <code>grpc.WithTransportCredentials</code>, Uber's zap logger, many SDK clients). Adding a new option never breaks existing callers. For internal code with three fields, a plain config struct (<code>NewServer(Config{Port: 8080})</code>) is simpler and just as clear. Pick options when you need defaults + extensibility + a stable public API; otherwise don't pay the ceremony.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Encapsulation with unexported fields</h2>
+  <p>Go's visibility rule is refreshingly simple: <strong>an identifier starting with a capital letter is exported</strong> (visible to other packages); lower-case is unexported (visible only inside its own package). There is no <code>public</code>/<code>private</code> keyword and, importantly, the boundary is the <strong>package</strong>, not the type.</p>
+  <p>That gives you encapsulation: export the type, hide its fields, and expose only methods that enforce your business rules. Here's a tiny module with an <code>order</code> package:</p>
+
+  <div class="code" data-file="go.mod"><pre><code class="language-go">module shop
+
+go 1.27</code></pre></div>
+  <div class="code" data-file="order/order.go"><pre><code class="language-go">package order
+
+import "errors"
+
+// Order is exported (capital O), but its fields are not.
+// Code outside this package can only change it through methods.
+type Order struct {
+	id     int
+	total  float64
+	status string
+}
+
+func New(id int, total float64) *Order {
+	return &amp;Order{id: id, total: total, status: "pending"}
+}
+
+// Getters: by convention named Total(), not GetTotal().
+func (o *Order) Total() float64 { return o.total }
+func (o *Order) Status() string { return o.status }
+
+// Cancel enforces a business rule the caller cannot bypass.
+func (o *Order) Cancel() error {
+	if o.status == "shipped" {
+		return errors.New("cannot cancel a shipped order")
+	}
+	o.status = "cancelled"
+	return nil
+}
+
+func (o *Order) Ship() { o.status = "shipped" }</code></pre></div>
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+
+	"shop/order"
+)
+
+func main() {
+	o := order.New(1, 2500)
+	fmt.Println(o.Status(), o.Total())
+
+	o.Ship()
+	if err := o.Cancel(); err != nil {
+		fmt.Println("error:", err)
+	}
+	fmt.Println(o.Status())
+
+	// o.status = "cancelled" // does not compile outside package order
+}</code></pre></div>
+  <div class="output"><pre>pending 2500
+error: cannot cancel a shipped order
+shipped</pre></div>
+
+  <p>Uncomment the forbidden line and the compiler refuses:</p>
+  <div class="output error" data-label="Compile error"><pre># shop
+./main.go:19:4: o.status undefined (type *order.Order has no field or method status, but does have method Status)</pre></div>
+
+  <p>Now there is <em>no way</em> for code outside package <code>order</code> to cancel a shipped order. The rule lives in one place.</p>
+
+  <div class="callout tip"><p>Go getters drop the <code>Get</code> prefix: a field <code>owner</code> gets a method <code>Owner()</code>, and a setter (if you need one) is <code>SetOwner()</code>. Don't add getters and setters for every field by habit, though. Export plain data fields freely on simple data types (DTOs, config); hide them when there's an invariant to protect.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Embedding: composition, not inheritance</h2>
+  <p>Go has no classes and no inheritance. Instead it has <strong>embedding</strong>: you put a type inside a struct <em>without giving it a field name</em>. The embedded type's fields and methods are <strong>promoted</strong>, meaning you can access them directly on the outer struct as if they were its own.</p>
+
+  <div class="live" data-title="Promoted fields and methods">
+    <pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"time"
+)
+
+// Timestamps is a small reusable piece.
+type Timestamps struct {
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (t *Timestamps) Touch(now time.Time) {
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = now
+	}
+	t.UpdatedAt = now
+}
+
+type Address struct {
+	City string
+}
+
+// Customer EMBEDS Timestamps (no field name, just the type).
+type Customer struct {
+	Timestamps // embedded: fields and methods are promoted
+	Name       string
+	Address    Address // a normal named field, NOT embedded
+}
+
+type Order struct {
+	Timestamps
+	ID int
+}
+
+func main() {
+	now := time.Date(2026, 10, 16, 9, 30, 0, 0, time.UTC)
+
+	c := Customer{Name: "Asha", Address: Address{City: "Pune"}}
+	// Promoted method: really c.Timestamps.Touch(now)
+	c.Touch(now)
+	// Promoted field: really c.Timestamps.CreatedAt
+	fmt.Println("created:", c.CreatedAt.Format(time.DateTime))
+	fmt.Println("same thing:", c.Timestamps.CreatedAt.Format(time.DateTime))
+	fmt.Println("city:", c.Address.City) // named field needs the full path
+
+	o := Order{ID: 9}
+	o.Touch(now.Add(time.Hour))
+	fmt.Println("order updated:", o.UpdatedAt.Format(time.Kitchen))
+
+	// Literal syntax: the embedded field's name is its type name.
+	o2 := Order{Timestamps: Timestamps{CreatedAt: now}, ID: 10}
+	fmt.Println("order 10 created:", o2.CreatedAt.Year())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="38" data-state="now=2026-10-16 09:30 UTC">A fixed time so the output is deterministic.</li>
+      <li data-lines="40" data-state="c.Name=&quot;Asha&quot;; c.Timestamps={zero zero}; c.Address.City=&quot;Pune&quot;"><code>c</code> contains a whole <code>Timestamps</code> value inside it (the embedded field), both times still zero.</li>
+      <li data-lines="42,14-17" data-state="c.Timestamps.CreatedAt=09:30; c.Timestamps.UpdatedAt=zero"><code>c.Touch(now)</code> is a <strong>promoted method</strong>: Go rewrites it to <code>(&amp;c.Timestamps).Touch(now)</code>. The receiver is the inner struct, not the <code>Customer</code>. <code>CreatedAt</code> is zero, so it gets set.</li>
+      <li data-lines="18" data-state="c.Timestamps.CreatedAt=09:30; c.Timestamps.UpdatedAt=09:30"><code>UpdatedAt</code> is always refreshed.</li>
+      <li data-lines="44" data-state="c.CreatedAt=09:30" data-out="created: 2026-10-16 09:30:00">Promoted field: <code>c.CreatedAt</code> is shorthand for <code>c.Timestamps.CreatedAt</code>.</li>
+      <li data-lines="45" data-state="c.CreatedAt=09:30" data-out="same thing: 2026-10-16 09:30:00">The long form still works. The embedded field's name is its type name, <code>Timestamps</code>.</li>
+      <li data-lines="46" data-state="c.Address.City=&quot;Pune&quot;" data-out="city: Pune"><code>Address</code> is a <em>named</em> field, not embedded, so nothing is promoted. You must write <code>c.Address.City</code>.</li>
+      <li data-lines="48-49,14-18" data-state="o.ID=9; o.CreatedAt=10:30; o.UpdatedAt=10:30"><code>Order</code> embeds the same <code>Timestamps</code>, so it gets <code>Touch</code> for free. Called with <code>now + 1h</code>.</li>
+      <li data-lines="50" data-state="o.UpdatedAt=10:30" data-out="order updated: 10:30AM"><code>time.Kitchen</code> formats as <code>3:04PM</code> style.</li>
+      <li data-lines="53-54" data-state="o2.ID=10; o2.CreatedAt=2026-10-16 09:30" data-out="order 10 created: 2026">In a literal you name the embedded field by its type: <code>Timestamps: Timestamps{...}</code>.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>created: 2026-10-16 09:30:00
+same thing: 2026-10-16 09:30:00
+city: Pune
+order updated: 10:30AM
+order 10 created: 2026</pre></div>
+
+  <p>Under the hood, <code>Customer</code> really does have a field called <code>Timestamps</code> (the field name of an embedded type is its type name). <code>c.Touch(now)</code> is just shorthand that the compiler expands to <code>c.Timestamps.Touch(now)</code>. Nothing more magical than that.</p>
+
+  <h3>Why it's not inheritance</h3>
+  <p>If you come from Java or Python, embedding looks like "Customer extends Timestamps". It isn't, and the difference matters:</p>
+
+  <div class="live" data-title="Shadowing: no virtual dispatch">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type Notifier struct{ Channel string }
+
+func (n Notifier) Describe() string { return "notifier via " + n.Channel }
+
+// Send calls Describe. Which Describe? Always Notifier's.
+func (n Notifier) Send(msg string) {
+	fmt.Printf("[%s] %s\n", n.Describe(), msg)
+}
+
+type SMSNotifier struct {
+	Notifier
+	Phone string
+}
+
+// This "shadows" Notifier.Describe for SMSNotifier values...
+func (s SMSNotifier) Describe() string { return "SMS to " + s.Phone }
+
+func main() {
+	s := SMSNotifier{Notifier: Notifier{Channel: "sms"}, Phone: "+91-98000"}
+
+	fmt.Println(s.Describe())          // outer method wins
+	fmt.Println(s.Notifier.Describe()) // inner still reachable
+	s.Send("your order has shipped")   // ...but Send still calls the INNER one
+
+	// And there is no "is-a" relationship:
+	// var n Notifier = s // compile error: cannot use s (SMSNotifier) as Notifier
+	var n Notifier = s.Notifier // you must pick the field explicitly
+	fmt.Println(n.Channel)
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="23" data-state="s.Notifier.Channel=&quot;sms&quot;; s.Phone=&quot;+91-98000&quot;"><code>s</code> embeds a <code>Notifier</code>. Both types define a <code>Describe</code> method.</li>
+      <li data-lines="25,20" data-state="s.Notifier.Channel=&quot;sms&quot;; s.Phone=&quot;+91-98000&quot;" data-out="SMS to +91-98000"><code>s.Describe()</code>: the outer type's own method sits at a shallower depth, so it <strong>shadows</strong> the promoted one.</li>
+      <li data-lines="26,7" data-state="s.Notifier.Channel=&quot;sms&quot;" data-out="notifier via sms">The inner method is still reachable through the explicit path <code>s.Notifier.Describe()</code>.</li>
+      <li data-lines="27,10" data-state="n.Channel=&quot;sms&quot;; msg=&quot;your order has shipped&quot;"><code>s.Send</code> is promoted, so Go calls <code>s.Notifier.Send(msg)</code>. Inside, the receiver <code>n</code> is just a <code>Notifier</code>; it has no idea it lives inside an <code>SMSNotifier</code>.</li>
+      <li data-lines="11,7" data-state="n.Channel=&quot;sms&quot;" data-out="[notifier via sms] your order has shipped">So <code>n.Describe()</code> calls <strong>Notifier's</strong> version. This is the gotcha: embedding is not inheritance and there are no virtual methods. The outer override is never seen here.</li>
+      <li data-lines="31-32" data-state="n.Channel=&quot;sms&quot;" data-out="sms">An <code>SMSNotifier</code> is not a <code>Notifier</code>. To get one you pick the embedded field explicitly.</li>
+    </ol>
+  </div>
+  <div class="output"><pre>SMS to +91-98000
+notifier via sms
+[notifier via sms] your order has shipped
+sms</pre></div>
+
+  <ul>
+    <li><strong>No virtual dispatch.</strong> <code>Notifier.Send</code> calls <code>n.Describe()</code> where <code>n</code> is a <code>Notifier</code>. The inner type has no idea it's been embedded, so it never calls the outer type's <code>Describe</code>. In Java the overridden method would run.</li>
+    <li><strong>No "is-a".</strong> An <code>SMSNotifier</code> is not a <code>Notifier</code>; you can't assign one to the other. If you want "anything that can Send", that's an <em>interface</em> (next chapter).</li>
+    <li><strong>Shadowing, not overriding.</strong> A field or method on the outer struct simply hides the promoted one of the same name. The inner one is still there via <code>s.Notifier.Describe()</code>.</li>
+  </ul>
+
+  <div class="callout mental"><div class="callout-title">Mental model</div><p>Embedding is <strong>delegation with free forwarding</strong>. The outer struct <em>has a</em> Timestamps, and the compiler writes the boring forwarding methods for you. Think "has-a with shortcuts", never "is-a".</p></div>
+
+  <div class="callout warn"><div class="callout-title">Gotcha: embedding exports more than you think</div><p>Embedding a type promotes <em>all</em> its exported methods onto your type, so they become part of your public API. Embedding <code>sync.Mutex</code> in an exported struct means every caller can call <code>yourThing.Lock()</code>. Prefer a named, unexported field: <code>mu sync.Mutex</code>. Also, if two embedded types promote the same name at the same depth, using that name becomes an "ambiguous selector" compile error.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Struct tags and JSON (a preview)</h2>
+  <p>A <strong>struct tag</strong> is a string literal written after a field's type, in backticks. Tags do nothing by themselves. They're metadata that libraries read at runtime (via the <code>reflect</code> package) to decide how to treat each field. The most famous reader is <code>encoding/json</code>:</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+)
+
+type Address struct {
+	City    string `json:"city"`
+	ZipCode string `json:"zip_code"`
+}
+
+type Customer struct {
+	ID       int      `json:"id"`
+	Name     string   `json:"name"`
+	Email    string   `json:"email,omitempty"` // dropped when empty
+	Password string   `json:"-"`               // never serialized
+	Address  *Address `json:"address,omitempty"`
+	note     string   // unexported: json ignores it
+}
+
+func main() {
+	c := Customer{ID: 1, Name: "Asha", Password: "s3cret", note: "vip",
+		Address: &amp;Address{City: "Pune", ZipCode: "411001"}}
+
+	b, _ := json.Marshal(c)
+	fmt.Println(string(b))
+
+	b, _ = json.MarshalIndent(Customer{ID: 2, Name: "Ravi"}, "", "  ")
+	fmt.Println(string(b))
+
+	var back Customer
+	err := json.Unmarshal([]byte(`{"id":3,"name":"Meera","email":"m@x.in"}`), &amp;back)
+	fmt.Printf("%+v err=%v\n", back, err)
+
+	// Tags are just strings that libraries read via reflection.
+	f, _ := reflect.TypeOf(Customer{}).FieldByName("Email")
+	fmt.Println("tag:", f.Tag, "| json part:", f.Tag.Get("json"))
+}</code></pre></div>
+  <div class="output"><pre>{"id":1,"name":"Asha","address":{"city":"Pune","zip_code":"411001"}}
+{
+  "id": 2,
+  "name": "Ravi"
+}
+{ID:3 Name:Meera Email:m@x.in Password: Address:&lt;nil&gt; note:} err=&lt;nil&gt;
+tag: json:"email,omitempty" | json part: email,omitempty</pre></div>
+
+  <table>
+    <thead><tr><th>Tag</th><th>Effect in <code>encoding/json</code></th></tr></thead>
+    <tbody>
+      <tr><td><code>`json:"zip_code"`</code></td><td>Use this key name instead of the Go field name</td></tr>
+      <tr><td><code>`json:"email,omitempty"`</code></td><td>Skip the field when it's the zero value (empty string, 0, nil, empty slice/map)</td></tr>
+      <tr><td><code>`json:"-"`</code></td><td>Never encode or decode this field</td></tr>
+      <tr><td><code>`json:",string"`</code></td><td>Encode a number/bool as a JSON string (<code>"42"</code>)</td></tr>
+      <tr><td><code>`json:"id" db:"order_id" validate:"required"`</code></td><td>Multiple libraries, multiple keys, space-separated</td></tr>
+    </tbody>
+  </table>
+
+  <ul>
+    <li><strong>Only exported fields</strong> are seen by <code>encoding/json</code>. Our lower-case <code>note</code> was silently skipped. This trips everyone up once.</li>
+    <li>A <strong>pointer field</strong> (<code>*Address</code>) with <code>omitempty</code> disappears when nil; that's how you model an optional nested object.</li>
+    <li>When decoding, pass a <strong>pointer</strong> (<code>&amp;back</code>), otherwise <code>Unmarshal</code> would fill a copy.</li>
+  </ul>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>Keep your <strong>API shapes</strong> separate from your <strong>domain types</strong> once a service grows. A <code>CustomerResponse</code> struct with JSON tags for the wire, and a <code>Customer</code> domain struct for logic, means renaming a field internally never breaks your public API, and you can't accidentally leak a field like <code>PasswordHash</code>. The <code>json:"-"</code> tag is a seatbelt, not an architecture. Also run <code>go vet</code>: it catches malformed tags like <code>`json:name`</code> (missing quotes).</p></div>
+
+  <!-- ============================================================ -->
+  <h2>The shallow-copy trap: structs with slices and maps</h2>
+  <p>Assigning a struct copies it, field by field. But a slice field is only a small <strong>header</strong> (a pointer to a backing array, plus length and capacity), and a map field is a pointer to the map's internals. Copying the struct copies those <em>headers</em>, not the data they point to. Both copies end up sharing the same items.</p>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 640 250" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="640" height="250" rx="10" fill="#262624"/>
+      <defs><marker id="arr7b" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d97757"/></marker></defs>
+      <!-- original -->
+      <rect x="30" y="30" width="230" height="80" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="1.5"/>
+      <text x="44" y="52" fill="#ece9e1" font-size="14" font-weight="600">original</text>
+      <text x="44" y="74" fill="#a8a49a" font-size="12" font-family="JetBrains Mono, monospace">ID: 1</text>
+      <text x="44" y="96" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">Items: {ptr, len 2, cap 2}</text>
+      <!-- shallow -->
+      <rect x="30" y="140" width="230" height="80" rx="8" fill="#2e2d2a" stroke="#3a3936" stroke-width="1.5"/>
+      <text x="44" y="162" fill="#ece9e1" font-size="14" font-weight="600">shallow := original</text>
+      <text x="44" y="184" fill="#a8a49a" font-size="12" font-family="JetBrains Mono, monospace">ID: 2</text>
+      <text x="44" y="206" fill="#7fa6d9" font-size="12" font-family="JetBrains Mono, monospace">Items: {ptr, len 2, cap 2}</text>
+      <!-- backing array -->
+      <text x="390" y="100" fill="#a8a49a" font-size="12">shared backing array</text>
+      <rect x="390" y="110" width="110" height="44" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <rect x="500" y="110" width="110" height="44" fill="#2e2d2a" stroke="#d97757" stroke-width="1.5"/>
+      <text x="445" y="138" fill="#e0b45c" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">"PENCIL"</text>
+      <text x="555" y="138" fill="#ece9e1" font-size="13" text-anchor="middle" font-family="JetBrains Mono, monospace">"book"</text>
+      <path d="M232 92 C 320 92, 330 120, 386 126" stroke="#d97757" stroke-width="2" fill="none" marker-end="url(#arr7b)"/>
+      <path d="M232 202 C 320 202, 330 150, 386 140" stroke="#d97757" stroke-width="2" fill="none" marker-end="url(#arr7b)"/>
+      <text x="390" y="190" fill="#a8a49a" font-size="12">Writing shallow.Items[0] changes</text>
+      <text x="390" y="207" fill="#a8a49a" font-size="12">what original.Items[0] sees too.</text>
+    </svg>
+    <figcaption>Copying a struct copies the slice header (pointer, len, cap), so both structs point to the same backing array.</figcaption>
+  </figure>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+type Order struct {
+	ID    int
+	Items []string
+	Meta  map[string]string
+}
+
+// Clone makes a deep-enough copy: new backing array, new map.
+func (o Order) Clone() Order {
+	o.Items = slices.Clone(o.Items)
+	o.Meta = maps.Clone(o.Meta)
+	return o
+}
+
+func main() {
+	original := Order{
+		ID:    1,
+		Items: []string{"pen", "book"},
+		Meta:  map[string]string{"source": "web"},
+	}
+
+	shallow := original // copies the struct... but not what the slice/map point to
+	shallow.ID = 2
+	shallow.Items[0] = "PENCIL"
+	shallow.Meta["source"] = "app"
+
+	fmt.Println("original:", original.ID, original.Items, original.Meta)
+	fmt.Println("shallow: ", shallow.ID, shallow.Items, shallow.Meta)
+
+	deep := original.Clone()
+	deep.Items[0] = "eraser"
+	deep.Meta["source"] = "store"
+	fmt.Println("original:", original.Items, original.Meta)
+	fmt.Println("deep:    ", deep.Items, deep.Meta)
+}</code></pre></div>
+  <div class="output"><pre>original: 1 [PENCIL book] map[source:app]
+shallow:  2 [PENCIL book] map[source:app]
+original: [PENCIL book] map[source:app]
+deep:     [eraser book] map[source:store]</pre></div>
+
+  <div class="live" data-title="Shallow copy vs deep copy">
+    <pre><code class="language-go">original := Order{ID: 1, Items: []string{"pen", "book"}}
+shallow := original
+shallow.ID = 2
+shallow.Items[0] = "PENCIL"
+fmt.Println(original.ID, original.Items)
+fmt.Println(shallow.ID, shallow.Items)
+deep := original
+deep.Items = slices.Clone(original.Items)
+deep.Items[0] = "eraser"
+fmt.Println(original.Items, deep.Items)</code></pre>
+    <ol class="live-steps">
+      <li data-lines="1" data-state="original.ID=1; array A=[pen book]">We create an order. Its <code>Items</code> header points to backing array <strong>A</strong>.</li>
+      <li data-lines="2" data-state="original.ID=1; shallow.ID=1; both Items → A">Struct assignment copies every field. <code>ID</code> is copied as a number; <code>Items</code> is copied as a <em>header</em>, so it still points to A.</li>
+      <li data-lines="3" data-state="original.ID=1; shallow.ID=2; A=[pen book]">Changing <code>shallow.ID</code> only touches shallow. Numbers are truly independent.</li>
+      <li data-lines="4" data-state="original.ID=1; shallow.ID=2; A=[PENCIL book]">Writing <code>shallow.Items[0]</code> writes into array <strong>A</strong>, the one both structs share.</li>
+      <li data-lines="5-6" data-state="A=[PENCIL book]" data-out="1 [PENCIL book]\n2 [PENCIL book]">The IDs differ, but both see <code>PENCIL</code>. Surprise!</li>
+      <li data-lines="7-8" data-state="deep.Items → B=[PENCIL book]; original.Items → A"><code>slices.Clone</code> allocates a fresh array <strong>B</strong> and copies the elements. Now <code>deep</code> owns its own data.</li>
+      <li data-lines="9-10" data-state="A=[PENCIL book]; B=[eraser book]" data-out="[PENCIL book] [eraser book]">Changing B leaves A alone. That's a real (deep-enough) copy.</li>
+    </ol>
+  </div>
+
+  <div class="callout senior"><div class="callout-title">Senior engineer tip</div><p>This bug shows up in production as "a cache entry changed by itself" or "two requests see each other's data". If your type holds slices or maps and is handed out from a cache, a config store, or across goroutines, give it a <code>Clone()</code> method and copy <strong>defensively at the boundary</strong>: clone what you receive in a constructor, and clone what you return from a getter. <code>slices.Clone</code> and <code>maps.Clone</code> are shallow on the <em>elements</em>, so if elements are themselves pointers or slices, clone one level deeper.</p></div>
+
+  <div class="quiz" data-answer="1">
+    <div class="quiz-q"><code>a := Customer{Tags: []string{"vip"}}</code>, then <code>b := a; b.Tags = append(b.Tags, "new"); b.Tags[0] = "x"</code>. What is <code>a.Tags</code>?</div>
+    <div class="quiz-opts">
+      <button><code>[x]</code></button>
+      <button><code>[vip]</code></button>
+      <button><code>[x new]</code></button>
+    </div>
+    <div class="quiz-explain">The slice <code>[]string{"vip"}</code> has length 1 and capacity 1. Appending to <code>b.Tags</code> exceeds capacity, so <code>append</code> allocates a <em>new</em> array and copies <code>vip</code> into it. <code>b.Tags[0] = "x"</code> then writes into the new array, leaving <code>a.Tags</code> as <code>[vip]</code>. Whether two copies share data can depend on capacity, which is exactly why relying on it is dangerous. Clone explicitly.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Memory layout: alignment and padding</h2>
+  <p>This one is an advanced detail, but it's cheap to understand. CPUs read memory fastest when a value sits at an address that's a multiple of its size: an 8-byte <code>float64</code> wants an address divisible by 8. This is called <strong>alignment</strong>. To keep every field aligned, the compiler inserts invisible filler bytes called <strong>padding</strong> between fields. Field <em>order</em> therefore changes a struct's size.</p>
+
+  <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"unsafe"
+)
+
+// Fields in a "bad" order: the compiler inserts padding.
+type Loose struct {
+	Paid   bool    // 1 byte + 7 bytes padding
+	Total  float64 // 8 bytes
+	Gift   bool    // 1 byte + 3 bytes padding
+	Qty    int32   // 4 bytes
+	Urgent bool    // 1 byte + 7 bytes padding
+}
+
+// Same fields, largest first.
+type Tight struct {
+	Total  float64 // 8
+	Qty    int32   // 4
+	Paid   bool    // 1
+	Gift   bool    // 1
+	Urgent bool    // 1 + 1 padding
+}
+
+func main() {
+	fmt.Println("Loose:", unsafe.Sizeof(Loose{}), "bytes")
+	fmt.Println("Tight:", unsafe.Sizeof(Tight{}), "bytes")
+	fmt.Println("offset of Loose.Total:", unsafe.Offsetof(Loose{}.Total))
+	fmt.Println("empty struct:", unsafe.Sizeof(struct{}{}), "bytes")
+}</code></pre></div>
+  <div class="output"><pre>Loose: 32 bytes
+Tight: 16 bytes
+offset of Loose.Total: 8
+empty struct: 0 bytes</pre></div>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 640 170" xmlns="http://www.w3.org/2000/svg" font-family="Inter, sans-serif">
+      <rect x="0" y="0" width="640" height="170" rx="10" fill="#262624"/>
+      <text x="20" y="34" fill="#ece9e1" font-size="13" font-weight="600">Loose (32 B)</text>
+      <g font-family="JetBrains Mono, monospace" font-size="10" text-anchor="middle">
+        <rect x="120" y="18" width="16" height="26" fill="#d97757"/><text x="128" y="58" fill="#a8a49a">Paid</text>
+        <rect x="136" y="18" width="112" height="26" fill="#2e2d2a" stroke="#3a3936"/><text x="192" y="35" fill="#a8a49a">pad 7</text>
+        <rect x="248" y="18" width="128" height="26" fill="#7fa6d9"/><text x="312" y="35" fill="#262624">Total 8</text>
+        <rect x="376" y="18" width="16" height="26" fill="#d97757"/><text x="384" y="58" fill="#a8a49a">Gift</text>
+        <rect x="392" y="18" width="48" height="26" fill="#2e2d2a" stroke="#3a3936"/><text x="416" y="35" fill="#a8a49a">pad3</text>
+        <rect x="440" y="18" width="64" height="26" fill="#8fbf7f"/><text x="472" y="35" fill="#262624">Qty 4</text>
+        <rect x="504" y="18" width="16" height="26" fill="#d97757"/><text x="512" y="58" fill="#a8a49a">Urg</text>
+        <rect x="520" y="18" width="112" height="26" fill="#2e2d2a" stroke="#3a3936"/><text x="576" y="35" fill="#a8a49a">pad 7</text>
+      </g>
+      <text x="20" y="110" fill="#ece9e1" font-size="13" font-weight="600">Tight (16 B)</text>
+      <g font-family="JetBrains Mono, monospace" font-size="10" text-anchor="middle">
+        <rect x="120" y="94" width="128" height="26" fill="#7fa6d9"/><text x="184" y="111" fill="#262624">Total 8</text>
+        <rect x="248" y="94" width="64" height="26" fill="#8fbf7f"/><text x="280" y="111" fill="#262624">Qty 4</text>
+        <rect x="312" y="94" width="16" height="26" fill="#d97757"/>
+        <rect x="328" y="94" width="16" height="26" fill="#d97757"/>
+        <rect x="344" y="94" width="16" height="26" fill="#d97757"/><text x="336" y="134" fill="#a8a49a">3 bools</text>
+        <rect x="360" y="94" width="16" height="26" fill="#2e2d2a" stroke="#3a3936"/>
+      </g>
+      <text x="20" y="158" fill="#a8a49a" font-size="12">Each square = 1 byte. Grey boxes are padding the compiler inserts to keep fields aligned.</text>
+    </svg>
+    <figcaption>Same five fields, half the memory, just by ordering them largest-first.</figcaption>
+  </figure>
+
+  <ul>
+    <li>Rule of thumb: <strong>order fields from largest to smallest</strong> alignment (8-byte types, then 4, 2, 1) to minimise padding.</li>
+    <li>The <strong>empty struct</strong> <code>struct{}</code> takes zero bytes. That's why <code>map[string]struct{}</code> is the idiomatic "set" and <code>chan struct{}</code> is the idiomatic "signal".</li>
+    <li>The <code>fieldalignment</code> analyser (from <code>golang.org/x/tools</code>) can report structs that would shrink if reordered.</li>
+  </ul>
+
+  <div class="callout tip"><p>Only optimise layout for structs you hold <em>millions</em> of (in-memory caches, big slices of records). For an ordinary <code>Order</code> type, readability wins: group fields by meaning, not by size.</p></div>
+
+  <!-- ============================================================ -->
+  <h2>Putting it together &amp; practice</h2>
+  <p>Here's the checklist a senior Gopher runs through when designing a new struct type:</p>
+  <ol>
+    <li><strong>Is the zero value useful?</strong> If yes, maybe you don't need a constructor at all.</li>
+    <li><strong>Are there invariants?</strong> If yes, unexport the fields and expose methods; add <code>New...</code> returning an error.</li>
+    <li><strong>Value or pointer semantics?</strong> Decide once and make every method's receiver match.</li>
+    <li><strong>Does it hold slices/maps?</strong> Decide who owns them; add <code>Clone()</code> if it crosses boundaries.</li>
+    <li><strong>Many optional settings?</strong> Config struct, or functional options for public APIs.</li>
+    <li><strong>Need shared behaviour?</strong> Embed small pieces (<code>Timestamps</code>) for data and helpers; reach for interfaces for polymorphism.</li>
+  </ol>
+
+  <div class="compare">
+    <div class="bad"><div class="code" data-file="✗ Avoid"><pre><code class="language-go">type Order struct {
+	sync.Mutex             // exported Lock/Unlock leak into the API
+	Items []string
+}
+
+// mixed receivers: Count copies the mutex (vet: "passes lock by value")
+func (o Order) Count() int { return len(o.Items) }
+func (o *Order) Add(s string) {
+	o.Lock()
+	defer o.Unlock()
+	o.Items = append(o.Items, s)
+}
+
+o := Order{sync.Mutex{}, []string{}} // positional, fragile</code></pre></div></div>
+    <div class="good"><div class="code" data-file="✓ Prefer"><pre><code class="language-go">type Order struct {
+	mu    sync.Mutex // unexported, named
+	items []string
+}
+
+// consistent pointer receivers
+func (o *Order) Count() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.items)
+}
+func (o *Order) Add(s string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.items = append(o.items, s)
+}
+
+var o Order // zero value is ready</code></pre></div></div>
+  </div>
+
+  <details class="exercise">
+    <summary>Exercise 1: An order with line items</summary>
+    <p>Define <code>LineItem</code> (SKU, Price, Qty) and an <code>Order</code> holding a slice of them. Add <code>AddItem(sku, price, qty)</code> and <code>Total()</code> methods. Make the zero-value <code>Order</code> usable without a constructor. Which receiver kind should each method use?</p>
+    <div class="solution-label">Solution</div>
+    <div class="live" data-title="Pointer receivers that build an order">
+    <pre><code class="language-go">package main
+
+import "fmt"
+
+type LineItem struct {
+	SKU   string
+	Price float64
+	Qty   int
+}
+
+type Order struct {
+	ID    int
+	Items []LineItem
+}
+
+// AddItem changes the order, so it needs a pointer receiver.
+func (o *Order) AddItem(sku string, price float64, qty int) {
+	o.Items = append(o.Items, LineItem{SKU: sku, Price: price, Qty: qty})
+}
+
+// Total only reads. A value receiver would work, but we keep
+// the receivers consistent: Order has a pointer method, so all are pointers.
+func (o *Order) Total() float64 {
+	sum := 0.0
+	for _, it := range o.Items {
+		sum += it.Price * float64(it.Qty)
+	}
+	return sum
+}
+
+func main() {
+	var o Order // zero value is a valid empty order
+	o.AddItem("KB-01", 2499, 1)
+	o.AddItem("CABLE", 199, 3)
+	fmt.Printf("%d items, total ₹%.2f\n", len(o.Items), o.Total())
+}</code></pre>
+    <ol class="live-steps">
+      <li data-lines="32" data-state="o.ID=0; o.Items=nil; len=0">The zero <code>Order</code> is a valid empty order: <code>Items</code> is nil, which <code>append</code> and <code>range</code> handle fine.</li>
+      <li data-lines="33,17-18" data-state="o.Items=[{KB-01 2499 1}]; len=1"><code>AddItem</code> has a pointer receiver, so Go passes <code>&amp;o</code>. The append result is assigned back to <code>o.Items</code> on the <em>real</em> order.</li>
+      <li data-lines="34,17-18" data-state="o.Items=[{KB-01 2499 1} {CABLE 199 3}]; len=2">Second item added. If <code>AddItem</code> had a value receiver, both appends would be lost.</li>
+      <li data-lines="35,23-24" data-state="len=2; sum=0">The <code>Printf</code> evaluates <code>o.Total()</code>. It starts with <code>sum := 0.0</code>.</li>
+      <li data-lines="25-26" data-state="it={KB-01 2499 1}; sum=2499">Iteration 1: 2499 × 1.</li>
+      <li data-lines="25-26" data-state="it={CABLE 199 3}; sum=3096">Iteration 2: 199 × 3 = 597, running total 3096.</li>
+      <li data-lines="28,35" data-state="len(o.Items)=2; Total()=3096" data-out="2 items, total ₹3096.00"><code>Total</code> returns, and <code>Printf</code> formats it with two decimals.</li>
+    </ol>
+  </div>
+    <div class="output"><pre>2 items, total ₹3096.00</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 2: Functional options for Customer</summary>
+    <p>Write <code>NewCustomer(name string, opts ...CustomerOption) *Customer</code> with options <code>WithPhone</code>, <code>WithAddress(city, zip)</code> and <code>WithTier</code>. The default tier should be <code>"standard"</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import "fmt"
+
+type Address struct{ City, ZipCode string }
+
+type Customer struct {
+	Name    string
+	Phone   string
+	Address Address
+	Tier    string
+}
+
+type CustomerOption func(*Customer)
+
+func WithPhone(p string) CustomerOption { return func(c *Customer) { c.Phone = p } }
+
+func WithAddress(city, zip string) CustomerOption {
+	return func(c *Customer) { c.Address = Address{City: city, ZipCode: zip} }
+}
+
+func WithTier(t string) CustomerOption { return func(c *Customer) { c.Tier = t } }
+
+func NewCustomer(name string, opts ...CustomerOption) *Customer {
+	c := &amp;Customer{Name: name, Tier: "standard"}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+func main() {
+	fmt.Printf("%+v\n", *NewCustomer("Asha"))
+	fmt.Printf("%+v\n", *NewCustomer("Ravi", WithPhone("+91-90000"), WithAddress("Pune", "411001"), WithTier("gold")))
+}</code></pre></div>
+    <div class="output"><pre>{Name:Asha Phone: Address:{City: ZipCode:} Tier:standard}
+{Name:Ravi Phone:+91-90000 Address:{City:Pune ZipCode:411001} Tier:gold}</pre></div>
+  </details>
+
+  <details class="exercise">
+    <summary>Exercise 3: Make copies safe</summary>
+    <p>A <code>Customer</code> has <code>Tags []string</code> and <code>Prefs map[string]bool</code>. Write a <code>Clone()</code> method so that changing the clone's tags or prefs never affects the original. Prove it in <code>main</code>.</p>
+    <div class="solution-label">Solution</div>
+    <div class="code" data-file="main.go"><pre><code class="language-go">package main
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
+
+type Customer struct {
+	Name  string
+	Tags  []string
+	Prefs map[string]bool
+}
+
+func (c Customer) Clone() Customer {
+	c.Tags = slices.Clone(c.Tags)
+	c.Prefs = maps.Clone(c.Prefs)
+	return c
+}
+
+func main() {
+	a := Customer{Name: "Asha", Tags: []string{"vip"}, Prefs: map[string]bool{"sms": true}}
+	b := a.Clone()
+	b.Tags[0] = "new"
+	b.Prefs["sms"] = false
+	fmt.Println(a.Tags, a.Prefs)
+	fmt.Println(b.Tags, b.Prefs)
+}</code></pre></div>
+    <div class="output"><pre>[vip] map[sms:true]
+[new] map[sms:false]</pre></div>
+    <p>Note the trick: a <strong>value receiver</strong> already gives us a copy of the struct, so we only need to replace the reference-type fields before returning it.</p>
+  </details>
+
+  <div class="takeaways">
+    <h3>Key takeaways</h3>
+    <ul>
+      <li>A struct groups named fields into one type. Use named-field literals; design types so the <strong>zero value is useful</strong>.</li>
+      <li>Structs are comparable with <code>==</code> (and usable as map keys) only if all their fields are comparable.</li>
+      <li>Go passes <strong>everything by value</strong>. A pointer (<code>&amp;x</code>, <code>*p</code>) lets you share and mutate one value instead of a copy. Nil pointers panic when dereferenced.</li>
+      <li>Methods are functions with a receiver. <strong>Pointer receivers</strong> mutate and avoid copies; <strong>value receivers</strong> suit small immutable types. Keep receivers consistent per type.</li>
+      <li>Method sets: <code>T</code> has only value methods; <code>*T</code> has both. That's why a value with pointer methods can't be stored in an interface that needs them.</li>
+      <li><code>NewX</code> constructors validate and set defaults; functional options give extensible, readable optional config.</li>
+      <li>Capital letter = exported. Hide fields behind methods to protect invariants; the boundary is the package.</li>
+      <li>Embedding promotes fields and methods (composition with shortcuts). It is <em>not</em> inheritance: no virtual dispatch, no is-a.</li>
+      <li>Struct tags are metadata for libraries like <code>encoding/json</code>; only exported fields are serialised.</li>
+      <li>Copying a struct copies slice/map <em>headers</em>, not their data. Clone at boundaries. Order big-to-small to reduce padding when memory matters.</li>
+    </ul>
+  </div>
+
+</article>
+</body>
+</html>
